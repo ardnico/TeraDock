@@ -1,0 +1,52 @@
+[[profiles]]
+id = "dev-api"
+name = "Dev API"
+host = "dev.example.com"
+port = 22
+protocol = "ssh"
+user = "developer"
+group = "dev"
+tags = ["ssh", "api", "dev"]
+danger_level = "normal"
+color = "#4caf50"
+description = "Development API server for internal testing."
+
+[[profiles]]
+id = "stg-batch"
+name = "Staging Batch"
+host = "stg-batch.internal"
+port = 2222
+protocol = "ssh"
+user = "deploy"
+group = "stg"
+tags = ["ssh", "batch"]
+danger_level = "warn"
+color = "#ffc107"
+description = "Staging batch worker; confirm before running macros."
+macro_path = "C:/scripts/stg_bootstrap.ttl"
+
+[[profiles]]
+id = "prod-gateway"
+name = "Production Gateway"
+host = "prod-gateway.internal"
+port = 22
+protocol = "ssh"
+user = "op"
+group = "prod"
+tags = ["ssh", "prod"]
+danger_level = "critical"
+color = "#f44336"
+description = "Primary production gateway; requires confirmation before connecting."
+
+[[profiles]]
+id = "telnet-lab"
+name = "Lab Telnet"
+host = "10.0.0.42"
+port = 23
+protocol = "telnet"
+user = "lab"
+group = "lab"
+tags = ["telnet", "lab"]
+danger_level = "normal"
+color = "#2196f3"
+description = "Legacy telnet device in lab network."
