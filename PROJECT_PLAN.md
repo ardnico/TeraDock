@@ -219,6 +219,15 @@ struct Profile {
 }
 ```
 
+付帯する enum / 型:
+
+```rust
+enum Protocol { Ssh, Telnet }
+enum DangerLevel { Normal, Warn, Critical }
+
+struct WindowColor { r: u8, g: u8, b: u8 }
+```
+
 ### 6.2 Config
 
 ```rust
@@ -227,6 +236,38 @@ struct AppConfig {
     profiles_path: PathBuf,
     logs_path: PathBuf,
     ui: UiConfig,
+}
+```
+
+補助構造体:
+
+```rust
+struct UiConfig {
+    theme: UiTheme,                 // Light/Dark/System
+    require_force_for_prod: bool,   // prod 接続時の強制確認
+    recent_limit: usize,            // 最近使った接続の保持件数
+}
+
+struct HistoryEntry {
+    profile_id: String,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    result: ConnectResult,          // Success/Failed + エラー理由
+    command: Vec<String>,           // 実行した完全な引数リスト
+    log_path: PathBuf,              // 生成されたログファイルパス
+}
+```
+
+### 6.3 コマンド生成結果
+
+`core` は実行前に副作用無しでコマンドを構築し、GUI/CLI に渡す。戻り値の想定:
+
+```rust
+struct LaunchCommand {
+    program: PathBuf,          // ttermpro.exe のパス
+    args: Vec<OsString>,       // /ssh host:22 ... などの引数
+    log_path: PathBuf,         // 実行後に生成されるログパス（core が事前に決定）
+    needs_confirmation: bool,  // 危険接続なら true
 }
 ```
 
@@ -355,6 +396,10 @@ macro = "macros/init.ttl"
 danger = false          # true のとき接続前ダイアログ表示
 note = "用途や注意事項を自由記述"
 
+[[profiles.extra_shortcuts]]
+label = "Jump to bastion"
+args = ["/ssh", "bastion:22"]
+
 [profiles.hooks]
 pre = ["scripts/pre.bat"]
 post = ["scripts/post.bat"]
@@ -369,6 +414,8 @@ extra_args = ["/ssh"]
 - 既定値: `%APPDATA%/TeraTermLauncher/profiles.toml`。無ければ `config/default_profiles.toml` を初回コピー。
 - CLI 引数 `--config <path>` で上書き可能。GUI からも設定ダイアログで変更し、次回起動時に反映。
 - `config/settings.toml` にアプリ共通設定（Tera Term パス、ログディレクトリ、テーマなど）を保存。
+- プロファイルと設定の schema バージョンを `version = 1` で明示し、後方互換性のために migration 関数を `core::config::migrate(v: u32)` に用意。
+- ファイル監視は行わず、起動時読み込み + 保存時上書きの単純モデルにする。
 
 ### 8.3 コマンドライン生成規約
 
@@ -376,12 +423,38 @@ extra_args = ["/ssh"]
   - 例: `ttermpro.exe /ssh host:22 /user="deploy" /log="<path>" /MACRO="macros/init.ttl"`
 - 引数生成は副作用なし。実行は `cli`/`gui` 側で `std::process::Command` に渡す。
 - ログファイルは `logs/YYYYMMDD/HHMMSS_profileid.log` 形式で作成し、パスは `core` が返す構造体に含める。
+- 生成規則:
+  - `protocol == ssh` の場合 `/ssh host:port` を必須。`telnet` の場合 `/telnet host:port`。
+  - `user` がある場合 `/user="<user>"` を付与。
+  - `macro_path` がある場合 `/MACRO="<path>"` を最後尾に追加。
+  - `extra_shortcuts.args` が指定されている場合、GUI のボタンから同じ組み立て処理を再利用する。
+  - 危険接続 (`danger_level == Critical`) は `/W="[PROD] <title>"` のようにウィンドウタイトルに接頭辞を付ける。
 
 ### 8.4 安全装置の基本仕様
 
 - `danger = true` または `group = "prod"` の場合、GUI/CLI 両方で確認ダイアログまたは `--force` 要求。
 - 確認内容: プロファイル名/host/ユーザー/マクロ有無を表示し、「はい」でのみ実行。
 - 実行履歴は `logs/history.jsonl` に JSON Lines 形式で追記し、GUI で参照可能にする。
+- 履歴 UI: `gui` で「最近の接続」タブを用意し、`HistoryEntry` を時系列で表示。失敗時は赤色で理由を表示。
+- CLI では `ttlaunch history --limit 20` で最新イベントを表示（MVP では JSONL をそのまま整形）。
+- `--force` を指定した場合は履歴に `forced=true` を記録しておく。
+
+### 8.5 GUI の最小仕様
+
+- 画面構成: 左に検索 + フィルタ、右に詳細 + 接続ボタンの 2 カラム。
+- ショートカットキー: `Ctrl+F` 検索フォーカス、`Enter` で選択接続、`Ctrl+E` で編集ダイアログ。
+- 危険接続時は接続ボタンを赤色にし、ダイアログで 3 秒遅延後に「実行」ボタンを活性化する。
+- プロファイル編集はモーダルで、必須項目未入力時は保存ボタンを無効化。
+- 設定ダイアログで Tera Term パスを検証し、存在しない場合はエラー表示。
+
+### 8.6 CLI インターフェース（詳細）
+
+- コマンド:
+  - `ttlaunch list [--json]` : プロファイル ID, 名前, 危険度, 最終使用時刻を表示。`--json` で JSON 出力。
+  - `ttlaunch connect <profile-id> [--force] [--dry-run]` : コマンド生成のみ/実行。`--dry-run` でコマンドだけ表示。
+  - `ttlaunch history [--limit N]` : 最新 N 件を表示。デフォルト 20。
+- exit code 規約: 実行成功 0, プロファイル不存在 2, コマンド実行失敗 3, 入力エラー 64。
+- CLI は `core` に依存するのみで、設定ファイルの書き換えは行わない（編集は GUI 専用）。
 
 ---
 
@@ -399,12 +472,27 @@ extra_args = ["/ssh"]
 - CLI は `cargo test -p cli -- --ignored` で E2E 風の統合テストを作成し、Windows 環境でのみ動くテストは `#[cfg(windows)]` でガード。
 - GUI はスモークテストとして起動・終了のテストを最小限に置く。UI 動作はマニュアル検証手順を `docs/validation.md` に残す。
 
-### 9.3 ビルド / 配布フロー
+### 9.3 手動検証シナリオ
+
+1. `config/default_profiles.toml` をコピーしたクリーン環境で GUI を起動し、デフォルトプロファイルで接続（`--dry-run` ログ確認のみでも可）。
+2. 危険フラグ付きプロファイルで接続し、確認ダイアログ・赤色ボタン・3 秒遅延が機能することを確認。
+3. プロファイル編集で `host` を変更→保存→再起動後も反映されることを確認。
+4. CLI `ttlaunch list --json` が JSON を返し、`connect --dry-run` が実行せずにコマンドを表示することを確認。
+5. 履歴タブで直近の接続が新しい順に表示されること、失敗時のメッセージが赤で表示されることを確認。
+
+### 9.4 ビルド / 配布フロー
 
 1. `cargo build --release` で `target/release/ttlaunch-{cli,gui}.exe` を生成。
 2. `dist/` に成果物と `config/default_profiles.toml` をコピー。
 3. `installer/setup.iss` を Inno Setup CLI でビルドし、`dist/setup.exe` を得る。
 4. クリーンな Windows VM でインストール→接続確認を行い、ログ・設定の書き込みを検証。
+
+### 9.5 リリース判定基準
+
+- P0 機能すべてが GUI/CLI から操作可能で、危険接続の安全装置が動作していること。
+- `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test` が Windows 環境で通ること。
+- 手動検証シナリオ 5 点が Windows 10/11 で再現済みであることを `docs/validation.md` に記録。
+- インストーラーでのクリーンインストール→アンインストールが警告なしで完了すること。
 
 ---
 
