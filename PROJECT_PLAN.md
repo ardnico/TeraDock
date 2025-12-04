@@ -332,7 +332,83 @@ struct AppConfig {
 
 ---
 
-## 8. リスク / 前提条件 / 対策
+## 8. プロファイル仕様と設定ファイル
+
+### 8.1 プロファイルの TOML フォーマット
+
+`config/profiles.toml` に保存する。すべてのフィールドを明示し、GUI/CLI で同じ構造を読み書きする。
+
+```toml
+version = 1
+
+[[profiles]]
+id = "dev1"
+name = "Dev Server 1"
+host = "192.168.1.10"
+port = 22
+protocol = "ssh"       # ssh | telnet
+user = "deploy"
+group = "dev"
+tags = ["team-a", "app"]
+color = "#3b82f6"      # GUI ラベル用
+macro = "macros/init.ttl"
+danger = false          # true のとき接続前ダイアログ表示
+note = "用途や注意事項を自由記述"
+
+[profiles.hooks]
+pre = ["scripts/pre.bat"]
+post = ["scripts/post.bat"]
+
+[profiles.tera_term]
+path = "C:/Program Files/Tera Term/ttermpro.exe"
+extra_args = ["/ssh"]
+```
+
+### 8.2 設定ファイルのパスと扱い
+
+- 既定値: `%APPDATA%/TeraTermLauncher/profiles.toml`。無ければ `config/default_profiles.toml` を初回コピー。
+- CLI 引数 `--config <path>` で上書き可能。GUI からも設定ダイアログで変更し、次回起動時に反映。
+- `config/settings.toml` にアプリ共通設定（Tera Term パス、ログディレクトリ、テーマなど）を保存。
+
+### 8.3 コマンドライン生成規約
+
+- `core` はプロファイルと Tera Term のパスから **完全な引数リスト**を返す関数を提供する。
+  - 例: `ttermpro.exe /ssh host:22 /user="deploy" /log="<path>" /MACRO="macros/init.ttl"`
+- 引数生成は副作用なし。実行は `cli`/`gui` 側で `std::process::Command` に渡す。
+- ログファイルは `logs/YYYYMMDD/HHMMSS_profileid.log` 形式で作成し、パスは `core` が返す構造体に含める。
+
+### 8.4 安全装置の基本仕様
+
+- `danger = true` または `group = "prod"` の場合、GUI/CLI 両方で確認ダイアログまたは `--force` 要求。
+- 確認内容: プロファイル名/host/ユーザー/マクロ有無を表示し、「はい」でのみ実行。
+- 実行履歴は `logs/history.jsonl` に JSON Lines 形式で追記し、GUI で参照可能にする。
+
+---
+
+## 9. 開発プロセス / テスト
+
+### 9.1 コーディング規約
+
+- Rust stable 1.8x をターゲット。`cargo fmt` / `cargo clippy -- -D warnings` を必須とする。
+- モジュールは crate 単位で分離し、共通ロジックは `crates/core` に集約。bin crate は薄く保つ。
+- エラーハンドリングは `anyhow::Result` + `thiserror` でドメインエラーを明示する。
+
+### 9.2 テストと検証
+
+- `crates/core` には TOML 読み書きとコマンド生成のユニットテストを用意。サンプルプロファイルを fixture として保持。
+- CLI は `cargo test -p cli -- --ignored` で E2E 風の統合テストを作成し、Windows 環境でのみ動くテストは `#[cfg(windows)]` でガード。
+- GUI はスモークテストとして起動・終了のテストを最小限に置く。UI 動作はマニュアル検証手順を `docs/validation.md` に残す。
+
+### 9.3 ビルド / 配布フロー
+
+1. `cargo build --release` で `target/release/ttlaunch-{cli,gui}.exe` を生成。
+2. `dist/` に成果物と `config/default_profiles.toml` をコピー。
+3. `installer/setup.iss` を Inno Setup CLI でビルドし、`dist/setup.exe` を得る。
+4. クリーンな Windows VM でインストール→接続確認を行い、ログ・設定の書き込みを検証。
+
+---
+
+## 10. リスク / 前提条件 / 対策
 
 * **Tera Term のパス検出が環境依存**
 
@@ -349,7 +425,7 @@ struct AppConfig {
 
 ---
 
-## 9. やらないことリスト（明示）
+## 11. やらないことリスト（明示）
 
 * クロスプラットフォーム（Linux/macOS）対応
 * 自動アップデータの実装
@@ -359,7 +435,7 @@ struct AppConfig {
 
 ---
 
-## 10. ざっくりロードマップ
+## 12. ざっくりロードマップ
 
 1. **v0.1 (MVP)**
 
