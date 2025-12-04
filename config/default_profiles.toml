@@ -9,6 +9,7 @@ group = "dev"
 tags = ["ssh", "api", "dev"]
 danger_level = "normal"
 color = "#4caf50"
+pinned = true
 description = "Development API server for internal testing."
 
 [[profiles]]
@@ -22,6 +23,7 @@ group = "stg"
 tags = ["ssh", "batch"]
 danger_level = "warn"
 color = "#ffc107"
+pinned = false
 description = "Staging batch worker; confirm before running macros."
 macro_path = "C:/scripts/stg_bootstrap.ttl"
 
@@ -36,6 +38,7 @@ group = "prod"
 tags = ["ssh", "prod"]
 danger_level = "critical"
 color = "#f44336"
+pinned = true
 description = "Primary production gateway; requires confirmation before connecting."
 
 [[profiles]]
@@ -49,4 +52,5 @@ group = "lab"
 tags = ["telnet", "lab"]
 danger_level = "normal"
 color = "#2196f3"
+pinned = false
 description = "Legacy telnet device in lab network."

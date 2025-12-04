@@ -51,6 +51,8 @@ pub struct Profile {
     #[serde(default)]
     pub danger_level: DangerLevel,
     #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
     pub macro_path: Option<PathBuf>,
     #[serde(default)]
     pub color: Option<String>,
@@ -108,5 +110,14 @@ impl ProfileSet {
             .find(|p| p.id == id)
             .cloned()
             .or_else(|| self.profiles.iter().find(|p| p.name == id).cloned())
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml = toml::to_string_pretty(self)?;
+        std::fs::write(path, toml)?;
+        Ok(())
     }
 }

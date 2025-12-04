@@ -13,6 +13,7 @@ Deliver a Windows-focused Tera Term launcher that wraps Tera Term command-line i
 - [x] (2025-05-08 01:10Z) Implemented core models/config/command builder/history with unit tests.
 - [x] (2025-05-08 01:40Z) Implemented CLI list/connect/history commands with danger confirmation and history writes.
 - [x] (2025-05-08 02:10Z) Implemented GUI launcher with search, detail pane, danger confirmation delay, settings editor, and history tab.
+- [x] (2025-05-08 03:30Z) Added pinned profile support, recency-aware sorting, and persisted pin toggles in GUI and CLI listings.
 - [ ] Validation by running cargo fmt, cargo clippy -- -D warnings, and cargo test.
 - [ ] Outcomes & retrospective updated after implementation.
 

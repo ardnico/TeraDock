@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32};
 use tracing_subscriber::EnvFilter;
 
@@ -10,7 +11,7 @@ use ttcore::{
     command::build_command,
     config::{AppConfig, AppPaths},
     history::{HistoryEntry, HistoryStore},
-    profile::Profile,
+    profile::{Profile, ProfileSet},
 };
 
 fn main() -> Result<()> {
@@ -24,6 +25,7 @@ fn main() -> Result<()> {
     let profiles = ttcore::profile::ProfileSet::load(&config.profiles_path)?.profiles;
     let history_store = HistoryStore::new(&config.history_path);
     let history = history_store.load(Some(200))?;
+    let last_seen = build_last_seen_map(&history);
 
     let options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -37,6 +39,7 @@ fn main() -> Result<()> {
                 config,
                 history_store,
                 history,
+                last_seen,
                 status: None,
                 error: None,
                 confirm: None,
@@ -78,10 +81,11 @@ enum Tab {
 struct LauncherApp {
     profiles: Vec<Profile>,
     filter: String,
-    selected: Option<usize>,
+    selected: Option<String>,
     config: AppConfig,
     history_store: HistoryStore,
     history: Vec<HistoryEntry>,
+    last_seen: HashMap<String, DateTime<Utc>>,
     status: Option<String>,
     error: Option<String>,
     confirm: Option<ConfirmState>,
@@ -92,8 +96,8 @@ struct LauncherApp {
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let filtered = self.filtered_profiles();
-        if let Some(idx) = self.selected {
-            if idx >= filtered.len() {
+        if let Some(selected_id) = self.selected.clone() {
+            if !filtered.iter().any(|p| p.id == selected_id) {
                 self.selected = None;
             }
         }
@@ -115,13 +119,17 @@ impl eframe::App for LauncherApp {
             .show(ctx, |ui| {
                 ui.heading("Profiles");
                 ui.separator();
-                for (idx, profile) in filtered.iter().enumerate() {
-                    let selected = self.selected == Some(idx);
+                for profile in filtered.iter() {
+                    let selected = self
+                        .selected
+                        .as_ref()
+                        .map(|id| id == &profile.id)
+                        .unwrap_or(false);
                     if ui
                         .selectable_label(selected, format!("{} ({})", profile.name, profile.id))
                         .clicked()
                     {
-                        self.selected = Some(idx);
+                        self.selected = Some(profile.id.clone());
                     }
                 }
             });
@@ -149,7 +157,7 @@ impl eframe::App for LauncherApp {
 
 impl LauncherApp {
     fn filtered_profiles(&self) -> Vec<Profile> {
-        if self.filter.trim().is_empty() {
+        let mut list: Vec<Profile> = if self.filter.trim().is_empty() {
             self.profiles.clone()
         } else {
             let filter = self.filter.clone();
@@ -158,7 +166,19 @@ impl LauncherApp {
                 .filter(|p| p.matches_filter(&filter))
                 .cloned()
                 .collect()
-        }
+        };
+        list.sort_by(|a, b| match b.pinned.cmp(&a.pinned) {
+            std::cmp::Ordering::Equal => {
+                let la = self.last_seen.get(&a.id);
+                let lb = self.last_seen.get(&b.id);
+                match lb.cmp(&la) {
+                    std::cmp::Ordering::Equal => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                    ord => ord,
+                }
+            }
+            ord => ord,
+        });
+        list
     }
 
     fn render_profiles_tab(
@@ -167,20 +187,45 @@ impl LauncherApp {
         ctx: &egui::Context,
         filtered: &[Profile],
     ) {
-        if let Some(idx) = self.selected {
-            if let Some(profile) = filtered.get(idx) {
+        if let Some(selected_id) = self.selected.clone() {
+            if let Some(profile) = filtered.iter().find(|p| p.id == selected_id) {
                 ui.heading(&profile.name);
                 ui.label(format!("Host: {}", profile.host));
                 if let Some(port) = profile.port {
                     ui.label(format!("Port: {}", port));
                 }
                 ui.label(format!("Protocol: {:?}", profile.protocol));
+                if let Some(ts) = self.last_seen.get(&profile.id) {
+                    ui.label(format!(
+                        "Last connected: {}",
+                        ts.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
+                    ));
+                }
                 if let Some(user) = &profile.user {
                     ui.label(format!("User: {}", user));
                 }
                 if let Some(group) = &profile.group {
                     ui.label(format!("Group: {}", group));
                 }
+                ui.horizontal(|ui| {
+                    ui.label("Pinned:");
+                    ui.colored_label(
+                        if profile.pinned {
+                            Color32::LIGHT_GREEN
+                        } else {
+                            Color32::GRAY
+                        },
+                        if profile.pinned { "yes" } else { "no" },
+                    );
+                    if ui
+                        .button(if profile.pinned { "Unpin" } else { "Pin" })
+                        .clicked()
+                    {
+                        if let Err(err) = self.update_pin(&profile.id, !profile.pinned) {
+                            self.error = Some(err.to_string());
+                        }
+                    }
+                });
                 if !profile.tags.is_empty() {
                     ui.label(format!("Tags: {}", profile.tags.join(", ")));
                 }
@@ -319,6 +364,7 @@ impl LauncherApp {
                 );
                 self.history_store.append(&entry)?;
                 self.history.insert(0, entry);
+                self.last_seen.insert(profile.id.clone(), Utc::now());
             }
             Err(err) => {
                 self.error = Some(err.to_string());
@@ -331,8 +377,40 @@ impl LauncherApp {
                 );
                 self.history_store.append(&entry)?;
                 self.history.insert(0, entry);
+                self.last_seen.insert(profile.id.clone(), Utc::now());
             }
         }
         Ok(())
     }
+
+    fn update_pin(&mut self, profile_id: &str, pinned: bool) -> Result<()> {
+        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.pinned = pinned;
+            self.save_profiles()?;
+            self.status = Some(if pinned { "Pinned" } else { "Unpinned" }.into());
+        }
+        Ok(())
+    }
+
+    fn save_profiles(&self) -> Result<()> {
+        let set = ProfileSet {
+            profiles: self.profiles.clone(),
+        };
+        set.save(&self.config.profiles_path)?;
+        Ok(())
+    }
+}
+
+fn build_last_seen_map(history: &[HistoryEntry]) -> HashMap<String, DateTime<Utc>> {
+    let mut map = HashMap::new();
+    for entry in history {
+        map.entry(entry.profile_id.clone())
+            .and_modify(|existing| {
+                if entry.timestamp > *existing {
+                    *existing = entry.timestamp;
+                }
+            })
+            .or_insert(entry.timestamp);
+    }
+    map
 }

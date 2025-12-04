@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::Command;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -75,22 +77,54 @@ fn load_profiles(config: &AppConfig) -> Result<ProfileSet> {
 
 fn list_profiles(config: &AppConfig, json: bool) -> Result<()> {
     let set = load_profiles(config)?;
+    let last_seen = build_last_seen_map(&HistoryStore::new(&config.history_path))?;
+    let mut profiles = set.profiles;
+    profiles.sort_by(|a, b| match b.pinned.cmp(&a.pinned) {
+        std::cmp::Ordering::Equal => {
+            let la = last_seen.get(&a.id);
+            let lb = last_seen.get(&b.id);
+            match lb.cmp(&la) {
+                std::cmp::Ordering::Equal => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                ord => ord,
+            }
+        }
+        ord => ord,
+    });
     if json {
-        let text = serde_json::to_string_pretty(&set.profiles)?;
+        let text = serde_json::to_string_pretty(&profiles)?;
         println!("{}", text);
     } else {
-        println!("ID\tName\tDanger\tLast User");
-        for p in set.profiles {
+        println!("ID\tName\tDanger\tPinned\tLast Connected");
+        for p in profiles {
+            let last = last_seen
+                .get(&p.id)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "-".to_string());
             println!(
-                "{}\t{}\t{:?}\t{}",
+                "{}\t{}\t{:?}\t{}\t{}",
                 p.id,
                 p.name,
                 p.danger_level,
-                p.user.unwrap_or_default()
+                if p.pinned { "yes" } else { "no" },
+                last
             );
         }
     }
     Ok(())
+}
+
+fn build_last_seen_map(store: &HistoryStore) -> Result<HashMap<String, DateTime<Utc>>> {
+    let mut map = HashMap::new();
+    for entry in store.load(None)? {
+        map.entry(entry.profile_id.clone())
+            .and_modify(|existing| {
+                if entry.timestamp > *existing {
+                    *existing = entry.timestamp;
+                }
+            })
+            .or_insert(entry.timestamp);
+    }
+    Ok(map)
 }
 
 fn connect(
