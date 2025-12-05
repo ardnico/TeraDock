@@ -783,6 +783,11 @@ impl LauncherApp {
             }
             idx += 1;
         }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
     }
 
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
