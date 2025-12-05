@@ -76,8 +76,7 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let toml_str =
-            toml::to_string_pretty(self).map_err(|e| Error::Validation(e.to_string()))?;
+        let toml_str = toml::to_string_pretty(self)?;
         let mut file = File::create(path)?;
         file.write_all(toml_str.as_bytes())?;
         Ok(())
