@@ -10,6 +10,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("TOML parse error: {0}")]
     Toml(#[from] toml::de::Error),
+    #[error("TOML serialization error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("Profile not found: {0}")]

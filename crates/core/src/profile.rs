@@ -100,7 +100,7 @@ impl ProfileSet {
             return Err(Error::MissingConfig(path.to_path_buf()));
         }
         let reader = BufReader::new(File::open(path)?);
-        let set: ProfileSet = toml::from_reader(reader)?;
+        let set: ProfileSet = toml::de::from_reader(reader)?;
         Ok(set)
     }
 

@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::error::{Error, Result};
 
 const DEFAULT_TERA_TERM_PATH: &str = "C:/Program Files (x86)/teraterm/ttermpro.exe";
-const DEFAULT_PROFILES: &str = include_str!("../../config/default_profiles.toml");
+const DEFAULT_PROFILES: &str = include_str!("../../../config/default_profiles.toml");
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -61,7 +61,7 @@ impl AppConfig {
         paths.ensure_base()?;
         if paths.settings_path.exists() {
             let reader = BufReader::new(File::open(&paths.settings_path)?);
-            let mut config: AppConfig = toml::from_reader(reader)?;
+            let mut config: AppConfig = toml::de::from_reader(reader)?;
             config.normalize(paths);
             Ok(config)
         } else {
@@ -76,8 +76,7 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let toml_str =
-            toml::to_string_pretty(self).map_err(|e| Error::Validation(e.to_string()))?;
+        let toml_str = toml::to_string_pretty(self)?;
         let mut file = File::create(path)?;
         file.write_all(toml_str.as_bytes())?;
         Ok(())
