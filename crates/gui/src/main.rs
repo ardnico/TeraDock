@@ -870,6 +870,99 @@ impl LauncherApp {
         }
     }
 
+    fn persist_form(&mut self) -> Result<Profile> {
+        let form = self
+            .edit_form
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if self
+            .profiles
+            .iter()
+            .any(|p| p.id == form.id && p.id != form.original_id)
+        {
+            return Err(anyhow!("Profile ID already exists"));
+        }
+        let idx = self
+            .profiles
+            .iter()
+            .position(|p| p.id == form.original_id)
+            .ok_or_else(|| anyhow!("Profile not found"))?;
+        let updated = form.apply_to_profile(&self.profiles[idx], &self.secret_store)?;
+        let old_id = self.profiles[idx].id.clone();
+        self.profiles[idx] = updated.clone();
+
+        if old_id != updated.id {
+            if let Some(ts) = self.last_seen.remove(&old_id) {
+                self.last_seen.insert(updated.id.clone(), ts);
+            }
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
+    }
+
+    fn add_profile(&mut self) -> Result<()> {
+        let id = self.generate_profile_id();
+        let profile = Profile {
+            id: id.clone(),
+            name: format!("Profile {}", id),
+            host: String::new(),
+            port: None,
+            protocol: Protocol::default(),
+            user: None,
+            group: None,
+            tags: Vec::new(),
+            danger_level: DangerLevel::default(),
+            pinned: false,
+            macro_path: None,
+            color: None,
+            description: None,
+            extra_args: None,
+            password: None,
+            ssh_forwardings: Vec::new(),
+        };
+        self.selected = Some(id.clone());
+        self.profiles.push(profile.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&profile, &self.secret_store)?);
+        Ok(())
+    }
+
+    fn delete_selected(&mut self) -> Result<()> {
+        let selected_id = self
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if let Some(pos) = self.profiles.iter().position(|p| p.id == selected_id) {
+            self.profiles.remove(pos);
+            self.last_seen.remove(&selected_id);
+            self.save_profiles()?;
+            self.selected = self.profiles.first().map(|p| p.id.clone());
+            self.edit_form = None;
+            self.sync_selected_form();
+            Ok(())
+        } else {
+            Err(anyhow!("Profile not found"))
+        }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
+    }
+
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Recent history");
         ui.separator();
