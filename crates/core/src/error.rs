@@ -20,4 +20,6 @@ pub enum Error {
     Validation(String),
     #[error("Configuration missing at {0}")]
     MissingConfig(PathBuf),
+    #[error("Crypto error: {0}")]
+    Crypto(String),
 }
