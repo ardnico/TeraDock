@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use ttcore::{
     command::build_command,
-    config::{AppConfig, AppPaths, ThemePreference},
+    config::{AppConfig, AppPaths, ForwardingPreset, SecretBackend, ThemePreference},
     history::{HistoryEntry, HistoryStore},
     profile::{DangerLevel, ForwardDirection, Profile, ProfileSet, Protocol, SshForwarding},
     secrets::SecretStore,
@@ -23,11 +23,16 @@ fn main() -> Result<()> {
 
     let paths = AppPaths::discover()?;
     let config = AppConfig::load_or_default(&paths)?;
-    let secret_store = SecretStore::new(&paths.secret_key_path)?;
+    let secret_store = SecretStore::new(&paths, &config.secrets)?;
     let profiles = ttcore::profile::ProfileSet::load(&config.profiles_path)?.profiles;
     let history_store = HistoryStore::new(&config.history_path);
     let history = history_store.load(Some(200))?;
     let last_seen = build_last_seen_map(&history);
+    let preset_forms: Vec<ForwardingPresetForm> = config
+        .forwarding_presets
+        .iter()
+        .map(ForwardingPresetForm::from_preset)
+        .collect();
 
     let options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -50,6 +55,8 @@ fn main() -> Result<()> {
                 edit_form: None,
                 secret_store,
                 active_tab: Tab::Profiles,
+                preset_forms,
+                selected_preset: None,
             })
         }),
     )
@@ -94,6 +101,13 @@ struct ForwardingForm {
 }
 
 #[derive(Clone)]
+struct ForwardingPresetForm {
+    name: String,
+    description: String,
+    rule: ForwardingForm,
+}
+
+#[derive(Clone)]
 struct ProfileForm {
     original_id: String,
     id: String,
@@ -119,7 +133,7 @@ impl ForwardingForm {
     fn from_forwarding(f: &SshForwarding) -> Self {
         Self {
             direction: f.direction.clone(),
-            local_host: f.local_host.clone().unwrap_or_default(),
+            local_host: f.local_host.clone().unwrap_or_else(|| "127.0.0.1".into()),
             local_port: if f.local_port == 0 {
                 String::new()
             } else {
@@ -163,6 +177,28 @@ impl ForwardingForm {
             local_port,
             remote_host: self.remote_host.trim().to_string(),
             remote_port,
+        })
+    }
+}
+
+impl ForwardingPresetForm {
+    fn from_preset(p: &ForwardingPreset) -> Self {
+        Self {
+            name: p.name.clone(),
+            description: p.description.clone().unwrap_or_default(),
+            rule: ForwardingForm::from_forwarding(&p.rule),
+        }
+    }
+
+    fn to_preset(&self) -> Result<ForwardingPreset> {
+        Ok(ForwardingPreset {
+            name: self.name.trim().to_string(),
+            description: if self.description.trim().is_empty() {
+                None
+            } else {
+                Some(self.description.trim().to_string())
+            },
+            rule: self.rule.to_forwarding()?,
         })
     }
 }
@@ -339,6 +375,8 @@ struct LauncherApp {
     tera_term_input: String,
     secret_store: SecretStore,
     active_tab: Tab,
+    preset_forms: Vec<ForwardingPresetForm>,
+    selected_preset: Option<usize>,
 }
 
 impl eframe::App for LauncherApp {
@@ -459,6 +497,19 @@ impl LauncherApp {
             FontId::proportional(self.config.ui.text_size * 1.2),
         );
         ctx.set_style(style);
+    }
+
+    fn refresh_secret_store(&mut self) {
+        match SecretStore::new(&self.paths, &self.config.secrets) {
+            Ok(store) => {
+                self.secret_store = store;
+                self.status = Some("Secret backend updated".into());
+                self.error = None;
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+            }
+        }
     }
 
     fn sync_selected_form(&mut self) {
@@ -592,6 +643,40 @@ impl LauncherApp {
 
             ui.separator();
             ui.heading("SSH forwarding");
+            if !self.preset_forms.is_empty() {
+                ui.horizontal(|ui| {
+                    let selected_label = self
+                        .selected_preset
+                        .and_then(|idx| self.preset_forms.get(idx))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Select preset".to_string());
+                    egui::ComboBox::from_label("Presets")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for (idx, preset) in self.preset_forms.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        self.selected_preset == Some(idx),
+                                        preset.name.clone(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_preset = Some(idx);
+                                }
+                            }
+                        });
+                    if ui.button("Apply preset").clicked() {
+                        if let Some(idx) = self.selected_preset {
+                            if let Some(preset) = self.preset_forms.get(idx) {
+                                if let Ok(rule) = preset.rule.to_forwarding() {
+                                    form.ssh_forwardings
+                                        .push(ForwardingForm::from_forwarding(&rule));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
             if form.ssh_forwardings.is_empty() {
                 ui.label("No forwarding rules");
             }
@@ -783,6 +868,94 @@ impl LauncherApp {
             }
             idx += 1;
         }
+    }
+
+    fn persist_form(&mut self) -> Result<Profile> {
+        let form = self
+            .edit_form
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if self
+            .profiles
+            .iter()
+            .any(|p| p.id == form.id && p.id != form.original_id)
+        {
+            return Err(anyhow!("Profile ID already exists"));
+        }
+        let idx = self
+            .profiles
+            .iter()
+            .position(|p| p.id == form.original_id)
+            .ok_or_else(|| anyhow!("Profile not found"))?;
+        let updated = form.apply_to_profile(&self.profiles[idx], &self.secret_store)?;
+        let old_id = self.profiles[idx].id.clone();
+        self.profiles[idx] = updated.clone();
+
+        if old_id != updated.id {
+            if let Some(ts) = self.last_seen.remove(&old_id) {
+                self.last_seen.insert(updated.id.clone(), ts);
+            }
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
+    }
+
+    fn add_profile(&mut self) -> Result<()> {
+        let id = self.generate_profile_id();
+        let profile = Profile {
+            id: id.clone(),
+            name: format!("Profile {}", id),
+            host: String::new(),
+            port: None,
+            protocol: Protocol::default(),
+            user: None,
+            group: None,
+            tags: Vec::new(),
+            danger_level: DangerLevel::default(),
+            pinned: false,
+            macro_path: None,
+            color: None,
+            description: None,
+            extra_args: None,
+            password: None,
+            ssh_forwardings: Vec::new(),
+        };
+        self.selected = Some(id.clone());
+        self.profiles.push(profile.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&profile, &self.secret_store)?);
+        Ok(())
+    }
+
+    fn delete_selected(&mut self) -> Result<()> {
+        let selected_id = self
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if let Some(pos) = self.profiles.iter().position(|p| p.id == selected_id) {
+            self.profiles.remove(pos);
+            self.last_seen.remove(&selected_id);
+            self.save_profiles()?;
+            self.selected = self.profiles.first().map(|p| p.id.clone());
+            self.edit_form = None;
+            self.sync_selected_form();
+            Ok(())
+        } else {
+            Err(anyhow!("Profile not found"))
+        }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
+        }
 
         self.save_profiles()?;
         self.selected = Some(updated.id.clone());
@@ -829,6 +1002,95 @@ impl LauncherApp {
         ui.text_edit_singleline(&mut self.tera_term_input);
         if !std::path::Path::new(&self.tera_term_input).exists() {
             ui.colored_label(Color32::YELLOW, "Path does not exist on this system");
+        }
+
+        ui.separator();
+        ui.heading("Secrets");
+        egui::ComboBox::from_label("Secret backend")
+            .selected_text(format!("{:?}", self.config.secrets.backend))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.config.secrets.backend,
+                    SecretBackend::FileKey,
+                    "Local file key",
+                );
+                ui.selectable_value(
+                    &mut self.config.secrets.backend,
+                    SecretBackend::WindowsCredentialManager,
+                    "Windows Credential Manager",
+                );
+                ui.selectable_value(
+                    &mut self.config.secrets.backend,
+                    SecretBackend::WindowsDpapi,
+                    "Windows DPAPI",
+                );
+            });
+        ui.label("Credential target / label");
+        ui.text_edit_singleline(&mut self.config.secrets.credential_target);
+
+        ui.separator();
+        ui.heading("Forwarding presets");
+        let mut remove_preset: Option<usize> = None;
+        for (idx, preset) in self.preset_forms.iter_mut().enumerate() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut preset.name);
+                    if ui.button("Remove").clicked() {
+                        remove_preset = Some(idx);
+                    }
+                });
+                ui.label("Description");
+                ui.text_edit_singleline(&mut preset.description);
+                ui.label("Rule");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_label("Direction")
+                        .selected_text(format!("{:?}", preset.rule.direction))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut preset.rule.direction,
+                                ForwardDirection::Local,
+                                "Local",
+                            );
+                            ui.selectable_value(
+                                &mut preset.rule.direction,
+                                ForwardDirection::Remote,
+                                "Remote",
+                            );
+                            ui.selectable_value(
+                                &mut preset.rule.direction,
+                                ForwardDirection::Dynamic,
+                                "Dynamic",
+                            );
+                        });
+                    ui.label("Local host");
+                    ui.text_edit_singleline(&mut preset.rule.local_host);
+                    ui.label("Local port");
+                    ui.text_edit_singleline(&mut preset.rule.local_port);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Remote host");
+                    ui.text_edit_singleline(&mut preset.rule.remote_host);
+                    ui.label("Remote port");
+                    ui.text_edit_singleline(&mut preset.rule.remote_port);
+                });
+            });
+        }
+        if let Some(idx) = remove_preset {
+            self.preset_forms.remove(idx);
+        }
+        if ui.button("Add preset").clicked() {
+            self.preset_forms.push(ForwardingPresetForm {
+                name: format!("preset-{}", self.preset_forms.len() + 1),
+                description: String::new(),
+                rule: ForwardingForm {
+                    direction: ForwardDirection::Local,
+                    local_host: "127.0.0.1".into(),
+                    local_port: String::new(),
+                    remote_host: String::new(),
+                    remote_port: String::new(),
+                },
+            });
         }
 
         ui.separator();
@@ -887,10 +1149,24 @@ impl LauncherApp {
 
         if ui.button("Save settings").clicked() {
             self.config.tera_term_path = std::path::PathBuf::from(self.tera_term_input.trim());
-            if let Err(err) = self.config.save(&self.paths.settings_path) {
-                self.error = Some(err.to_string());
-            } else {
-                self.status = Some("Settings saved".into());
+            match self
+                .preset_forms
+                .iter()
+                .map(ForwardingPresetForm::to_preset)
+                .collect::<Result<Vec<_>>>()
+            {
+                Ok(presets) => {
+                    self.config.forwarding_presets = presets;
+                    if let Err(err) = self.config.save(&self.paths.settings_path) {
+                        self.error = Some(err.to_string());
+                    } else {
+                        self.status = Some("Settings saved".into());
+                        self.refresh_secret_store();
+                    }
+                }
+                Err(err) => {
+                    self.error = Some(err.to_string());
+                }
             }
         }
         ui.separator();

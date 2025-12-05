@@ -16,3 +16,4 @@ parking_lot = { workspace = true }
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
+windows = { workspace = true }

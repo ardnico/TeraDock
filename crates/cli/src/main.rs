@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::discover()?;
     let config = AppConfig::load_or_default(&paths)?;
-    let secret_store = SecretStore::new(&paths.secret_key_path)?;
+    let secret_store = SecretStore::new(&paths, &config.secrets)?;
     let history = HistoryStore::new(&config.history_path);
 
     match cli.command {

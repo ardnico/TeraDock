@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::error::{Error, Result};
+use crate::profile::SshForwarding;
 
 const DEFAULT_TERA_TERM_PATH: &str = "C:/Program Files (x86)/teraterm/ttermpro.exe";
 const DEFAULT_PROFILES: &str = include_str!("../../../config/default_profiles.toml");
@@ -59,6 +60,10 @@ pub struct AppConfig {
     pub history_path: PathBuf,
     #[serde(default)]
     pub ui: UiPreferences,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub forwarding_presets: Vec<ForwardingPreset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +168,9 @@ impl AppConfig {
         if self.ui.font_family.trim().is_empty() {
             self.ui.font_family = UiPreferences::default_font_family();
         }
+        if self.secrets.credential_target.trim().is_empty() {
+            self.secrets.credential_target = SecretsConfig::default_target();
+        }
     }
 
     fn default_for(paths: &AppPaths) -> Self {
@@ -174,6 +182,8 @@ impl AppConfig {
             profiles_path,
             history_path,
             ui: UiPreferences::default(),
+            secrets: SecretsConfig::default(),
+            forwarding_presets: Vec::new(),
         }
     }
 
@@ -187,14 +197,69 @@ impl AppConfig {
 
     pub fn describe(&self) -> String {
         format!(
-            "Tera Term: {}\nProfiles: {}\nHistory: {}",
+            "Tera Term: {}\nProfiles: {}\nHistory: {}\nSecret backend: {:?}",
             self.tera_term_path.display(),
             self.profiles_path.display(),
-            self.history_path.display()
+            self.history_path.display(),
+            self.secrets.backend
         )
     }
 }
 
 pub fn log_paths(config: &AppConfig) {
     debug!("Using config: {}", config.describe());
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    #[serde(default = "SecretsConfig::default_backend")]
+    pub backend: SecretBackend,
+    #[serde(default = "SecretsConfig::default_target")]
+    pub credential_target: String,
+}
+
+impl SecretsConfig {
+    fn default_target() -> String {
+        "TeraDock/ttlaunch".to_string()
+    }
+
+    fn default_backend() -> SecretBackend {
+        SecretBackend::FileKey
+    }
+}
+
+impl Default for SecretsConfig {
+    fn default() -> Self {
+        Self {
+            backend: Self::default_backend(),
+            credential_target: Self::default_target(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretBackend {
+    FileKey,
+    WindowsCredentialManager,
+    WindowsDpapi,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardingPreset {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub rule: SshForwarding,
+}
+
+impl Default for ForwardingPreset {
+    fn default() -> Self {
+        Self {
+            name: "default".into(),
+            description: None,
+            rule: SshForwarding::default(),
+        }
+    }
 }

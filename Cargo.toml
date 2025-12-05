@@ -28,3 +28,4 @@ parking_lot = "0.12"
 aes-gcm = { version = "0.10", features = ["aes"] }
 base64 = "0.22"
 rand = "0.8"
+windows = { version = "0.54", features = ["Win32.Security.Cryptography", "Win32.Security.Credentials", "Win32.System.Memory", "Win32.Foundation"] }
