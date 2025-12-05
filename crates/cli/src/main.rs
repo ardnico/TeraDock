@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::Command;
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -12,7 +11,7 @@ use ttcore::{
     config::{AppConfig, AppPaths},
     history::{format_history_entry, HistoryEntry, HistoryStore},
     profile::ProfileSet,
-    Error,
+    Error, Result,
 };
 
 #[derive(Parser, Debug)]
