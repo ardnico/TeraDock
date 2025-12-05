@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::Command;
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -12,7 +11,8 @@ use ttcore::{
     config::{AppConfig, AppPaths},
     history::{format_history_entry, HistoryEntry, HistoryStore},
     profile::ProfileSet,
-    Error,
+    secrets::SecretStore,
+    Error, Result,
 };
 
 #[derive(Parser, Debug)]
@@ -53,6 +53,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::discover()?;
     let config = AppConfig::load_or_default(&paths)?;
+    let secret_store = SecretStore::new(&paths.secret_key_path)?;
     let history = HistoryStore::new(&config.history_path);
 
     match cli.command {
@@ -61,7 +62,14 @@ fn main() -> Result<()> {
             profile_id,
             force,
             dry_run,
-        } => match connect(&config, &history, &profile_id, force, dry_run) {
+        } => match connect(
+            &config,
+            &history,
+            &secret_store,
+            &profile_id,
+            force,
+            dry_run,
+        ) {
             Ok(_) => Ok(()),
             Err(Error::ProfileNotFound(_)) => std::process::exit(2),
             Err(Error::MissingConfig(_)) => std::process::exit(64),
@@ -130,6 +138,7 @@ fn build_last_seen_map(store: &HistoryStore) -> Result<HashMap<String, DateTime<
 fn connect(
     config: &AppConfig,
     history: &HistoryStore,
+    secret_store: &SecretStore,
     profile_id: &str,
     force: bool,
     dry_run: bool,
@@ -147,7 +156,13 @@ fn connect(
         }
     }
 
-    let spec = build_command(&profile, config);
+    let password = if let Some(cipher) = profile.password.as_ref() {
+        Some(secret_store.decrypt(cipher)?)
+    } else {
+        None
+    };
+
+    let spec = build_command(&profile, config, password.as_deref());
 
     if dry_run {
         print_command(&spec);

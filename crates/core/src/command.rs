@@ -15,7 +15,7 @@ pub struct CommandSpec {
     pub window_title: Option<String>,
 }
 
-pub fn build_command(profile: &Profile, config: &AppConfig) -> CommandSpec {
+pub fn build_command(profile: &Profile, config: &AppConfig, password: Option<&str>) -> CommandSpec {
     let mut args: Vec<OsString> = Vec::new();
 
     if matches!(profile.protocol, Protocol::Telnet) {
@@ -33,6 +33,10 @@ pub fn build_command(profile: &Profile, config: &AppConfig) -> CommandSpec {
 
     if let Some(user) = &profile.user {
         args.push(OsString::from(format!("/user=\"{}\"", user)));
+    }
+
+    if let Some(pass) = password {
+        args.push(OsString::from(format!("/passwd=\"{}\"", pass)));
     }
 
     let mut window_title: Option<String> = None;
@@ -55,6 +59,10 @@ pub fn build_command(profile: &Profile, config: &AppConfig) -> CommandSpec {
         for item in extra {
             args.push(OsString::from(item));
         }
+    }
+
+    for forwarding in profile.forwarding_args() {
+        args.push(OsString::from(forwarding));
     }
 
     debug!("built command" = ?args, "program" = ?config.tera_term_path);
