@@ -33,7 +33,7 @@ fn main() -> Result<()> {
     eframe::run_native(
         "TeraDock ttlaunch",
         options,
-        Box::new(|_cc| {
+        Box::new(move |_cc| {
             Box::new(LauncherApp {
                 paths: paths.clone(),
                 profiles,
@@ -118,7 +118,7 @@ struct ProfileForm {
 impl ForwardingForm {
     fn from_forwarding(f: &SshForwarding) -> Self {
         Self {
-            direction: f.direction,
+            direction: f.direction.clone(),
             local_host: f.local_host.clone().unwrap_or_default(),
             local_port: if f.local_port == 0 {
                 String::new()
@@ -154,7 +154,7 @@ impl ForwardingForm {
         };
 
         Ok(SshForwarding {
-            direction: self.direction,
+            direction: self.direction.clone(),
             local_host: if self.local_host.trim().is_empty() {
                 None
             } else {
@@ -283,7 +283,7 @@ impl ProfileForm {
         profile.name = self.name.trim().to_string();
         profile.host = self.host.trim().to_string();
         profile.port = port;
-        profile.protocol = self.protocol;
+        profile.protocol = self.protocol.clone();
         profile.user = if self.user.trim().is_empty() {
             None
         } else {
