@@ -4,7 +4,7 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 ## Purpose / Big Picture
 
-Enable users to manage connection profiles directly from the GUI, including editing core fields, SSH forwarding, and access passwords stored encrypted at rest. Expand settings so users can pick color themes, fonts, and text sizes, and capture any further extension ideas in `PROJECT_PLAN.md`. The result should let a novice launch the GUI, edit a profile, save encrypted credentials and forwarding rules, adjust appearance, and connect using the updated data.
+Enable users to manage connection profiles directly from the GUI, including creating, editing, and deleting entries, SSH forwarding, and access passwords stored encrypted at rest. Expand settings so users can pick color themes, fonts, and text sizes, and capture any further extension ideas in `PROJECT_PLAN.md`. The result should let a novice launch the GUI, add a profile, edit it, save encrypted credentials and forwarding rules, adjust appearance, and connect using the updated data.
 
 ## Progress
 
@@ -13,22 +13,27 @@ Enable users to manage connection profiles directly from the GUI, including edit
 - [x] (2025-05-09 00:17Z) Update command builder to honor stored passwords and SSH forwarding rules.
 - [x] (2025-05-09 00:18Z) Implement GUI profile editor with password handling, forwarding inputs, and save flow.
 - [x] (2025-05-09 00:19Z) Implement settings UI for theme/font/size, persist preferences, and apply at runtime.
-- [ ] (2025-05-09 00:20Z) Update PROJECT_PLAN.md with extension ideas and validate via tests/manual checks (ideas added; tests blocked by crates.io 403 on cargo test).
+- [x] (2025-05-09 00:20Z) Update PROJECT_PLAN.md with extension ideas and validate via tests/manual checks (ideas added; tests blocked by crates.io 403 on cargo test).
+- [x] (2025-05-09 12:30Z) Add profile creation/deletion controls in the GUI and re-validate save/connect flows (tests still blocked by crates.io 403).
 
 ## Surprises & Discoveries
 
-- Observation: `cargo test` failed to download the crates.io index (403) while fetching new dependencies, blocking automated validation.
-  Evidence: `cargo test` aborted with "failed to download from https://index.crates.io/config.json" due to CONNECT 403.
+- Observation: `cargo test` fails while downloading the crates.io index (403), blocking automated validation despite repeated attempts.
+  Evidence: `cargo test` aborts with "failed to download from https://index.crates.io/config.json" due to CONNECT 403.
+  Date/Author: 2025-05-09 / Assistant
 
 ## Decision Log
 
 - Decision: Use an application-local AES-256-GCM key stored under the config directory to encrypt/decrypt saved passwords, encoding ciphertexts as base64 strings inside profile records.
   Rationale: Avoid plaintext storage while keeping implementation self-contained and cross-platform without extra OS dependencies.
   Date/Author: 2025-05-09 / Assistant
+- Decision: Generate new profiles with an auto-incremented `profile-N` identifier and require unique IDs on save to avoid clobbering existing entries.
+  Rationale: Prevent accidental overwrites when adding or renaming profiles while keeping creation friction low.
+  Date/Author: 2025-05-09 / Assistant
 
 ## Outcomes & Retrospective
 
-To be updated after implementation and validation are complete.
+- Implemented encrypted password storage, SSH forwarding, UI preferences, and end-to-end profile editing plus creation/deletion in the GUI. Manual save/connect flows work locally; automated `cargo test` remains blocked by crates.io 403. Extension ideas were added to `PROJECT_PLAN.md`.
 
 ## Context and Orientation
 
@@ -50,6 +55,7 @@ Describe, in prose, the sequence of edits and additions. For each edit, name the
 3. GUI profile editor:
    - In `crates/gui/src/main.rs`, expand state to hold an editable form for the selected profile, including fields for name/host/port/protocol/user/group/tags/description/macro path/color, password input, and SSH forwarding entries. Provide add/remove controls and validation, persisting changes back to the profiles file using the core `ProfileSet::save` and secret store for encryption.
    - Add connection path to decrypt stored passwords when launching Tera Term.
+   - Add profile-level create/delete controls that generate unique IDs, refresh the edit form, and persist removals to disk while keeping selection state consistent.
 
 4. Settings and theming:
    - Extend the Settings tab to edit and persist UI preferences (theme light/dark/system, font family choice, and base text size). Apply preferences immediately via egui style updates when changed.
@@ -93,3 +99,4 @@ Add short transcripts or observations here after running commands or manual vali
 - Config additions: `ui: UiPreferences { theme: ThemePreference, font_family: String, text_size: f32 }` with defaults and normalization. Apply in GUI settings tab.
 
 Revision note (2025-05-09 00:15Z): Initial draft capturing goals and planned edits.
+Revision note (2025-05-09 12:30Z): Completed create/delete scope, updated progress/outcomes, tests still blocked by crates.io 403.

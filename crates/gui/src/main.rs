@@ -371,6 +371,30 @@ impl eframe::App for LauncherApp {
             .show(ctx, |ui| {
                 ui.heading("Profiles");
                 ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("New").clicked() {
+                        self.filter.clear();
+                        match self.add_profile() {
+                            Ok(_) => {
+                                self.status = Some("New profile created".into());
+                                self.error = None;
+                            }
+                            Err(err) => self.error = Some(err.to_string()),
+                        }
+                    }
+                    let delete_button =
+                        ui.add_enabled(self.selected.is_some(), egui::Button::new("Delete"));
+                    if delete_button.clicked() {
+                        match self.delete_selected() {
+                            Ok(_) => {
+                                self.status = Some("Profile deleted".into());
+                                self.error = None;
+                            }
+                            Err(err) => self.error = Some(err.to_string()),
+                        }
+                    }
+                });
+                ui.separator();
                 for profile in filtered.iter() {
                     let selected = self
                         .selected
@@ -493,7 +517,7 @@ impl LauncherApp {
         _filtered: &[Profile],
     ) {
         if self.selected.is_none() {
-            ui.label("Select a profile from the left.");
+            ui.label("Select a profile from the left or create a new one.");
             return;
         }
 
@@ -678,6 +702,13 @@ impl LauncherApp {
             .edit_form
             .clone()
             .ok_or_else(|| anyhow!("No profile selected"))?;
+        if self
+            .profiles
+            .iter()
+            .any(|p| p.id == form.id && p.id != form.original_id)
+        {
+            return Err(anyhow!("Profile ID already exists"));
+        }
         let idx = self
             .profiles
             .iter()
@@ -691,6 +722,66 @@ impl LauncherApp {
             if let Some(ts) = self.last_seen.remove(&old_id) {
                 self.last_seen.insert(updated.id.clone(), ts);
             }
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
+    }
+
+    fn add_profile(&mut self) -> Result<()> {
+        let id = self.generate_profile_id();
+        let profile = Profile {
+            id: id.clone(),
+            name: format!("Profile {}", id),
+            host: String::new(),
+            port: None,
+            protocol: Protocol::default(),
+            user: None,
+            group: None,
+            tags: Vec::new(),
+            danger_level: DangerLevel::default(),
+            pinned: false,
+            macro_path: None,
+            color: None,
+            description: None,
+            extra_args: None,
+            password: None,
+            ssh_forwardings: Vec::new(),
+        };
+        self.selected = Some(id.clone());
+        self.profiles.push(profile.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&profile, &self.secret_store)?);
+        Ok(())
+    }
+
+    fn delete_selected(&mut self) -> Result<()> {
+        let selected_id = self
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if let Some(pos) = self.profiles.iter().position(|p| p.id == selected_id) {
+            self.profiles.remove(pos);
+            self.last_seen.remove(&selected_id);
+            self.save_profiles()?;
+            self.selected = self.profiles.first().map(|p| p.id.clone());
+            self.edit_form = None;
+            self.sync_selected_form();
+            Ok(())
+        } else {
+            Err(anyhow!("Profile not found"))
+        }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
         }
 
         self.save_profiles()?;
