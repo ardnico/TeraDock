@@ -16,6 +16,7 @@ const DEFAULT_PROFILES: &str = include_str!("../../../config/default_profiles.to
 pub struct AppPaths {
     pub base_dir: PathBuf,
     pub settings_path: PathBuf,
+    pub secret_key_path: PathBuf,
 }
 
 impl AppPaths {
@@ -35,9 +36,11 @@ impl AppPaths {
         };
 
         let settings_path = base_dir.join("settings.toml");
+        let secret_key_path = base_dir.join("secret.key");
         Ok(Self {
             base_dir,
             settings_path,
+            secret_key_path,
         })
     }
 
@@ -54,6 +57,52 @@ pub struct AppConfig {
     pub tera_term_path: PathBuf,
     pub profiles_path: PathBuf,
     pub history_path: PathBuf,
+    #[serde(default)]
+    pub ui: UiPreferences,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiPreferences {
+    #[serde(default = "ThemePreference::default_mode")]
+    pub theme: ThemePreference,
+    #[serde(default = "UiPreferences::default_font_family")]
+    pub font_family: String,
+    #[serde(default = "UiPreferences::default_text_size")]
+    pub text_size: f32,
+}
+
+impl UiPreferences {
+    fn default_text_size() -> f32 {
+        16.0
+    }
+
+    fn default_font_family() -> String {
+        "proportional".to_string()
+    }
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::System,
+            font_family: Self::default_font_family(),
+            text_size: Self::default_text_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    pub fn default_mode() -> Self {
+        ThemePreference::System
+    }
 }
 
 impl AppConfig {
@@ -108,6 +157,12 @@ impl AppConfig {
         if self.history_path.as_os_str().is_empty() {
             self.history_path = paths.base_dir.join("history.jsonl");
         }
+        if (self.ui.text_size - 0.0).abs() < f32::EPSILON {
+            self.ui.text_size = UiPreferences::default_text_size();
+        }
+        if self.ui.font_family.trim().is_empty() {
+            self.ui.font_family = UiPreferences::default_font_family();
+        }
     }
 
     fn default_for(paths: &AppPaths) -> Self {
@@ -118,6 +173,7 @@ impl AppConfig {
             tera_term_path,
             profiles_path,
             history_path,
+            ui: UiPreferences::default(),
         }
     }
 

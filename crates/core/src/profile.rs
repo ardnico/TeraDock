@@ -60,6 +60,38 @@ pub struct Profile {
     pub description: Option<String>,
     #[serde(default)]
     pub extra_args: Option<Vec<String>>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub ssh_forwardings: Vec<SshForwarding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardDirection {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+impl Default for ForwardDirection {
+    fn default() -> Self {
+        ForwardDirection::Local
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SshForwarding {
+    #[serde(default)]
+    pub direction: ForwardDirection,
+    #[serde(default)]
+    pub local_host: Option<String>,
+    #[serde(default)]
+    pub local_port: u16,
+    #[serde(default)]
+    pub remote_host: String,
+    #[serde(default)]
+    pub remote_port: u16,
 }
 
 impl Profile {
@@ -86,6 +118,43 @@ impl Profile {
                 .map(|g| g.to_lowercase().contains(&t))
                 .unwrap_or(false)
             || self.tags.iter().any(|tag| tag.to_lowercase().contains(&t))
+    }
+
+    pub fn forwarding_args(&self) -> Vec<String> {
+        self.ssh_forwardings
+            .iter()
+            .filter_map(|f| f.to_arg())
+            .collect()
+    }
+}
+
+impl SshForwarding {
+    pub fn to_arg(&self) -> Option<String> {
+        let lh = self
+            .local_host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".into());
+        match self.direction {
+            ForwardDirection::Local => Some(format!(
+                "-L{lh}:{lp}:{rh}:{rp}",
+                lp = self.local_port,
+                rh = self.remote_host,
+                rp = self.remote_port
+            )),
+            ForwardDirection::Remote => Some(format!(
+                "-R{lh}:{lp}:{rh}:{rp}",
+                lp = self.local_port,
+                rh = self.remote_host,
+                rp = self.remote_port
+            )),
+            ForwardDirection::Dynamic => {
+                if self.local_port == 0 {
+                    None
+                } else {
+                    Some(format!("-D{lh}:{lp}", lp = self.local_port))
+                }
+            }
+        }
     }
 }
 
