@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -99,8 +99,10 @@ impl ProfileSet {
         if !path.exists() {
             return Err(Error::MissingConfig(path.to_path_buf()));
         }
-        let reader = BufReader::new(File::open(path)?);
-        let set: ProfileSet = toml::de::from_reader(reader)?;
+        let mut reader = BufReader::new(File::open(path)?);
+        let mut content = String::new();
+        reader.read_to_string(&mut content)?;
+        let set: ProfileSet = toml::from_str(&content)?;
         Ok(set)
     }
 

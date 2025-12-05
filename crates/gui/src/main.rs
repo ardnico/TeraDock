@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32};
 use tracing_subscriber::EnvFilter;
@@ -47,7 +47,8 @@ fn main() -> Result<()> {
                 active_tab: Tab::Profiles,
             })
         }),
-    )?;
+    )
+    .map_err(|err| anyhow!(err.to_string()))?;
 
     Ok(())
 }

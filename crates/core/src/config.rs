@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -60,8 +60,10 @@ impl AppConfig {
     pub fn load_or_default(paths: &AppPaths) -> Result<Self> {
         paths.ensure_base()?;
         if paths.settings_path.exists() {
-            let reader = BufReader::new(File::open(&paths.settings_path)?);
-            let mut config: AppConfig = toml::de::from_reader(reader)?;
+            let mut reader = BufReader::new(File::open(&paths.settings_path)?);
+            let mut content = String::new();
+            reader.read_to_string(&mut content)?;
+            let mut config: AppConfig = toml::from_str(&content)?;
             config.normalize(paths);
             Ok(config)
         } else {
