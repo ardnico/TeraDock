@@ -5,6 +5,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
+use base64::Engine;
 use rand::RngCore;
 
 use crate::error::{Error, Result};
