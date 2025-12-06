@@ -2,16 +2,17 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, Utc};
-use eframe::egui::{self, Color32};
+use eframe::egui::{self, Color32, FontId, TextStyle, Visuals};
 use tracing_subscriber::EnvFilter;
 
 use ttcore::{
     command::build_command,
-    config::{AppConfig, AppPaths},
+    config::{AppConfig, AppPaths, ForwardingPreset, SecretBackend, ThemePreference},
     history::{HistoryEntry, HistoryStore},
-    profile::{Profile, ProfileSet},
+    profile::{DangerLevel, ForwardDirection, Profile, ProfileSet, Protocol, SshForwarding},
+    secrets::SecretStore,
 };
 
 fn main() -> Result<()> {
@@ -22,17 +23,24 @@ fn main() -> Result<()> {
 
     let paths = AppPaths::discover()?;
     let config = AppConfig::load_or_default(&paths)?;
+    let secret_store = SecretStore::new(&paths, &config.secrets)?;
     let profiles = ttcore::profile::ProfileSet::load(&config.profiles_path)?.profiles;
     let history_store = HistoryStore::new(&config.history_path);
     let history = history_store.load(Some(200))?;
     let last_seen = build_last_seen_map(&history);
+    let preset_forms: Vec<ForwardingPresetForm> = config
+        .forwarding_presets
+        .iter()
+        .map(ForwardingPresetForm::from_preset)
+        .collect();
 
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "TeraDock ttlaunch",
         options,
-        Box::new(|_cc| {
+        Box::new(move |_cc| {
             Box::new(LauncherApp {
+                paths: paths.clone(),
                 profiles,
                 filter: String::new(),
                 selected: None,
@@ -44,10 +52,16 @@ fn main() -> Result<()> {
                 error: None,
                 confirm: None,
                 tera_term_input: String::new(),
+                edit_form: None,
+                secret_store,
                 active_tab: Tab::Profiles,
+                preset_forms,
+                selected_preset: None,
+                palette: CommandPalette::default(),
             })
         }),
-    )?;
+    )
+    .map_err(|err| anyhow!(err.to_string()))?;
 
     Ok(())
 }
@@ -76,12 +90,321 @@ enum Tab {
     Profiles,
     History,
     Settings,
+    Dashboard,
+}
+
+#[derive(Debug, Clone)]
+struct UsageStats {
+    total: usize,
+    successes: usize,
+    failures: usize,
+    unique_profiles: usize,
+    top_profile: Option<(String, usize)>,
+    last_connection: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct Achievement {
+    title: String,
+    detail: String,
+    achieved: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+struct CommandPalette {
+    open: bool,
+    query: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PaletteAction {
+    ConnectSelected,
+    EditSelected,
+    OpenSettings,
+    OpenDashboard,
+    NewProfile,
+}
+
+#[derive(Debug, Clone)]
+struct PaletteEntry {
+    label: String,
+    action: PaletteAction,
+}
+
+#[derive(Clone)]
+struct ForwardingForm {
+    direction: ForwardDirection,
+    local_host: String,
+    local_port: String,
+    remote_host: String,
+    remote_port: String,
+}
+
+#[derive(Clone)]
+struct ForwardingPresetForm {
+    name: String,
+    description: String,
+    rule: ForwardingForm,
+}
+
+#[derive(Clone)]
+struct ProfileForm {
+    original_id: String,
+    id: String,
+    name: String,
+    host: String,
+    port: String,
+    protocol: Protocol,
+    user: String,
+    group: String,
+    tags: String,
+    danger_level: DangerLevel,
+    pinned: bool,
+    macro_path: String,
+    color: String,
+    description: String,
+    extra_args: String,
+    password: String,
+    show_password: bool,
+    ssh_forwardings: Vec<ForwardingForm>,
+}
+
+impl ForwardingForm {
+    fn from_forwarding(f: &SshForwarding) -> Self {
+        Self {
+            direction: f.direction.clone(),
+            local_host: f.local_host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+            local_port: if f.local_port == 0 {
+                String::new()
+            } else {
+                f.local_port.to_string()
+            },
+            remote_host: f.remote_host.clone(),
+            remote_port: if f.remote_port == 0 {
+                String::new()
+            } else {
+                f.remote_port.to_string()
+            },
+        }
+    }
+
+    fn to_forwarding(&self) -> Result<SshForwarding> {
+        let local_port = if self.local_port.trim().is_empty() {
+            0
+        } else {
+            self.local_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| anyhow!("Invalid local port"))?
+        };
+
+        let remote_port = if self.remote_port.trim().is_empty() {
+            0
+        } else {
+            self.remote_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| anyhow!("Invalid remote port"))?
+        };
+
+        Ok(SshForwarding {
+            direction: self.direction.clone(),
+            local_host: if self.local_host.trim().is_empty() {
+                None
+            } else {
+                Some(self.local_host.trim().to_string())
+            },
+            local_port,
+            remote_host: self.remote_host.trim().to_string(),
+            remote_port,
+        })
+    }
+}
+
+impl ForwardingPresetForm {
+    fn from_preset(p: &ForwardingPreset) -> Self {
+        Self {
+            name: p.name.clone(),
+            description: p.description.clone().unwrap_or_default(),
+            rule: ForwardingForm::from_forwarding(&p.rule),
+        }
+    }
+
+    fn to_preset(&self) -> Result<ForwardingPreset> {
+        Ok(ForwardingPreset {
+            name: self.name.trim().to_string(),
+            description: if self.description.trim().is_empty() {
+                None
+            } else {
+                Some(self.description.trim().to_string())
+            },
+            rule: self.rule.to_forwarding()?,
+        })
+    }
+}
+
+impl ProfileForm {
+    fn from_profile(profile: &Profile, secret_store: &SecretStore) -> Result<Self> {
+        let password = if let Some(cipher) = profile.password.as_ref() {
+            secret_store.decrypt(cipher)?
+        } else {
+            String::new()
+        };
+
+        let ssh_forwardings = profile
+            .ssh_forwardings
+            .iter()
+            .map(ForwardingForm::from_forwarding)
+            .collect();
+
+        Ok(Self {
+            original_id: profile.id.clone(),
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile
+                .port
+                .map(|p| p.to_string())
+                .unwrap_or_else(String::new),
+            protocol: profile.protocol.clone(),
+            user: profile.user.clone().unwrap_or_default(),
+            group: profile.group.clone().unwrap_or_default(),
+            tags: if profile.tags.is_empty() {
+                String::new()
+            } else {
+                profile.tags.join(", ")
+            },
+            danger_level: profile.danger_level.clone(),
+            pinned: profile.pinned,
+            macro_path: profile
+                .macro_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            color: profile.color.clone().unwrap_or_default(),
+            description: profile.description.clone().unwrap_or_default(),
+            extra_args: profile
+                .extra_args
+                .as_ref()
+                .map(|v| v.join(", "))
+                .unwrap_or_default(),
+            password,
+            show_password: false,
+            ssh_forwardings,
+        })
+    }
+
+    fn apply_to_profile(&self, original: &Profile, secret_store: &SecretStore) -> Result<Profile> {
+        if self.id.trim().is_empty() {
+            return Err(anyhow!("Profile ID is required"));
+        }
+        if self.name.trim().is_empty() {
+            return Err(anyhow!("Profile name is required"));
+        }
+        if self.host.trim().is_empty() {
+            return Err(anyhow!("Host is required"));
+        }
+
+        let port = if self.port.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.port
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid port"))?,
+            )
+        };
+
+        let tags: Vec<String> = self
+            .tags
+            .split(',')
+            .filter_map(|t| {
+                let v = t.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
+            .collect();
+
+        let extra_args_vec: Vec<String> = self
+            .extra_args
+            .split(|c| c == ',' || c == '\n')
+            .filter_map(|a| {
+                let v = a.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
+            .collect();
+
+        let ssh_forwardings: Vec<SshForwarding> = self
+            .ssh_forwardings
+            .iter()
+            .map(ForwardingForm::to_forwarding)
+            .collect::<Result<_>>()?;
+
+        let password = if self.password.trim().is_empty() {
+            None
+        } else {
+            Some(secret_store.encrypt(self.password.trim().as_bytes())?)
+        };
+
+        let mut profile = original.clone();
+        profile.id = self.id.trim().to_string();
+        profile.name = self.name.trim().to_string();
+        profile.host = self.host.trim().to_string();
+        profile.port = port;
+        profile.protocol = self.protocol.clone();
+        profile.user = if self.user.trim().is_empty() {
+            None
+        } else {
+            Some(self.user.trim().to_string())
+        };
+        profile.group = if self.group.trim().is_empty() {
+            None
+        } else {
+            Some(self.group.trim().to_string())
+        };
+        profile.tags = tags;
+        profile.danger_level = self.danger_level.clone();
+        profile.pinned = self.pinned;
+        profile.macro_path = if self.macro_path.trim().is_empty() {
+            None
+        } else {
+            Some(self.macro_path.trim().into())
+        };
+        profile.color = if self.color.trim().is_empty() {
+            None
+        } else {
+            Some(self.color.trim().to_string())
+        };
+        profile.description = if self.description.trim().is_empty() {
+            None
+        } else {
+            Some(self.description.trim().to_string())
+        };
+        profile.extra_args = if extra_args_vec.is_empty() {
+            None
+        } else {
+            Some(extra_args_vec)
+        };
+        profile.password = password;
+        profile.ssh_forwardings = ssh_forwardings;
+        Ok(profile)
+    }
 }
 
 struct LauncherApp {
+    paths: AppPaths,
     profiles: Vec<Profile>,
     filter: String,
     selected: Option<String>,
+    edit_form: Option<ProfileForm>,
     config: AppConfig,
     history_store: HistoryStore,
     history: Vec<HistoryEntry>,
@@ -90,17 +413,25 @@ struct LauncherApp {
     error: Option<String>,
     confirm: Option<ConfirmState>,
     tera_term_input: String,
+    secret_store: SecretStore,
     active_tab: Tab,
+    preset_forms: Vec<ForwardingPresetForm>,
+    selected_preset: Option<usize>,
+    palette: CommandPalette,
 }
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_ui_preferences(ctx);
+
         let filtered = self.filtered_profiles();
         if let Some(selected_id) = self.selected.clone() {
             if !filtered.iter().any(|p| p.id == selected_id) {
                 self.selected = None;
             }
         }
+
+        self.sync_selected_form();
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -118,6 +449,30 @@ impl eframe::App for LauncherApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.heading("Profiles");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("New").clicked() {
+                        self.filter.clear();
+                        match self.add_profile() {
+                            Ok(_) => {
+                                self.status = Some("New profile created".into());
+                                self.error = None;
+                            }
+                            Err(err) => self.error = Some(err.to_string()),
+                        }
+                    }
+                    let delete_button =
+                        ui.add_enabled(self.selected.is_some(), egui::Button::new("Delete"));
+                    if delete_button.clicked() {
+                        match self.delete_selected() {
+                            Ok(_) => {
+                                self.status = Some("Profile deleted".into());
+                                self.error = None;
+                            }
+                            Err(err) => self.error = Some(err.to_string()),
+                        }
+                    }
+                });
                 ui.separator();
                 for profile in filtered.iter() {
                     let selected = self
@@ -139,23 +494,98 @@ impl eframe::App for LauncherApp {
                 ui.selectable_value(&mut self.active_tab, Tab::Profiles, "Profiles");
                 ui.selectable_value(&mut self.active_tab, Tab::History, "History");
                 ui.selectable_value(&mut self.active_tab, Tab::Settings, "Settings");
+                ui.selectable_value(&mut self.active_tab, Tab::Dashboard, "Dashboard");
+                if ui.button("Palette").clicked() {
+                    self.palette.open = true;
+                }
             });
             ui.separator();
 
             match self.active_tab {
                 Tab::Profiles => self.render_profiles_tab(ui, ctx, &filtered),
                 Tab::History => self.render_history_tab(ui),
-                Tab::Settings => self.render_settings_tab(ui),
+                Tab::Settings => self.render_settings_tab(ui, ctx),
+                Tab::Dashboard => self.render_dashboard_tab(ui),
             }
         });
 
         if let Some(confirm) = self.confirm.take() {
             self.render_confirm_dialog(ctx, confirm);
         }
+
+        if self.palette.open {
+            self.render_palette(ctx);
+        }
     }
 }
 
 impl LauncherApp {
+    fn apply_ui_preferences(&self, ctx: &egui::Context) {
+        match self.config.ui.theme {
+            ThemePreference::Dark => ctx.set_visuals(Visuals::dark()),
+            ThemePreference::Light => ctx.set_visuals(Visuals::light()),
+            ThemePreference::System => ctx.set_visuals(Visuals::default()),
+        };
+
+        let mut style = (*ctx.style()).clone();
+        let body_font = if self.config.ui.font_family.eq_ignore_ascii_case("monospace") {
+            FontId::monospace(self.config.ui.text_size)
+        } else {
+            FontId::proportional(self.config.ui.text_size)
+        };
+
+        style.text_styles.insert(TextStyle::Body, body_font.clone());
+        style
+            .text_styles
+            .insert(TextStyle::Button, body_font.clone());
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::monospace(self.config.ui.text_size),
+        );
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::proportional(self.config.ui.text_size * 1.2),
+        );
+        ctx.set_style(style);
+    }
+
+    fn refresh_secret_store(&mut self) {
+        match SecretStore::new(&self.paths, &self.config.secrets) {
+            Ok(store) => {
+                self.secret_store = store;
+                self.status = Some("Secret backend updated".into());
+                self.error = None;
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn sync_selected_form(&mut self) {
+        if let Some(selected_id) = self.selected.clone() {
+            let needs_refresh = self
+                .edit_form
+                .as_ref()
+                .map(|f| f.original_id != selected_id)
+                .unwrap_or(true);
+            if needs_refresh {
+                if let Some(profile) = self.profiles.iter().find(|p| p.id == selected_id) {
+                    match ProfileForm::from_profile(profile, &self.secret_store) {
+                        Ok(form) => {
+                            self.edit_form = Some(form);
+                            self.error = None;
+                        }
+                        Err(err) => {
+                            self.error = Some(err.to_string());
+                            self.edit_form = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn filtered_profiles(&self) -> Vec<Profile> {
         let mut list: Vec<Profile> = if self.filter.trim().is_empty() {
             self.profiles.clone()
@@ -181,83 +611,618 @@ impl LauncherApp {
         list
     }
 
+    fn usage_stats(&self) -> UsageStats {
+        let total = self.history.len();
+        let successes = self.history.iter().filter(|h| h.success).count();
+        let failures = total.saturating_sub(successes);
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for entry in &self.history {
+            *counts.entry(entry.profile_id.clone()).or_insert(0) += 1;
+        }
+        let top_profile = counts
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1))
+            .map(|(k, v)| (k.clone(), *v));
+        let last_connection = self.history.first().map(|h| h.timestamp);
+
+        UsageStats {
+            total,
+            successes,
+            failures,
+            unique_profiles: counts.len(),
+            top_profile,
+            last_connection,
+        }
+    }
+
+    fn collect_achievements(&self, stats: &UsageStats) -> Vec<Achievement> {
+        let mut achievements = Vec::new();
+        achievements.push(Achievement {
+            title: "First contact".into(),
+            detail: "Run at least one connection".into(),
+            achieved: stats.total > 0,
+        });
+        achievements.push(Achievement {
+            title: "Reliable operator".into(),
+            detail: "Zero failures recorded".into(),
+            achieved: stats.total > 0 && stats.failures == 0,
+        });
+        achievements.push(Achievement {
+            title: "Explorer".into(),
+            detail: "Use five or more unique profiles".into(),
+            achieved: stats.unique_profiles >= 5,
+        });
+        achievements.push(Achievement {
+            title: "Frequent flyer".into(),
+            detail: "Ten or more total launches".into(),
+            achieved: stats.total >= 10,
+        });
+        achievements.push(Achievement {
+            title: "Pinned powerhouse".into(),
+            detail: "Connect to a pinned profile".into(),
+            achieved: self.history.iter().any(|h| {
+                self.profiles
+                    .iter()
+                    .any(|p| p.pinned && p.id == h.profile_id)
+            }),
+        });
+        achievements
+    }
+
+    fn topology_summary(&self) -> (Vec<(String, usize)>, Vec<(String, usize)>) {
+        let mut groups: HashMap<String, usize> = HashMap::new();
+        let mut tags: HashMap<String, usize> = HashMap::new();
+        for profile in &self.profiles {
+            let group = profile
+                .group
+                .clone()
+                .unwrap_or_else(|| "(ungrouped)".into());
+            *groups.entry(group).or_insert(0) += 1;
+            for tag in &profile.tags {
+                *tags.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut group_list: Vec<_> = groups.into_iter().collect();
+        group_list.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut tag_list: Vec<_> = tags.into_iter().collect();
+        tag_list.sort_by(|a, b| b.1.cmp(&a.1));
+        (group_list, tag_list)
+    }
+
+    fn render_dashboard_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Usage dashboard");
+        let stats = self.usage_stats();
+        ui.horizontal(|ui| {
+            ui.label(format!("Total: {}", stats.total));
+            ui.label(format!("Successes: {}", stats.successes));
+            ui.label(format!("Failures: {}", stats.failures));
+            let rate = if stats.total == 0 {
+                0.0
+            } else {
+                (stats.successes as f32 / stats.total as f32) * 100.0
+            };
+            ui.label(format!("Success rate: {:.1}%", rate));
+        });
+        if let Some((id, count)) = &stats.top_profile {
+            ui.label(format!("Top profile: {} ({} launches)", id, count));
+        }
+        if let Some(last) = stats.last_connection {
+            ui.label(format!(
+                "Last connection: {}",
+                last.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
+            ));
+        }
+
+        ui.separator();
+        ui.heading("Achievements");
+        for ach in self.collect_achievements(&stats) {
+            let color = if ach.achieved {
+                Color32::LIGHT_GREEN
+            } else {
+                Color32::GRAY
+            };
+            ui.colored_label(color, format!("{} — {}", ach.title, ach.detail));
+        }
+
+        ui.separator();
+        ui.heading("Topology overview");
+        let (groups, tags) = self.topology_summary();
+        ui.columns(2, |cols| {
+            cols[0].label("Groups");
+            for (name, count) in groups {
+                cols[0].label(format!("{}: {} profiles", name, count));
+            }
+            cols[1].label("Tags");
+            for (tag, count) in tags {
+                cols[1].label(format!("{}: {} profiles", tag, count));
+            }
+        });
+
+        ui.separator();
+        ui.heading("Sharing");
+        self.render_share_controls(ui);
+    }
+
+    fn render_share_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!(
+            "Shared file: {}",
+            self.paths.shared_profiles_path.display()
+        ));
+        ui.horizontal(|ui| {
+            let export_selected = ui.add_enabled(
+                self.selected.is_some(),
+                egui::Button::new("Export selected"),
+            );
+            if export_selected.clicked() {
+                let ids = self.selected.clone().into_iter().collect();
+                match self.export_profiles(ids) {
+                    Ok(_) => {
+                        self.error = None;
+                    }
+                    Err(err) => self.error = Some(err.to_string()),
+                }
+            }
+            if ui.button("Export all").clicked() {
+                if let Err(err) = self.export_profiles(None) {
+                    self.error = Some(err.to_string());
+                } else {
+                    self.error = None;
+                }
+            }
+            if ui.button("Import shared").clicked() {
+                match self.import_shared_profiles() {
+                    Ok(count) => {
+                        self.status = Some(format!("Imported {} profiles", count));
+                        self.error = None;
+                    }
+                    Err(err) => self.error = Some(err.to_string()),
+                }
+            }
+        });
+    }
+
+    fn export_profiles(&mut self, ids: Option<Vec<String>>) -> Result<()> {
+        let profiles: Vec<Profile> = match ids {
+            Some(ids) => self
+                .profiles
+                .iter()
+                .filter(|p| ids.contains(&p.id))
+                .cloned()
+                .collect(),
+            None => self.profiles.clone(),
+        };
+        if profiles.is_empty() {
+            return Err(anyhow!("No profiles to export"));
+        }
+        let set = ProfileSet { profiles };
+        set.save(&self.paths.shared_profiles_path)?;
+        self.status = Some(format!(
+            "Exported {} profiles to {}",
+            set.profiles.len(),
+            self.paths.shared_profiles_path.display()
+        ));
+        Ok(())
+    }
+
+    fn import_shared_profiles(&mut self) -> Result<usize> {
+        let set = ProfileSet::load(&self.paths.shared_profiles_path)?;
+        let mut imported = 0;
+        for profile in set.profiles {
+            if let Some(idx) = self.profiles.iter().position(|p| p.id == profile.id) {
+                self.profiles[idx] = profile;
+            } else {
+                self.profiles.push(profile);
+            }
+            imported += 1;
+        }
+        self.save_profiles()?;
+        self.sync_selected_form();
+        Ok(imported)
+    }
+
+    fn palette_entries(&self) -> Vec<PaletteEntry> {
+        let mut entries = vec![
+            PaletteEntry {
+                label: "Open settings".into(),
+                action: PaletteAction::OpenSettings,
+            },
+            PaletteEntry {
+                label: "Dashboard".into(),
+                action: PaletteAction::OpenDashboard,
+            },
+            PaletteEntry {
+                label: "New profile".into(),
+                action: PaletteAction::NewProfile,
+            },
+        ];
+
+        if self.selected.is_some() {
+            entries.push(PaletteEntry {
+                label: "Connect selected".into(),
+                action: PaletteAction::ConnectSelected,
+            });
+            entries.push(PaletteEntry {
+                label: "Edit selected".into(),
+                action: PaletteAction::EditSelected,
+            });
+        }
+        entries
+    }
+
+    fn render_palette(&mut self, ctx: &egui::Context) {
+        let mut open = self.palette.open;
+        let entries = self.palette_entries();
+        let filtered: Vec<PaletteEntry> = if self.palette.query.trim().is_empty() {
+            entries
+        } else {
+            let needle = self.palette.query.to_lowercase();
+            entries
+                .into_iter()
+                .filter(|e| e.label.to_lowercase().contains(&needle))
+                .collect()
+        };
+
+        egui::Window::new("Command palette")
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.text_edit_singleline(&mut self.palette.query);
+                ui.separator();
+                for entry in &filtered {
+                    if ui.button(&entry.label).clicked() {
+                        self.execute_palette_action(entry.action);
+                        self.palette.open = false;
+                        self.palette.query.clear();
+                    }
+                }
+                if filtered.is_empty() {
+                    ui.label("No actions match");
+                }
+            });
+        self.palette.open = open;
+    }
+
+    fn execute_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::ConnectSelected => {
+                if let Err(err) = self.persist_form().and_then(|p| {
+                    if p.is_dangerous() {
+                        self.confirm = Some(ConfirmState::new(p));
+                        Ok(())
+                    } else {
+                        self.execute_connect(p)
+                    }
+                }) {
+                    self.error = Some(err.to_string());
+                }
+            }
+            PaletteAction::EditSelected => {
+                self.active_tab = Tab::Profiles;
+                self.sync_selected_form();
+            }
+            PaletteAction::OpenSettings => {
+                self.active_tab = Tab::Settings;
+            }
+            PaletteAction::OpenDashboard => {
+                self.active_tab = Tab::Dashboard;
+            }
+            PaletteAction::NewProfile => {
+                if let Err(err) = self.add_profile() {
+                    self.error = Some(err.to_string());
+                } else {
+                    self.active_tab = Tab::Profiles;
+                    self.status = Some("New profile created".into());
+                }
+            }
+        }
+    }
+
     fn render_profiles_tab(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
-        filtered: &[Profile],
+        _filtered: &[Profile],
     ) {
-        if let Some(selected_id) = self.selected.clone() {
-            if let Some(profile) = filtered.iter().find(|p| p.id == selected_id) {
-                ui.heading(&profile.name);
-                ui.label(format!("Host: {}", profile.host));
-                if let Some(port) = profile.port {
-                    ui.label(format!("Port: {}", port));
+        if self.selected.is_none() {
+            ui.label("Select a profile from the left or create a new one.");
+            return;
+        }
+
+        if let Some(form) = self.edit_form.as_mut() {
+            ui.heading("Profile editor");
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("ID");
+                ui.text_edit_singleline(&mut form.id);
+                ui.label("Name");
+                ui.text_edit_singleline(&mut form.name);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Host");
+                ui.text_edit_singleline(&mut form.host);
+                ui.label("Port");
+                ui.text_edit_singleline(&mut form.port);
+                egui::ComboBox::from_label("Protocol")
+                    .selected_text(format!("{:?}", form.protocol))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut form.protocol, Protocol::Ssh, "SSH");
+                        ui.selectable_value(&mut form.protocol, Protocol::Telnet, "Telnet");
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("User");
+                ui.text_edit_singleline(&mut form.user);
+                ui.label("Group");
+                ui.text_edit_singleline(&mut form.group);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Tags (comma separated)");
+                ui.text_edit_singleline(&mut form.tags);
+            });
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_label("Danger")
+                    .selected_text(format!("{:?}", form.danger_level))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut form.danger_level, DangerLevel::Normal, "Normal");
+                        ui.selectable_value(&mut form.danger_level, DangerLevel::Warn, "Warn");
+                        ui.selectable_value(
+                            &mut form.danger_level,
+                            DangerLevel::Critical,
+                            "Critical",
+                        );
+                    });
+                ui.checkbox(&mut form.pinned, "Pinned");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Color (hex)");
+                ui.text_edit_singleline(&mut form.color);
+            });
+
+            ui.label("Description");
+            ui.text_edit_multiline(&mut form.description);
+            ui.label("Macro path");
+            ui.text_edit_singleline(&mut form.macro_path);
+            ui.label("Extra args (comma or newline)");
+            ui.text_edit_multiline(&mut form.extra_args);
+
+            ui.separator();
+            ui.label("Access password");
+            ui.horizontal(|ui| {
+                let mut edit = egui::TextEdit::singleline(&mut form.password);
+                edit = edit.password(!form.show_password);
+                ui.add(edit);
+                ui.checkbox(&mut form.show_password, "Show");
+                if ui.button("Clear").clicked() {
+                    form.password.clear();
                 }
-                ui.label(format!("Protocol: {:?}", profile.protocol));
-                if let Some(ts) = self.last_seen.get(&profile.id) {
-                    ui.label(format!(
-                        "Last connected: {}",
-                        ts.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
-                    ));
-                }
-                if let Some(user) = &profile.user {
-                    ui.label(format!("User: {}", user));
-                }
-                if let Some(group) = &profile.group {
-                    ui.label(format!("Group: {}", group));
-                }
+            });
+
+            ui.separator();
+            ui.heading("SSH forwarding");
+            if !self.preset_forms.is_empty() {
                 ui.horizontal(|ui| {
-                    ui.label("Pinned:");
-                    ui.colored_label(
-                        if profile.pinned {
-                            Color32::LIGHT_GREEN
-                        } else {
-                            Color32::GRAY
-                        },
-                        if profile.pinned { "yes" } else { "no" },
-                    );
-                    if ui
-                        .button(if profile.pinned { "Unpin" } else { "Pin" })
-                        .clicked()
-                    {
-                        if let Err(err) = self.update_pin(&profile.id, !profile.pinned) {
-                            self.error = Some(err.to_string());
+                    let selected_label = self
+                        .selected_preset
+                        .and_then(|idx| self.preset_forms.get(idx))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Select preset".to_string());
+                    egui::ComboBox::from_label("Presets")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for (idx, preset) in self.preset_forms.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        self.selected_preset == Some(idx),
+                                        preset.name.clone(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_preset = Some(idx);
+                                }
+                            }
+                        });
+                    if ui.button("Apply preset").clicked() {
+                        if let Some(idx) = self.selected_preset {
+                            if let Some(preset) = self.preset_forms.get(idx) {
+                                if let Ok(rule) = preset.rule.to_forwarding() {
+                                    form.ssh_forwardings
+                                        .push(ForwardingForm::from_forwarding(&rule));
+                                }
+                            }
                         }
                     }
                 });
-                if !profile.tags.is_empty() {
-                    ui.label(format!("Tags: {}", profile.tags.join(", ")));
-                }
-                if let Some(desc) = &profile.description {
-                    ui.label(desc);
-                }
-                if profile.is_dangerous() {
-                    ui.colored_label(Color32::RED, "Dangerous connection");
-                }
-
+            }
+            if form.ssh_forwardings.is_empty() {
+                ui.label("No forwarding rules");
+            }
+            let mut remove_idx: Option<usize> = None;
+            for (idx, fwd) in form.ssh_forwardings.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_label(format!("Rule {}", idx + 1))
+                        .selected_text(format!("{:?}", fwd.direction))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut fwd.direction,
+                                ForwardDirection::Local,
+                                "Local",
+                            );
+                            ui.selectable_value(
+                                &mut fwd.direction,
+                                ForwardDirection::Remote,
+                                "Remote",
+                            );
+                            ui.selectable_value(
+                                &mut fwd.direction,
+                                ForwardDirection::Dynamic,
+                                "Dynamic",
+                            );
+                        });
+                    ui.label("Local host");
+                    ui.text_edit_singleline(&mut fwd.local_host);
+                    ui.label("Local port");
+                    ui.text_edit_singleline(&mut fwd.local_port);
+                    if ui.button("Remove").clicked() {
+                        remove_idx = Some(idx);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Remote host");
+                    ui.text_edit_singleline(&mut fwd.remote_host);
+                    ui.label("Remote port");
+                    ui.text_edit_singleline(&mut fwd.remote_port);
+                });
                 ui.separator();
-                if ui.button("Connect").clicked() {
-                    if profile.is_dangerous() {
-                        self.confirm = Some(ConfirmState::new(profile.clone()));
-                    } else {
-                        if let Err(err) = self.execute_connect(profile.clone()) {
+            }
+            if let Some(idx) = remove_idx {
+                form.ssh_forwardings.remove(idx);
+            }
+            if ui.button("Add forwarding").clicked() {
+                form.ssh_forwardings.push(ForwardingForm {
+                    direction: ForwardDirection::Local,
+                    local_host: "127.0.0.1".into(),
+                    local_port: String::new(),
+                    remote_host: String::new(),
+                    remote_port: String::new(),
+                });
+            }
+
+            ui.separator();
+            if let Some(ts) = self.last_seen.get(&form.original_id) {
+                ui.label(format!(
+                    "Last connected: {}",
+                    ts.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
+                ));
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Save profile").clicked() {
+                    match self.persist_form() {
+                        Ok(_) => {
+                            self.status = Some("Profile saved".into());
+                            self.error = None;
+                        }
+                        Err(err) => {
                             self.error = Some(err.to_string());
                         }
-                        ctx.request_repaint();
                     }
                 }
-                if let Some(status) = &self.status {
-                    ui.label(status);
+                if ui.button("Reset changes").clicked() {
+                    self.sync_selected_form();
                 }
-                if let Some(err) = &self.error {
-                    ui.colored_label(Color32::RED, err);
+                if ui.button("Connect").clicked() {
+                    match self.persist_form() {
+                        Ok(profile) => {
+                            if profile.is_dangerous() {
+                                self.confirm = Some(ConfirmState::new(profile));
+                            } else if let Err(err) = self.execute_connect(profile) {
+                                self.error = Some(err.to_string());
+                            }
+                            ctx.request_repaint();
+                        }
+                        Err(err) => {
+                            self.error = Some(err.to_string());
+                        }
+                    }
                 }
-            } else {
-                ui.label("No profile selected.");
+            });
+
+            if let Some(status) = &self.status {
+                ui.label(status);
+            }
+            if let Some(err) = &self.error {
+                ui.colored_label(Color32::RED, err);
             }
         } else {
-            ui.label("Select a profile from the left.");
+            ui.label("Failed to load profile details.");
+        }
+    }
+
+    fn persist_form(&mut self) -> Result<Profile> {
+        let form = self
+            .edit_form
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if self
+            .profiles
+            .iter()
+            .any(|p| p.id == form.id && p.id != form.original_id)
+        {
+            return Err(anyhow!("Profile ID already exists"));
+        }
+        let idx = self
+            .profiles
+            .iter()
+            .position(|p| p.id == form.original_id)
+            .ok_or_else(|| anyhow!("Profile not found"))?;
+        let updated = form.apply_to_profile(&self.profiles[idx], &self.secret_store)?;
+        let old_id = self.profiles[idx].id.clone();
+        self.profiles[idx] = updated.clone();
+
+        if old_id != updated.id {
+            if let Some(ts) = self.last_seen.remove(&old_id) {
+                self.last_seen.insert(updated.id.clone(), ts);
+            }
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
+    }
+
+    fn add_profile(&mut self) -> Result<()> {
+        let id = self.generate_profile_id();
+        let profile = Profile {
+            id: id.clone(),
+            name: format!("Profile {}", id),
+            host: String::new(),
+            port: None,
+            protocol: Protocol::default(),
+            user: None,
+            group: None,
+            tags: Vec::new(),
+            danger_level: DangerLevel::default(),
+            pinned: false,
+            macro_path: None,
+            color: None,
+            description: None,
+            extra_args: None,
+            password: None,
+            ssh_forwardings: Vec::new(),
+        };
+        self.selected = Some(id.clone());
+        self.profiles.push(profile.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&profile, &self.secret_store)?);
+        Ok(())
+    }
+
+    fn delete_selected(&mut self) -> Result<()> {
+        let selected_id = self
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if let Some(pos) = self.profiles.iter().position(|p| p.id == selected_id) {
+            self.profiles.remove(pos);
+            self.last_seen.remove(&selected_id);
+            self.save_profiles()?;
+            self.selected = self.profiles.first().map(|p| p.id.clone());
+            self.edit_form = None;
+            self.sync_selected_form();
+            Ok(())
+        } else {
+            Err(anyhow!("Profile not found"))
+        }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
         }
     }
 
@@ -291,7 +1256,7 @@ impl LauncherApp {
         }
     }
 
-    fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Settings");
         ui.label("Tera Term path");
         if self.tera_term_input.is_empty() {
@@ -301,15 +1266,170 @@ impl LauncherApp {
         if !std::path::Path::new(&self.tera_term_input).exists() {
             ui.colored_label(Color32::YELLOW, "Path does not exist on this system");
         }
+
+        ui.separator();
+        ui.heading("Secrets");
+        egui::ComboBox::from_label("Secret backend")
+            .selected_text(format!("{:?}", self.config.secrets.backend))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.config.secrets.backend,
+                    SecretBackend::FileKey,
+                    "Local file key",
+                );
+                ui.selectable_value(
+                    &mut self.config.secrets.backend,
+                    SecretBackend::WindowsCredentialManager,
+                    "Windows Credential Manager",
+                );
+                ui.selectable_value(
+                    &mut self.config.secrets.backend,
+                    SecretBackend::WindowsDpapi,
+                    "Windows DPAPI",
+                );
+            });
+        ui.label("Credential target / label");
+        ui.text_edit_singleline(&mut self.config.secrets.credential_target);
+
+        ui.separator();
+        ui.heading("Forwarding presets");
+        let mut remove_preset: Option<usize> = None;
+        for (idx, preset) in self.preset_forms.iter_mut().enumerate() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut preset.name);
+                    if ui.button("Remove").clicked() {
+                        remove_preset = Some(idx);
+                    }
+                });
+                ui.label("Description");
+                ui.text_edit_singleline(&mut preset.description);
+                ui.label("Rule");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_label("Direction")
+                        .selected_text(format!("{:?}", preset.rule.direction))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut preset.rule.direction,
+                                ForwardDirection::Local,
+                                "Local",
+                            );
+                            ui.selectable_value(
+                                &mut preset.rule.direction,
+                                ForwardDirection::Remote,
+                                "Remote",
+                            );
+                            ui.selectable_value(
+                                &mut preset.rule.direction,
+                                ForwardDirection::Dynamic,
+                                "Dynamic",
+                            );
+                        });
+                    ui.label("Local host");
+                    ui.text_edit_singleline(&mut preset.rule.local_host);
+                    ui.label("Local port");
+                    ui.text_edit_singleline(&mut preset.rule.local_port);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Remote host");
+                    ui.text_edit_singleline(&mut preset.rule.remote_host);
+                    ui.label("Remote port");
+                    ui.text_edit_singleline(&mut preset.rule.remote_port);
+                });
+            });
+        }
+        if let Some(idx) = remove_preset {
+            self.preset_forms.remove(idx);
+        }
+        if ui.button("Add preset").clicked() {
+            self.preset_forms.push(ForwardingPresetForm {
+                name: format!("preset-{}", self.preset_forms.len() + 1),
+                description: String::new(),
+                rule: ForwardingForm {
+                    direction: ForwardDirection::Local,
+                    local_host: "127.0.0.1".into(),
+                    local_port: String::new(),
+                    remote_host: String::new(),
+                    remote_port: String::new(),
+                },
+            });
+        }
+
+        ui.separator();
+        ui.heading("Appearance");
+        let mut appearance_changed = false;
+        egui::ComboBox::from_label("Theme")
+            .selected_text(match self.config.ui.theme {
+                ThemePreference::System => "System".to_string(),
+                ThemePreference::Light => "Light".to_string(),
+                ThemePreference::Dark => "Dark".to_string(),
+            })
+            .show_ui(ui, |ui| {
+                appearance_changed |= ui
+                    .selectable_value(&mut self.config.ui.theme, ThemePreference::System, "System")
+                    .changed();
+                appearance_changed |= ui
+                    .selectable_value(&mut self.config.ui.theme, ThemePreference::Light, "Light")
+                    .changed();
+                appearance_changed |= ui
+                    .selectable_value(&mut self.config.ui.theme, ThemePreference::Dark, "Dark")
+                    .changed();
+            });
+
+        egui::ComboBox::from_label("Font")
+            .selected_text(
+                if self.config.ui.font_family.eq_ignore_ascii_case("monospace") {
+                    "Monospace".to_string()
+                } else {
+                    "Proportional".to_string()
+                },
+            )
+            .show_ui(ui, |ui| {
+                appearance_changed |= ui
+                    .selectable_value(
+                        &mut self.config.ui.font_family,
+                        "proportional".into(),
+                        "Proportional",
+                    )
+                    .changed();
+                appearance_changed |= ui
+                    .selectable_value(
+                        &mut self.config.ui.font_family,
+                        "monospace".into(),
+                        "Monospace",
+                    )
+                    .changed();
+            });
+
+        appearance_changed |= ui
+            .add(egui::Slider::new(&mut self.config.ui.text_size, 10.0..=32.0).text("Text size"))
+            .changed();
+
+        if appearance_changed {
+            self.apply_ui_preferences(ctx);
+        }
+
         if ui.button("Save settings").clicked() {
             self.config.tera_term_path = std::path::PathBuf::from(self.tera_term_input.trim());
-            if let Err(err) = self
-                .config
-                .save(&AppPaths::discover().unwrap().settings_path)
+            match self
+                .preset_forms
+                .iter()
+                .map(ForwardingPresetForm::to_preset)
+                .collect::<Result<Vec<_>>>()
             {
-                self.error = Some(err.to_string());
-            } else {
-                self.status = Some("Settings saved".into());
+                Ok(presets) => {
+                    self.config.forwarding_presets = presets;
+                    if let Err(err) = self.config.save(&self.paths.settings_path) {
+                        self.error = Some(err.to_string());
+                    } else {
+                        self.status = Some("Settings saved".into());
+                        self.refresh_secret_store();
+                    }
+                }
+                Err(err) => {
+                    self.error = Some(err.to_string());
+                }
             }
         }
         ui.separator();
@@ -347,7 +1467,12 @@ impl LauncherApp {
     }
 
     fn execute_connect(&mut self, profile: Profile) -> Result<()> {
-        let spec = build_command(&profile, &self.config);
+        let password = if let Some(cipher) = profile.password.as_ref() {
+            Some(self.secret_store.decrypt(cipher)?)
+        } else {
+            None
+        };
+        let spec = build_command(&profile, &self.config, password.as_deref());
         match Command::new(&spec.program).args(&spec.args).spawn() {
             Ok(child) => {
                 self.status = Some(format!(
@@ -379,15 +1504,6 @@ impl LauncherApp {
                 self.history.insert(0, entry);
                 self.last_seen.insert(profile.id.clone(), Utc::now());
             }
-        }
-        Ok(())
-    }
-
-    fn update_pin(&mut self, profile_id: &str, pinned: bool) -> Result<()> {
-        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile_id) {
-            p.pinned = pinned;
-            self.save_profiles()?;
-            self.status = Some(if pinned { "Pinned" } else { "Unpinned" }.into());
         }
         Ok(())
     }

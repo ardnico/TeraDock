@@ -25,3 +25,7 @@ directories = "5.0"
 egui = "0.26"
 eframe = { version = "0.26", default-features = true, features = ["wgpu"] }
 parking_lot = "0.12"
+aes-gcm = { version = "0.10", features = ["aes"] }
+base64 = "0.22"
+rand = "0.8"
+windows = { version = "0.54", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_System_Memory", "Win32_Foundation"] }
