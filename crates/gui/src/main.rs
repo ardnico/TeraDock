@@ -399,6 +399,274 @@ impl ProfileForm {
     }
 }
 
+#[derive(Clone)]
+struct ForwardingForm {
+    direction: ForwardDirection,
+    local_host: String,
+    local_port: String,
+    remote_host: String,
+    remote_port: String,
+}
+
+#[derive(Clone)]
+struct ForwardingPresetForm {
+    name: String,
+    description: String,
+    rule: ForwardingForm,
+}
+
+#[derive(Clone)]
+struct ProfileForm {
+    original_id: String,
+    id: String,
+    name: String,
+    host: String,
+    port: String,
+    protocol: Protocol,
+    user: String,
+    group: String,
+    tags: String,
+    danger_level: DangerLevel,
+    pinned: bool,
+    macro_path: String,
+    color: String,
+    description: String,
+    extra_args: String,
+    password: String,
+    show_password: bool,
+    ssh_forwardings: Vec<ForwardingForm>,
+}
+
+impl ForwardingForm {
+    fn from_forwarding(f: &SshForwarding) -> Self {
+        Self {
+            direction: f.direction.clone(),
+            local_host: f.local_host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+            local_port: if f.local_port == 0 {
+                String::new()
+            } else {
+                f.local_port.to_string()
+            },
+            remote_host: f.remote_host.clone(),
+            remote_port: if f.remote_port == 0 {
+                String::new()
+            } else {
+                f.remote_port.to_string()
+            },
+        }
+    }
+
+    fn to_forwarding(&self) -> Result<SshForwarding> {
+        let local_port = if self.local_port.trim().is_empty() {
+            0
+        } else {
+            self.local_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| anyhow!("Invalid local port"))?
+        };
+
+        let remote_port = if self.remote_port.trim().is_empty() {
+            0
+        } else {
+            self.remote_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| anyhow!("Invalid remote port"))?
+        };
+
+        Ok(SshForwarding {
+            direction: self.direction.clone(),
+            local_host: if self.local_host.trim().is_empty() {
+                None
+            } else {
+                Some(self.local_host.trim().to_string())
+            },
+            local_port,
+            remote_host: self.remote_host.trim().to_string(),
+            remote_port,
+        })
+    }
+}
+
+impl ForwardingPresetForm {
+    fn from_preset(p: &ForwardingPreset) -> Self {
+        Self {
+            name: p.name.clone(),
+            description: p.description.clone().unwrap_or_default(),
+            rule: ForwardingForm::from_forwarding(&p.rule),
+        }
+    }
+
+    fn to_preset(&self) -> Result<ForwardingPreset> {
+        Ok(ForwardingPreset {
+            name: self.name.trim().to_string(),
+            description: if self.description.trim().is_empty() {
+                None
+            } else {
+                Some(self.description.trim().to_string())
+            },
+            rule: self.rule.to_forwarding()?,
+        })
+    }
+}
+
+impl ProfileForm {
+    fn from_profile(profile: &Profile, secret_store: &SecretStore) -> Result<Self> {
+        let password = if let Some(cipher) = profile.password.as_ref() {
+            secret_store.decrypt(cipher)?
+        } else {
+            String::new()
+        };
+
+        let ssh_forwardings = profile
+            .ssh_forwardings
+            .iter()
+            .map(ForwardingForm::from_forwarding)
+            .collect();
+
+        Ok(Self {
+            original_id: profile.id.clone(),
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile
+                .port
+                .map(|p| p.to_string())
+                .unwrap_or_else(String::new),
+            protocol: profile.protocol.clone(),
+            user: profile.user.clone().unwrap_or_default(),
+            group: profile.group.clone().unwrap_or_default(),
+            tags: if profile.tags.is_empty() {
+                String::new()
+            } else {
+                profile.tags.join(", ")
+            },
+            danger_level: profile.danger_level.clone(),
+            pinned: profile.pinned,
+            macro_path: profile
+                .macro_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            color: profile.color.clone().unwrap_or_default(),
+            description: profile.description.clone().unwrap_or_default(),
+            extra_args: profile
+                .extra_args
+                .as_ref()
+                .map(|v| v.join(", "))
+                .unwrap_or_default(),
+            password,
+            show_password: false,
+            ssh_forwardings,
+        })
+    }
+
+    fn apply_to_profile(&self, original: &Profile, secret_store: &SecretStore) -> Result<Profile> {
+        if self.id.trim().is_empty() {
+            return Err(anyhow!("Profile ID is required"));
+        }
+        if self.name.trim().is_empty() {
+            return Err(anyhow!("Profile name is required"));
+        }
+        if self.host.trim().is_empty() {
+            return Err(anyhow!("Host is required"));
+        }
+
+        let port = if self.port.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.port
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid port"))?,
+            )
+        };
+
+        let tags: Vec<String> = self
+            .tags
+            .split(',')
+            .filter_map(|t| {
+                let v = t.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
+            .collect();
+
+        let extra_args_vec: Vec<String> = self
+            .extra_args
+            .split(|c| c == ',' || c == '\n')
+            .filter_map(|a| {
+                let v = a.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
+            .collect();
+
+        let ssh_forwardings: Vec<SshForwarding> = self
+            .ssh_forwardings
+            .iter()
+            .map(ForwardingForm::to_forwarding)
+            .collect::<Result<_>>()?;
+
+        let password = if self.password.trim().is_empty() {
+            None
+        } else {
+            Some(secret_store.encrypt(self.password.trim().as_bytes())?)
+        };
+
+        let mut profile = original.clone();
+        profile.id = self.id.trim().to_string();
+        profile.name = self.name.trim().to_string();
+        profile.host = self.host.trim().to_string();
+        profile.port = port;
+        profile.protocol = self.protocol.clone();
+        profile.user = if self.user.trim().is_empty() {
+            None
+        } else {
+            Some(self.user.trim().to_string())
+        };
+        profile.group = if self.group.trim().is_empty() {
+            None
+        } else {
+            Some(self.group.trim().to_string())
+        };
+        profile.tags = tags;
+        profile.danger_level = self.danger_level.clone();
+        profile.pinned = self.pinned;
+        profile.macro_path = if self.macro_path.trim().is_empty() {
+            None
+        } else {
+            Some(self.macro_path.trim().into())
+        };
+        profile.color = if self.color.trim().is_empty() {
+            None
+        } else {
+            Some(self.color.trim().to_string())
+        };
+        profile.description = if self.description.trim().is_empty() {
+            None
+        } else {
+            Some(self.description.trim().to_string())
+        };
+        profile.extra_args = if extra_args_vec.is_empty() {
+            None
+        } else {
+            Some(extra_args_vec)
+        };
+        profile.password = password;
+        profile.ssh_forwardings = ssh_forwardings;
+        Ok(profile)
+    }
+}
+
 struct LauncherApp {
     paths: AppPaths,
     profiles: Vec<Profile>,
@@ -1224,6 +1492,110 @@ impl LauncherApp {
             }
             idx += 1;
         }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
+        }
+    }
+
+    fn persist_form(&mut self) -> Result<Profile> {
+        let form = self
+            .edit_form
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if self
+            .profiles
+            .iter()
+            .any(|p| p.id == form.id && p.id != form.original_id)
+        {
+            return Err(anyhow!("Profile ID already exists"));
+        }
+        let idx = self
+            .profiles
+            .iter()
+            .position(|p| p.id == form.original_id)
+            .ok_or_else(|| anyhow!("Profile not found"))?;
+        let updated = form.apply_to_profile(&self.profiles[idx], &self.secret_store)?;
+        let old_id = self.profiles[idx].id.clone();
+        self.profiles[idx] = updated.clone();
+
+        if old_id != updated.id {
+            if let Some(ts) = self.last_seen.remove(&old_id) {
+                self.last_seen.insert(updated.id.clone(), ts);
+            }
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
+    }
+
+    fn add_profile(&mut self) -> Result<()> {
+        let id = self.generate_profile_id();
+        let profile = Profile {
+            id: id.clone(),
+            name: format!("Profile {}", id),
+            host: String::new(),
+            port: None,
+            protocol: Protocol::default(),
+            user: None,
+            group: None,
+            tags: Vec::new(),
+            danger_level: DangerLevel::default(),
+            pinned: false,
+            macro_path: None,
+            color: None,
+            description: None,
+            extra_args: None,
+            password: None,
+            ssh_forwardings: Vec::new(),
+        };
+        self.selected = Some(id.clone());
+        self.profiles.push(profile.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&profile, &self.secret_store)?);
+        Ok(())
+    }
+
+    fn delete_selected(&mut self) -> Result<()> {
+        let selected_id = self
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow!("No profile selected"))?;
+        if let Some(pos) = self.profiles.iter().position(|p| p.id == selected_id) {
+            self.profiles.remove(pos);
+            self.last_seen.remove(&selected_id);
+            self.save_profiles()?;
+            self.selected = self.profiles.first().map(|p| p.id.clone());
+            self.edit_form = None;
+            self.sync_selected_form();
+            Ok(())
+        } else {
+            Err(anyhow!("Profile not found"))
+        }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
+        }
+
+        self.save_profiles()?;
+        self.selected = Some(updated.id.clone());
+        self.edit_form = Some(ProfileForm::from_profile(&updated, &self.secret_store)?);
+        Ok(updated)
     }
 
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
