@@ -18,6 +18,7 @@ pub struct AppPaths {
     pub base_dir: PathBuf,
     pub settings_path: PathBuf,
     pub secret_key_path: PathBuf,
+    pub shared_profiles_path: PathBuf,
 }
 
 impl AppPaths {
@@ -38,10 +39,12 @@ impl AppPaths {
 
         let settings_path = base_dir.join("settings.toml");
         let secret_key_path = base_dir.join("secret.key");
+        let shared_profiles_path = base_dir.join("shared_profiles.toml");
         Ok(Self {
             base_dir,
             settings_path,
             secret_key_path,
+            shared_profiles_path,
         })
     }
 

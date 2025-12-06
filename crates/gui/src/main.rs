@@ -57,6 +57,7 @@ fn main() -> Result<()> {
                 active_tab: Tab::Profiles,
                 preset_forms,
                 selected_preset: None,
+                palette: CommandPalette::default(),
             })
         }),
     )
@@ -89,6 +90,313 @@ enum Tab {
     Profiles,
     History,
     Settings,
+    Dashboard,
+}
+
+#[derive(Debug, Clone)]
+struct UsageStats {
+    total: usize,
+    successes: usize,
+    failures: usize,
+    unique_profiles: usize,
+    top_profile: Option<(String, usize)>,
+    last_connection: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct Achievement {
+    title: String,
+    detail: String,
+    achieved: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+struct CommandPalette {
+    open: bool,
+    query: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PaletteAction {
+    ConnectSelected,
+    EditSelected,
+    OpenSettings,
+    OpenDashboard,
+    NewProfile,
+}
+
+#[derive(Debug, Clone)]
+struct PaletteEntry {
+    label: String,
+    action: PaletteAction,
+}
+
+#[derive(Clone)]
+struct ForwardingForm {
+    direction: ForwardDirection,
+    local_host: String,
+    local_port: String,
+    remote_host: String,
+    remote_port: String,
+}
+
+#[derive(Clone)]
+struct ForwardingPresetForm {
+    name: String,
+    description: String,
+    rule: ForwardingForm,
+}
+
+#[derive(Clone)]
+struct ProfileForm {
+    original_id: String,
+    id: String,
+    name: String,
+    host: String,
+    port: String,
+    protocol: Protocol,
+    user: String,
+    group: String,
+    tags: String,
+    danger_level: DangerLevel,
+    pinned: bool,
+    macro_path: String,
+    color: String,
+    description: String,
+    extra_args: String,
+    password: String,
+    show_password: bool,
+    ssh_forwardings: Vec<ForwardingForm>,
+}
+
+impl ForwardingForm {
+    fn from_forwarding(f: &SshForwarding) -> Self {
+        Self {
+            direction: f.direction.clone(),
+            local_host: f.local_host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+            local_port: if f.local_port == 0 {
+                String::new()
+            } else {
+                f.local_port.to_string()
+            },
+            remote_host: f.remote_host.clone(),
+            remote_port: if f.remote_port == 0 {
+                String::new()
+            } else {
+                f.remote_port.to_string()
+            },
+        }
+    }
+
+    fn to_forwarding(&self) -> Result<SshForwarding> {
+        let local_port = if self.local_port.trim().is_empty() {
+            0
+        } else {
+            self.local_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| anyhow!("Invalid local port"))?
+        };
+
+        let remote_port = if self.remote_port.trim().is_empty() {
+            0
+        } else {
+            self.remote_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| anyhow!("Invalid remote port"))?
+        };
+
+        Ok(SshForwarding {
+            direction: self.direction.clone(),
+            local_host: if self.local_host.trim().is_empty() {
+                None
+            } else {
+                Some(self.local_host.trim().to_string())
+            },
+            local_port,
+            remote_host: self.remote_host.trim().to_string(),
+            remote_port,
+        })
+    }
+}
+
+impl ForwardingPresetForm {
+    fn from_preset(p: &ForwardingPreset) -> Self {
+        Self {
+            name: p.name.clone(),
+            description: p.description.clone().unwrap_or_default(),
+            rule: ForwardingForm::from_forwarding(&p.rule),
+        }
+    }
+
+    fn to_preset(&self) -> Result<ForwardingPreset> {
+        Ok(ForwardingPreset {
+            name: self.name.trim().to_string(),
+            description: if self.description.trim().is_empty() {
+                None
+            } else {
+                Some(self.description.trim().to_string())
+            },
+            rule: self.rule.to_forwarding()?,
+        })
+    }
+}
+
+impl ProfileForm {
+    fn from_profile(profile: &Profile, secret_store: &SecretStore) -> Result<Self> {
+        let password = if let Some(cipher) = profile.password.as_ref() {
+            secret_store.decrypt(cipher)?
+        } else {
+            String::new()
+        };
+
+        let ssh_forwardings = profile
+            .ssh_forwardings
+            .iter()
+            .map(ForwardingForm::from_forwarding)
+            .collect();
+
+        Ok(Self {
+            original_id: profile.id.clone(),
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile
+                .port
+                .map(|p| p.to_string())
+                .unwrap_or_else(String::new),
+            protocol: profile.protocol.clone(),
+            user: profile.user.clone().unwrap_or_default(),
+            group: profile.group.clone().unwrap_or_default(),
+            tags: if profile.tags.is_empty() {
+                String::new()
+            } else {
+                profile.tags.join(", ")
+            },
+            danger_level: profile.danger_level.clone(),
+            pinned: profile.pinned,
+            macro_path: profile
+                .macro_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            color: profile.color.clone().unwrap_or_default(),
+            description: profile.description.clone().unwrap_or_default(),
+            extra_args: profile
+                .extra_args
+                .as_ref()
+                .map(|v| v.join(", "))
+                .unwrap_or_default(),
+            password,
+            show_password: false,
+            ssh_forwardings,
+        })
+    }
+
+    fn apply_to_profile(&self, original: &Profile, secret_store: &SecretStore) -> Result<Profile> {
+        if self.id.trim().is_empty() {
+            return Err(anyhow!("Profile ID is required"));
+        }
+        if self.name.trim().is_empty() {
+            return Err(anyhow!("Profile name is required"));
+        }
+        if self.host.trim().is_empty() {
+            return Err(anyhow!("Host is required"));
+        }
+
+        let port = if self.port.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.port
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid port"))?,
+            )
+        };
+
+        let tags: Vec<String> = self
+            .tags
+            .split(',')
+            .filter_map(|t| {
+                let v = t.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
+            .collect();
+
+        let extra_args_vec: Vec<String> = self
+            .extra_args
+            .split(|c| c == ',' || c == '\n')
+            .filter_map(|a| {
+                let v = a.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
+            .collect();
+
+        let ssh_forwardings: Vec<SshForwarding> = self
+            .ssh_forwardings
+            .iter()
+            .map(ForwardingForm::to_forwarding)
+            .collect::<Result<_>>()?;
+
+        let password = if self.password.trim().is_empty() {
+            None
+        } else {
+            Some(secret_store.encrypt(self.password.trim().as_bytes())?)
+        };
+
+        let mut profile = original.clone();
+        profile.id = self.id.trim().to_string();
+        profile.name = self.name.trim().to_string();
+        profile.host = self.host.trim().to_string();
+        profile.port = port;
+        profile.protocol = self.protocol.clone();
+        profile.user = if self.user.trim().is_empty() {
+            None
+        } else {
+            Some(self.user.trim().to_string())
+        };
+        profile.group = if self.group.trim().is_empty() {
+            None
+        } else {
+            Some(self.group.trim().to_string())
+        };
+        profile.tags = tags;
+        profile.danger_level = self.danger_level.clone();
+        profile.pinned = self.pinned;
+        profile.macro_path = if self.macro_path.trim().is_empty() {
+            None
+        } else {
+            Some(self.macro_path.trim().into())
+        };
+        profile.color = if self.color.trim().is_empty() {
+            None
+        } else {
+            Some(self.color.trim().to_string())
+        };
+        profile.description = if self.description.trim().is_empty() {
+            None
+        } else {
+            Some(self.description.trim().to_string())
+        };
+        profile.extra_args = if extra_args_vec.is_empty() {
+            None
+        } else {
+            Some(extra_args_vec)
+        };
+        profile.password = password;
+        profile.ssh_forwardings = ssh_forwardings;
+        Ok(profile)
+    }
 }
 
 #[derive(Clone)]
@@ -377,6 +685,7 @@ struct LauncherApp {
     active_tab: Tab,
     preset_forms: Vec<ForwardingPresetForm>,
     selected_preset: Option<usize>,
+    palette: CommandPalette,
 }
 
 impl eframe::App for LauncherApp {
@@ -453,6 +762,10 @@ impl eframe::App for LauncherApp {
                 ui.selectable_value(&mut self.active_tab, Tab::Profiles, "Profiles");
                 ui.selectable_value(&mut self.active_tab, Tab::History, "History");
                 ui.selectable_value(&mut self.active_tab, Tab::Settings, "Settings");
+                ui.selectable_value(&mut self.active_tab, Tab::Dashboard, "Dashboard");
+                if ui.button("Palette").clicked() {
+                    self.palette.open = true;
+                }
             });
             ui.separator();
 
@@ -460,11 +773,16 @@ impl eframe::App for LauncherApp {
                 Tab::Profiles => self.render_profiles_tab(ui, ctx, &filtered),
                 Tab::History => self.render_history_tab(ui),
                 Tab::Settings => self.render_settings_tab(ui, ctx),
+                Tab::Dashboard => self.render_dashboard_tab(ui),
             }
         });
 
         if let Some(confirm) = self.confirm.take() {
             self.render_confirm_dialog(ctx, confirm);
+        }
+
+        if self.palette.open {
+            self.render_palette(ctx);
         }
     }
 }
@@ -559,6 +877,312 @@ impl LauncherApp {
             ord => ord,
         });
         list
+    }
+
+    fn usage_stats(&self) -> UsageStats {
+        let total = self.history.len();
+        let successes = self.history.iter().filter(|h| h.success).count();
+        let failures = total.saturating_sub(successes);
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for entry in &self.history {
+            *counts.entry(entry.profile_id.clone()).or_insert(0) += 1;
+        }
+        let top_profile = counts
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1))
+            .map(|(k, v)| (k.clone(), *v));
+        let last_connection = self.history.first().map(|h| h.timestamp);
+
+        UsageStats {
+            total,
+            successes,
+            failures,
+            unique_profiles: counts.len(),
+            top_profile,
+            last_connection,
+        }
+    }
+
+    fn collect_achievements(&self, stats: &UsageStats) -> Vec<Achievement> {
+        let mut achievements = Vec::new();
+        achievements.push(Achievement {
+            title: "First contact".into(),
+            detail: "Run at least one connection".into(),
+            achieved: stats.total > 0,
+        });
+        achievements.push(Achievement {
+            title: "Reliable operator".into(),
+            detail: "Zero failures recorded".into(),
+            achieved: stats.total > 0 && stats.failures == 0,
+        });
+        achievements.push(Achievement {
+            title: "Explorer".into(),
+            detail: "Use five or more unique profiles".into(),
+            achieved: stats.unique_profiles >= 5,
+        });
+        achievements.push(Achievement {
+            title: "Frequent flyer".into(),
+            detail: "Ten or more total launches".into(),
+            achieved: stats.total >= 10,
+        });
+        achievements.push(Achievement {
+            title: "Pinned powerhouse".into(),
+            detail: "Connect to a pinned profile".into(),
+            achieved: self.history.iter().any(|h| {
+                self.profiles
+                    .iter()
+                    .any(|p| p.pinned && p.id == h.profile_id)
+            }),
+        });
+        achievements
+    }
+
+    fn topology_summary(&self) -> (Vec<(String, usize)>, Vec<(String, usize)>) {
+        let mut groups: HashMap<String, usize> = HashMap::new();
+        let mut tags: HashMap<String, usize> = HashMap::new();
+        for profile in &self.profiles {
+            let group = profile
+                .group
+                .clone()
+                .unwrap_or_else(|| "(ungrouped)".into());
+            *groups.entry(group).or_insert(0) += 1;
+            for tag in &profile.tags {
+                *tags.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut group_list: Vec<_> = groups.into_iter().collect();
+        group_list.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut tag_list: Vec<_> = tags.into_iter().collect();
+        tag_list.sort_by(|a, b| b.1.cmp(&a.1));
+        (group_list, tag_list)
+    }
+
+    fn render_dashboard_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Usage dashboard");
+        let stats = self.usage_stats();
+        ui.horizontal(|ui| {
+            ui.label(format!("Total: {}", stats.total));
+            ui.label(format!("Successes: {}", stats.successes));
+            ui.label(format!("Failures: {}", stats.failures));
+            let rate = if stats.total == 0 {
+                0.0
+            } else {
+                (stats.successes as f32 / stats.total as f32) * 100.0
+            };
+            ui.label(format!("Success rate: {:.1}%", rate));
+        });
+        if let Some((id, count)) = &stats.top_profile {
+            ui.label(format!("Top profile: {} ({} launches)", id, count));
+        }
+        if let Some(last) = stats.last_connection {
+            ui.label(format!(
+                "Last connection: {}",
+                last.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
+            ));
+        }
+
+        ui.separator();
+        ui.heading("Achievements");
+        for ach in self.collect_achievements(&stats) {
+            let color = if ach.achieved {
+                Color32::LIGHT_GREEN
+            } else {
+                Color32::GRAY
+            };
+            ui.colored_label(color, format!("{} — {}", ach.title, ach.detail));
+        }
+
+        ui.separator();
+        ui.heading("Topology overview");
+        let (groups, tags) = self.topology_summary();
+        ui.columns(2, |cols| {
+            cols[0].label("Groups");
+            for (name, count) in groups {
+                cols[0].label(format!("{}: {} profiles", name, count));
+            }
+            cols[1].label("Tags");
+            for (tag, count) in tags {
+                cols[1].label(format!("{}: {} profiles", tag, count));
+            }
+        });
+
+        ui.separator();
+        ui.heading("Sharing");
+        self.render_share_controls(ui);
+    }
+
+    fn render_share_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!(
+            "Shared file: {}",
+            self.paths.shared_profiles_path.display()
+        ));
+        ui.horizontal(|ui| {
+            let export_selected = ui.add_enabled(
+                self.selected.is_some(),
+                egui::Button::new("Export selected"),
+            );
+            if export_selected.clicked() {
+                let ids = self.selected.clone().into_iter().collect();
+                match self.export_profiles(ids) {
+                    Ok(_) => {
+                        self.error = None;
+                    }
+                    Err(err) => self.error = Some(err.to_string()),
+                }
+            }
+            if ui.button("Export all").clicked() {
+                if let Err(err) = self.export_profiles(None) {
+                    self.error = Some(err.to_string());
+                } else {
+                    self.error = None;
+                }
+            }
+            if ui.button("Import shared").clicked() {
+                match self.import_shared_profiles() {
+                    Ok(count) => {
+                        self.status = Some(format!("Imported {} profiles", count));
+                        self.error = None;
+                    }
+                    Err(err) => self.error = Some(err.to_string()),
+                }
+            }
+        });
+    }
+
+    fn export_profiles(&mut self, ids: Option<Vec<String>>) -> Result<()> {
+        let profiles: Vec<Profile> = match ids {
+            Some(ids) => self
+                .profiles
+                .iter()
+                .filter(|p| ids.contains(&p.id))
+                .cloned()
+                .collect(),
+            None => self.profiles.clone(),
+        };
+        if profiles.is_empty() {
+            return Err(anyhow!("No profiles to export"));
+        }
+        let set = ProfileSet { profiles };
+        set.save(&self.paths.shared_profiles_path)?;
+        self.status = Some(format!(
+            "Exported {} profiles to {}",
+            set.profiles.len(),
+            self.paths.shared_profiles_path.display()
+        ));
+        Ok(())
+    }
+
+    fn import_shared_profiles(&mut self) -> Result<usize> {
+        let set = ProfileSet::load(&self.paths.shared_profiles_path)?;
+        let mut imported = 0;
+        for profile in set.profiles {
+            if let Some(idx) = self.profiles.iter().position(|p| p.id == profile.id) {
+                self.profiles[idx] = profile;
+            } else {
+                self.profiles.push(profile);
+            }
+            imported += 1;
+        }
+        self.save_profiles()?;
+        self.sync_selected_form();
+        Ok(imported)
+    }
+
+    fn palette_entries(&self) -> Vec<PaletteEntry> {
+        let mut entries = vec![
+            PaletteEntry {
+                label: "Open settings".into(),
+                action: PaletteAction::OpenSettings,
+            },
+            PaletteEntry {
+                label: "Dashboard".into(),
+                action: PaletteAction::OpenDashboard,
+            },
+            PaletteEntry {
+                label: "New profile".into(),
+                action: PaletteAction::NewProfile,
+            },
+        ];
+
+        if self.selected.is_some() {
+            entries.push(PaletteEntry {
+                label: "Connect selected".into(),
+                action: PaletteAction::ConnectSelected,
+            });
+            entries.push(PaletteEntry {
+                label: "Edit selected".into(),
+                action: PaletteAction::EditSelected,
+            });
+        }
+        entries
+    }
+
+    fn render_palette(&mut self, ctx: &egui::Context) {
+        let mut open = self.palette.open;
+        let entries = self.palette_entries();
+        let filtered: Vec<PaletteEntry> = if self.palette.query.trim().is_empty() {
+            entries
+        } else {
+            let needle = self.palette.query.to_lowercase();
+            entries
+                .into_iter()
+                .filter(|e| e.label.to_lowercase().contains(&needle))
+                .collect()
+        };
+
+        egui::Window::new("Command palette")
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.text_edit_singleline(&mut self.palette.query);
+                ui.separator();
+                for entry in &filtered {
+                    if ui.button(&entry.label).clicked() {
+                        self.execute_palette_action(entry.action);
+                        self.palette.open = false;
+                        self.palette.query.clear();
+                    }
+                }
+                if filtered.is_empty() {
+                    ui.label("No actions match");
+                }
+            });
+        self.palette.open = open;
+    }
+
+    fn execute_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::ConnectSelected => {
+                if let Err(err) = self.persist_form().and_then(|p| {
+                    if p.is_dangerous() {
+                        self.confirm = Some(ConfirmState::new(p));
+                        Ok(())
+                    } else {
+                        self.execute_connect(p)
+                    }
+                }) {
+                    self.error = Some(err.to_string());
+                }
+            }
+            PaletteAction::EditSelected => {
+                self.active_tab = Tab::Profiles;
+                self.sync_selected_form();
+            }
+            PaletteAction::OpenSettings => {
+                self.active_tab = Tab::Settings;
+            }
+            PaletteAction::OpenDashboard => {
+                self.active_tab = Tab::Dashboard;
+            }
+            PaletteAction::NewProfile => {
+                if let Err(err) = self.add_profile() {
+                    self.error = Some(err.to_string());
+                } else {
+                    self.active_tab = Tab::Profiles;
+                    self.status = Some("New profile created".into());
+                }
+            }
+        }
     }
 
     fn render_profiles_tab(
@@ -856,6 +1480,17 @@ impl LauncherApp {
             Ok(())
         } else {
             Err(anyhow!("Profile not found"))
+        }
+    }
+
+    fn generate_profile_id(&self) -> String {
+        let mut idx = 1;
+        loop {
+            let candidate = format!("profile-{}", idx);
+            if !self.profiles.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            idx += 1;
         }
     }
 
