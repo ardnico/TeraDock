@@ -1,13 +1,21 @@
-# PLAN.md
+# PLAN.md - TeraDock (SSH 直接版)
 
 ## 0. 概要
 
-Windows 上で Tera Term（ttermpro.exe）を起動するためのランチャアプリケーションを実装する。  
-主目的は「**よく使う接続先に素早く・安全に・ミスなく接続するための入口**」を提供すること。
+TeraDock を「Tera Term 専用ランチャ」から拡張し、  
+**Windows 標準の OpenSSH（ssh.exe）や Windows Terminal を使って SSH 接続する汎用 SSH ランチャ**として再定義する。
 
 - 実行環境: Windows 10/11
-- 配布形態: 単一インストーラー（.exe）で配布
-- 実行形式: GUI ランチャ + CLI モード両対応
+- 依存ツール:
+  - OpenSSH for Windows (`ssh.exe`)  … できれば OS 標準
+  - 任意: Windows Terminal (`wt.exe`) が入っていれば優先利用
+- 配布形態: インストーラー付き Windows アプリ
+- 役割:
+  - 接続プロファイル管理
+  - コマンドライン生成
+  - 安全装置付きの SSH 接続起動
+
+**Tera Term は一切前提としない。**
 
 ---
 
@@ -15,542 +23,230 @@ Windows 上で Tera Term（ttermpro.exe）を起動するためのランチャ�
 
 ### 1.1 ゴール
 
-- Tera Term をコマンドラインで起動する処理をラップし、**プロファイル選択だけで接続**できるようにする。
-- 接続先プロファイル（環境・タグ・色・マクロ等）を管理できる UI を提供する。
-- **本番環境など危険な接続に対して安全装置を提供**し、操作ミスを減らす。
-- Windows 向けに **インストーラーを提供**し、非エンジニアでも導入可能な形にする。
-- CLI からも同じプロファイルを使い回しできるようにし、バッチや他ツールからも利用可能にする。
+- プロファイルを選ぶだけで **`ssh user@host -p port`** を実行できるランチャにする。
+- Windows Terminal や既定コンソール上で SSH セッションを開く。
+- `dev / stg / prod` などの環境ごとにプロファイル管理・色分け・安全確認を行う。
+- TeraDock 自身は **SSH プロセスの起動と管理に専念し、ターミナルエミュレータは外部ツールに任せる。**
 
-### 1.2 アンチゴール（やらないこと）
+### 1.2 アンチゴール
 
-- SSH クライアントそのものの実装（= Tera Term を置き換えること）はしない。
-- SSH 鍵管理ツールや VPN クライアントなどの「周辺ツール」本体は作らない（必要ならフックで呼び出す）。
-- 多プラットフォーム（Linux / macOS）対応は scope 外（Windows 専用で割り切る）。
-- 高機能な設定同期（クラウド・オンライン同期など）は v1.0 ではやらない。
-- 自動アップデート機構は初期バージョンでは対応しない（後続フェーズ候補）。
+- SSH プロトコルの自前実装（libssh2 直叩きなど）はしない（トラブルの沼）。
+- ターミナルエミュレータ（VT100/ANSI エスケープの解釈など）を自前実装しない。
+- SFTP / SCP GUI クライアントを内包しない。
+- 多プラットフォーム対応（Linux/macOS）は scope 外。
 
 ---
 
-## 2. 想定環境 / 前提条件
+## 2. 想定構成（バックエンド切り替え）
 
-- ユーザーが Windows 10/11 上に Tera Term（ttermpro.exe）をすでにインストール済みであること。
-- 権限周りは標準ユーザーで利用可能（インストール時に管理者権限が必要な場合あり）。
-- プロファイル定義はローカルファイル（TOML）で管理し、Git 等でバージョン管理可能な形を想定。
-- オフライン環境でも問題なく動作すること（外部ネット依存なし）。
+TeraDock の役割を「**SSH クライアントの起動フロントエンド**」と定義し直す。  
+接続先プロファイルごと、またはアプリ全体の設定で、以下のような「クライアント種別」を選べるようにする。
+
+- `ClientKind::WindowsTerminalSsh`
+  - `wt.exe` を起動し、その中で `ssh user@host -p 22` を実行
+- `ClientKind::PlainSsh`
+  - 既定コンソール（`cmd.exe` / `powershell.exe`）から `ssh ...` を起動
+- （将来拡張）`ClientKind::TeraTerm`, `ClientKind::PuTTY` などを追加する余地は残すが、**今回のプランでは使わない。**
 
 ---
 
 ## 3. 技術選定
 
-### 3.1 言語・フレームワーク
+### 3.1 言語 / ライブラリ
 
-- **アプリ本体 & CLI & ロジック**: Rust (stable 1.8x 付近)
-- **GUI**:  
-  - `egui` + `eframe`（ネイティブウィンドウ / WebView 依存なし）
-- **設定ファイルフォーマット**: TOML
-  - ライブラリ: `toml`, `serde`
-- **ロギング**: `tracing` + `tracing-subscriber`
-- **ビルド / 配布**:
-  - ビルド: `cargo`（Windows x86_64 / aarch64 対応）
-  - インストーラー: **Inno Setup**（.iss スクリプトで exe, ショートカット, アンインストーラを生成）
+- 言語: Rust（現状の TeraDock と同じ）
+- 構成: `core` / `gui` / `cli` のワークスペース構成は維持
+- プロセス起動: `std::process::Command`
+- 設定ファイル: TOML (`serde` + `toml`)
+- GUI: `egui` + `eframe`（既存の TeraDock 設計を流用）
+- ロギング: `tracing` + `tracing-subscriber`
+- インストーラー: Inno Setup（現行の `installer` ディレクトリを流用・修正）
 
-#### Rust + egui を選ぶ理由
+### 3.2 SSH クライアント
 
-- 単一バイナリで配布しやすく、ランタイム依存が少ない（.NET ランタイム不要）。
-- CLI と GUI を **同一コードベースのコアロジック**から呼び出せる。
-- egui は比較的シンプルな GUI を素早く構築でき、Windows でも安定して動く。
-- ユーザーが Rust に慣れているので、メンテしやすい。
+- **優先**: Windows 標準の OpenSSH (`ssh.exe`)
+- 任意: Windows Terminal (`wt.exe`) がある場合はそれを使って新規タブで起動
 
-#### 代替案（あえて書いておく）
+理由：
 
-- C# + WPF / WinForms + WiX / Squirrel など
-  - Windows ネイティブ感は高いが、.NET ランタイム依存や将来の移植性を考えると今回は採用しない。
+- OpenSSH は実績充分で、鍵周り・暗号スイートなどを自前で追随しなくて済む。
+- TeraDock は「プロファイル管理＋コマンド生成」に集中できる。
+- ターミナルの描画や入力処理は Windows Terminal / コンソールに全振り。
 
 ---
 
-## 4. 全体アーキテクチャ
+## 4. 全体アーキテクチャ（SSH 直接版）
 
-### 4.1 コンポーネント構成
+### 4.1 コンポーネント
 
-- `core`（ライブラリ crate）
+- `core`:
   - プロファイル管理
-  - コマンドライン生成ロジック
-  - ログ/履歴保存
-  - 危険接続判定
-- `cli`（bin crate）
-  - サブコマンド: `list`, `connect`, `export`, `import` etc.
-- `gui`（bin crate）
-  - egui ベースのランチャ UI
-- `installer`（ツールではなく Inno Setup 設定ファイル）
-  - `setup.iss` により `gui.exe` / `cli.exe` / 設定フォルダ等をまとめてインストール
+  - 接続コマンド生成（`ssh.exe` / `wt.exe` 用）
+  - バックエンド種別 (`ClientKind`) 判定
+  - ログ記録
+- `gui`:
+  - プロファイル一覧 UI
+  - 検索・タグ・グループ・危険フラグ
+  - 「接続」ボタン押下 → `core` に接続要求
+- `cli`:
+  - `teradock list`
+  - `teradock connect <profile-id>`
+- `installer`:
+  - `gui.exe` / `cli.exe` をまとめる Inno Setup
 
-### 4.2 ディレクトリ構成（案）
-
-```text
-project-root/
-  Cargo.toml
-  crates/
-    core/
-      src/...
-    cli/
-      src/main.rs
-    gui/
-      src/main.rs
-  config/
-    default_profiles.toml
-  installer/
-    setup.iss      # Inno Setup スクリプト
-  dist/
-    # ビルド成果物、インストーラ出力先
-  docs/
-    PLAN.md
-    AGENTS.md (必要なら後で)
-````
-
----
-
-## 5. 機能一覧と優先度
-
-### 5.1 P0（MVP 必須）
-
-1. **プロファイル管理（ホスト一覧）**
-
-   * フィールド例：
-
-     * `id`, `name`, `host`, `port`, `protocol`(ssh/telnet), `user`
-     * `group`（dev/stg/prod etc.）
-     * `tags`（文字列リスト）
-     * `danger_level`（normal/warn/critical）
-     * `macro_path`（任意）
-     * `window_color` / `title_suffix` など
-   * 操作:
-
-     * 追加 / 編集 / 削除
-     * 永続化: `profiles.toml`
-
-2. **コマンドライン自動生成 & 起動**
-
-   * Tera Term 実行ファイルパス設定（手動指定 + 設定ファイル保存）
-   * 例: `ttermpro.exe /ssh host:22 /auth=user /F=profile.ini /W="title"`
-   * 生成されるコマンドラインをログに残す（デバッグオプション有り）
-
-3. **プロファイル検索・フィルタ・タグ**
-
-   * 名前 / ホスト / タグ / グループ でのフィルタリング
-   * egui のテキストボックス + リストでインクリメンタルフィルタ
-
-4. **最近使った接続 & ピン留め**
-
-   * 接続実行時に「最終接続時刻」を記録し、ソート表示
-   * プロファイルに「pinned: bool」フラグ
-
-5. **環境ごとのグルーピング & 色分け**
-
-   * `group` ごとにセクション表示
-   * `danger_level` に応じて GUI 上の色を変える
-   * Tera Term 起動時に `title_suffix` や背景色設定（可能な範囲で）
-
-6. **危険接続の安全装置**
-
-   * `danger_level == critical` のプロファイルは接続前に確認ダイアログ
-
-     * 「本番環境です。本当に接続しますか？」「今日は二度と聞かない」チェックボックス
-
-7. **ログ／履歴**
-
-   * ファイル形式: ローテートするテキスト / JSON Lines / SQLite のいずれか
-
-     * MVP では JSONL（1行1イベント）で十分
-   * 記録内容: datetime, profile_id, host, user, result(success/fail), duration 等
-
-8. **シンプル GUI ランチャ**
-
-   * メイン画面要素:
-
-     * 検索ボックス
-     * プロファイル一覧（グループごと）
-     * 接続ボタン
-     * プロファイル編集ボタン
-     * 設定ボタン（Tera Term パスなど）
-   * UI は egui で構築
-
-### 5.2 P1（完成度アップ用 / v0.2 以降）
-
-1. 接続前後フック（Pre/Post Hook）
-2. Tera Term マクロ (.ttl) の紐付け & オプション実行
-3. テンプレート & プレースホルダ
-4. プロファイル設定の Import/Export（TOML/JSON）
-5. CLI モード:
-
-   * `ttlaunch list`
-   * `ttlaunch connect <profile-id>`
-6. プロファイル階層構造 & 継承（共通設定親プロファイル）
-
-### 5.3 P2（遊び・余裕あれば）
-
-1. 使用統計ダッシュボード → 実装済み（Dashboard タブで履歴から成功率・トッププロファイル・最終接続を表示）
-2. 実績・バッジシステム → 実装済み（履歴に基づく達成条件を表示）
-3. 簡易トポロジビュー → 実装済み（グループ・タグ別のプロファイル件数を集計表示）
-4. 組織向け共通プロファイル配布機能 → 実装済み（共有 TOML へのエクスポート／インポートを GUI から実行可能）
-5. コマンドパレット風 UI（Ctrl+P ライク） → 実装済み（Palette ボタンから共通操作を呼び出し）
-
-### 5.4 新規拡張候補
-
-- Windows Credential Manager / DPAPI を利用したパスワード保管バックエンドの選択肢追加（ローカル鍵ファイル方式との切り替え）。 → 実装済み（GUI 設定からバックエンドを切替可能、Credential Manager / DPAPI / ローカル鍵に対応）。
-- SSH ポートフォワーディングのプリセット管理（よく使う転送設定をテンプレート化して適用）。 → 実装済み（プリセットを設定画面で編集・保存し、プロファイル編集画面から適用可能）。
-- プロファイルのテンプレート / 複製ウィザードを用意し、大量追加や命名規則適用を簡素化する。
-- テーマ設定のエクスポート/インポートと職場向けデザインプリセット配布。
-
----
-
-## 6. データモデル（概要）
-
-### 6.1 Profile
+### 4.2 プロファイルモデル（SSH 想定）
 
 ```rust
+enum ClientKind {
+    WindowsTerminalSsh,
+    PlainSsh,
+    // TeraTerm, Putty などは将来追加用
+}
+
 struct Profile {
     id: String,
     name: String,
     host: String,
     port: u16,
-    protocol: Protocol,        // Ssh, Telnet, Serial, etc. (MVPはSsh優先)
     user: Option<String>,
-    group: Option<String>,     // "dev", "stg", "prod"...
+    group: Option<String>,         // dev/stg/prod...
     tags: Vec<String>,
-    danger_level: DangerLevel, // Normal, Warn, Critical
-    macro_path: Option<PathBuf>,
-    window_color: Option<WindowColor>,
-    title_suffix: Option<String>,
+    danger_level: DangerLevel,     // Normal/Warn/Critical
+    client_kind: ClientKind,
     pinned: bool,
     last_used_at: Option<DateTime<Utc>>,
+    // 省略：色設定などは現状と同様
 }
-```
-
-付帯する enum / 型:
-
-```rust
-enum Protocol { Ssh, Telnet }
-enum DangerLevel { Normal, Warn, Critical }
-
-struct WindowColor { r: u8, g: u8, b: u8 }
-```
-
-### 6.2 Config
-
-```rust
-struct AppConfig {
-    tera_term_path: PathBuf,
-    profiles_path: PathBuf,
-    logs_path: PathBuf,
-    ui: UiConfig,
-}
-```
-
-補助構造体:
-
-```rust
-struct UiConfig {
-    theme: UiTheme,                 // Light/Dark/System
-    require_force_for_prod: bool,   // prod 接続時の強制確認
-    recent_limit: usize,            // 最近使った接続の保持件数
-}
-
-struct HistoryEntry {
-    profile_id: String,
-    started_at: DateTime<Utc>,
-    finished_at: DateTime<Utc>,
-    result: ConnectResult,          // Success/Failed + エラー理由
-    command: Vec<String>,           // 実行した完全な引数リスト
-    log_path: PathBuf,              // 生成されたログファイルパス
-}
-```
-
-### 6.3 コマンド生成結果
-
-`core` は実行前に副作用無しでコマンドを構築し、GUI/CLI に渡す。戻り値の想定:
-
-```rust
-struct LaunchCommand {
-    program: PathBuf,          // ttermpro.exe のパス
-    args: Vec<OsString>,       // /ssh host:22 ... などの引数
-    log_path: PathBuf,         // 実行後に生成されるログパス（core が事前に決定）
-    needs_confirmation: bool,  // 危険接続なら true
-}
-```
+````
 
 ---
 
-## 7. フェーズ分け / マイルストーン
+## 5. 機能一覧（SSH 直接版）
 
-### フェーズ 0: プロジェクトセットアップ
+### 5.1 P0（必須）
 
-* Rust ワークスペース構成 (`core`, `cli`, `gui`) を作成
-* 基本的な `Profile` / `AppConfig` 型定義
-* TOML 設定の読み書き実装
-* ロギング基盤（`tracing`）導入
+* プロファイル管理（追加/編集/削除/保存）
+* プロファイル検索・フィルタ・タグ
+* dev/stg/prod グルーピング & 色分け
+* 危険接続（`prod` など）時の確認ダイアログ
+* 接続コマンド生成:
 
-**完了条件:**
+  * `WindowsTerminalSsh`:
 
-* `cargo test` が通る
-* `profiles.toml` の読み書きが行えるユニットテストがある
+    * `wt.exe new-tab ssh user@host -p 22`
+  * `PlainSsh`:
 
----
+    * `cmd.exe /c start "" ssh user@host -p 22`
+* 接続履歴ログ：
 
-### フェーズ 1: コアロジック（P0 機能の「中身」）
+  * datetime, profile_id, host, user, client_kind, result
+* CLI:
 
-* `core` に以下を実装:
+  * `teradock list`
+  * `teradock connect <profile-id>`
 
-  * プロファイル管理（追加/編集/削除/検索）
-  * コマンドライン生成
-  * 危険接続判定
-  * ログ／履歴記録
+### 5.2 P1（余裕が出てきたら）
 
-**完了条件:**
-
-* CLI テスト用コードから `core` を呼び出し、指定プロファイルのコマンドライン文字列が得られる。
-* テスト実行時にログファイルが意図通り出力される。
-
----
-
-### フェーズ 2: CLI インターフェース（最小版）
-
-* `cli` crate でサブコマンド実装:
-
-  * `list`
-  * `connect <profile-id>`
-* `connect` 実行時に:
-
-  * `core` でコマンドライン文字列生成
-  * `std::process::Command` で `ttermpro.exe` を起動
-
-**完了条件:**
-
-* コマンドプロンプトから `ttlaunch connect dev1` などで実際に Tera Term が起動する。
+* Pre/Post Hook（`ssh` 起動前に VPN チェックなど）
+* プロファイル Import/Export (TOML/JSON)
+* プロファイル継承（共通設定の親を作る）
+* Windows Terminal のプロファイル名指定（`wt.exe -p "MyProfile" ssh ...`）
 
 ---
 
-### フェーズ 3: GUI ランチャ（P0 UI）
+## 6. フェーズ分け
 
-* `gui` crate で egui ベースのウィンドウアプリを作成
+### フェーズ 0: 既存コードの棚卸し
 
-  * プロファイル一覧表示
-  * 検索ボックス
-  * グルーピング & 色分け
-  * 接続ボタン
-  * 編集ダイアログ
-  * 設定ダイアログ（Tera Term パス等）
-* 危険接続時の確認ダイアログ実装
+* 現行 TeraDock の `core` / `gui` / `cli` 構成を確認。
+* `ttermpro.exe` 前提になっている箇所を洗い出し、**「クライアント依存ロジック」を 1 箇所に集約**するためのインターフェースを定義。
 
-**完了条件:**
+完了条件:
 
-* GUI アプリから P0 機能一通りが操作できる。
-* プロファイル編集内容が TOML に保存され、再起動時も反映される。
+* `core` に `ClientKind` と `build_command(&Profile)` 的な関数の骨組みが入る。
+* 既存の TeraTerm 用コマンド生成は暫定的に `ClientKind::TeraTerm` 実装として分離（将来的に消してもいい）。
 
 ---
 
-### フェーズ 4: インストーラー
+### フェーズ 1: SSH 直接版バックエンドの実装
 
-* `installer/setup.iss` を作成
+* `ClientKind::WindowsTerminalSsh` / `ClientKind::PlainSsh` を実装。
+* `build_command(profile: &Profile) -> CommandSpec` を実装：
 
-  * `gui.exe`, `cli.exe` を `Program Files\TeraTermLauncher` 等に配置
-  * スタートメニュー / デスクトップショートカット作成（任意）
-  * アンインストーラ登録
-* ビルドスクリプト（PowerShell / batch）で:
+  * `CommandSpec` は `.exe パス + 引数 Vec<String>` を持つ構造体。
+* 実際の起動は `std::process::Command` に委譲。
 
-  * `cargo build --release`
-  * 成果物を `dist/` にコピー
-  * Inno Setup コマンドラインで `setup.exe` を生成
+完了条件:
 
-**完了条件:**
-
-* クリーンな Windows 環境に `setup.exe` を配布 → インストール → 起動 → 接続まで確認。
+* `core` のユニットテストで、`Profile` から期待される `CommandSpec` が生成される。
 
 ---
 
-### フェーズ 5: P1 機能の追加（必要なものから順に）
+### フェーズ 2: CLI 統合
 
-優先度高め順:
+* `cli` crate で `teradock connect <id>` を実装。
+* 指定プロファイルを読み込み → `build_command` → `Command::spawn()` → エラー時は標準エラーにメッセージ。
 
-1. 接続前後フック（`hooks.toml` / プロファイルごとの設定）
-2. マクロ紐付け＆自動実行
-3. Import/Export（`profiles.toml` の CLI での操作）
-4. プロファイル継承（共通設定の親プロファイル機構）
+完了条件:
 
-フェーズ 5 以降は、**実際の運用で不足を感じたものだけ選んで実装**する。
+* コマンドプロンプトから `teradock connect dev-01` 実行で Windows Terminal or ssh が立ち上がり、接続できる。
 
 ---
 
-## 8. プロファイル仕様と設定ファイル
+### フェーズ 3: GUI 統合
 
-### 8.1 プロファイルの TOML フォーマット
+* `gui` crate で:
 
-`config/profiles.toml` に保存する。すべてのフィールドを明示し、GUI/CLI で同じ構造を読み書きする。
+  * プロファイル編集 UI に `ClientKind` を設定するコンボボックスを追加。
+  * 「接続ボタン」押下で `core` の接続 API を叩く。
+  * 危険接続の確認ダイアログ実装。
+* 既存の TeraTerm 前提の UI 文字列・設定項目を削るか、「クライアント種別に応じて表示切替」。
 
-```toml
-version = 1
+完了条件:
 
-[[profiles]]
-id = "dev1"
-name = "Dev Server 1"
-host = "192.168.1.10"
-port = 22
-protocol = "ssh"       # ssh | telnet
-user = "deploy"
-group = "dev"
-tags = ["team-a", "app"]
-color = "#3b82f6"      # GUI ラベル用
-macro = "macros/init.ttl"
-danger = false          # true のとき接続前ダイアログ表示
-note = "用途や注意事項を自由記述"
-
-[[profiles.extra_shortcuts]]
-label = "Jump to bastion"
-args = ["/ssh", "bastion:22"]
-
-[profiles.hooks]
-pre = ["scripts/pre.bat"]
-post = ["scripts/post.bat"]
-
-[profiles.tera_term]
-path = "C:/Program Files/Tera Term/ttermpro.exe"
-extra_args = ["/ssh"]
-```
-
-### 8.2 設定ファイルのパスと扱い
-
-- 既定値: `%APPDATA%/TeraTermLauncher/profiles.toml`。無ければ `config/default_profiles.toml` を初回コピー。
-- CLI 引数 `--config <path>` で上書き可能。GUI からも設定ダイアログで変更し、次回起動時に反映。
-- `config/settings.toml` にアプリ共通設定（Tera Term パス、ログディレクトリ、テーマなど）を保存。
-- プロファイルと設定の schema バージョンを `version = 1` で明示し、後方互換性のために migration 関数を `core::config::migrate(v: u32)` に用意。
-- ファイル監視は行わず、起動時読み込み + 保存時上書きの単純モデルにする。
-
-### 8.3 コマンドライン生成規約
-
-- `core` はプロファイルと Tera Term のパスから **完全な引数リスト**を返す関数を提供する。
-  - 例: `ttermpro.exe /ssh host:22 /user="deploy" /log="<path>" /MACRO="macros/init.ttl"`
-- 引数生成は副作用なし。実行は `cli`/`gui` 側で `std::process::Command` に渡す。
-- ログファイルは `logs/YYYYMMDD/HHMMSS_profileid.log` 形式で作成し、パスは `core` が返す構造体に含める。
-- 生成規則:
-  - `protocol == ssh` の場合 `/ssh host:port` を必須。`telnet` の場合 `/telnet host:port`。
-  - `user` がある場合 `/user="<user>"` を付与。
-  - `macro_path` がある場合 `/MACRO="<path>"` を最後尾に追加。
-  - `extra_shortcuts.args` が指定されている場合、GUI のボタンから同じ組み立て処理を再利用する。
-  - 危険接続 (`danger_level == Critical`) は `/W="[PROD] <title>"` のようにウィンドウタイトルに接頭辞を付ける。
-
-### 8.4 安全装置の基本仕様
-
-- `danger = true` または `group = "prod"` の場合、GUI/CLI 両方で確認ダイアログまたは `--force` 要求。
-- 確認内容: プロファイル名/host/ユーザー/マクロ有無を表示し、「はい」でのみ実行。
-- 実行履歴は `logs/history.jsonl` に JSON Lines 形式で追記し、GUI で参照可能にする。
-- 履歴 UI: `gui` で「最近の接続」タブを用意し、`HistoryEntry` を時系列で表示。失敗時は赤色で理由を表示。
-- CLI では `ttlaunch history --limit 20` で最新イベントを表示（MVP では JSONL をそのまま整形）。
-- `--force` を指定した場合は履歴に `forced=true` を記録しておく。
-
-### 8.5 GUI の最小仕様
-
-- 画面構成: 左に検索 + フィルタ、右に詳細 + 接続ボタンの 2 カラム。
-- ショートカットキー: `Ctrl+F` 検索フォーカス、`Enter` で選択接続、`Ctrl+E` で編集ダイアログ。
-- 危険接続時は接続ボタンを赤色にし、ダイアログで 3 秒遅延後に「実行」ボタンを活性化する。
-- プロファイル編集はモーダルで、必須項目未入力時は保存ボタンを無効化。
-- 設定ダイアログで Tera Term パスを検証し、存在しない場合はエラー表示。
-
-### 8.6 CLI インターフェース（詳細）
-
-- コマンド:
-  - `ttlaunch list [--json]` : プロファイル ID, 名前, 危険度, 最終使用時刻を表示。`--json` で JSON 出力。
-  - `ttlaunch connect <profile-id> [--force] [--dry-run]` : コマンド生成のみ/実行。`--dry-run` でコマンドだけ表示。
-  - `ttlaunch history [--limit N]` : 最新 N 件を表示。デフォルト 20。
-- exit code 規約: 実行成功 0, プロファイル不存在 2, コマンド実行失敗 3, 入力エラー 64。
-- CLI は `core` に依存するのみで、設定ファイルの書き換えは行わない（編集は GUI 専用）。
+* GUI から P0 機能一式が使える。
+* TeraTerm がインストールされていない環境でも、OpenSSH と Windows Terminal だけで動作する。
 
 ---
 
-## 9. 開発プロセス / テスト
+### フェーズ 4: インストーラー更新
 
-### 9.1 コーディング規約
+* Inno Setup の `setup.iss` を更新:
 
-- Rust stable 1.8x をターゲット。`cargo fmt` / `cargo clippy -- -D warnings` を必須とする。
-- モジュールは crate 単位で分離し、共通ロジックは `crates/core` に集約。bin crate は薄く保つ。
-- エラーハンドリングは `anyhow::Result` + `thiserror` でドメインエラーを明示する。
+  * 説明文から「Tera Term 前提」の文言を削除。
+  * 必須コンポーネントとして「OpenSSH for Windows」の存在をチェック（存在しない場合は警告メッセージ）。
+* `dist/` にビルド＋インストーラ生成をまとめたバッチ/PS スクリプトを追加。
 
-### 9.2 テストと検証
+完了条件:
 
-- `crates/core` には TOML 読み書きとコマンド生成のユニットテストを用意。サンプルプロファイルを fixture として保持。
-- CLI は `cargo test -p cli -- --ignored` で E2E 風の統合テストを作成し、Windows 環境でのみ動くテストは `#[cfg(windows)]` でガード。
-- GUI はスモークテストとして起動・終了のテストを最小限に置く。UI 動作はマニュアル検証手順を `docs/validation.md` に残す。
-
-### 9.3 手動検証シナリオ
-
-1. `config/default_profiles.toml` をコピーしたクリーン環境で GUI を起動し、デフォルトプロファイルで接続（`--dry-run` ログ確認のみでも可）。
-2. 危険フラグ付きプロファイルで接続し、確認ダイアログ・赤色ボタン・3 秒遅延が機能することを確認。
-3. プロファイル編集で `host` を変更→保存→再起動後も反映されることを確認。
-4. CLI `ttlaunch list --json` が JSON を返し、`connect --dry-run` が実行せずにコマンドを表示することを確認。
-5. 履歴タブで直近の接続が新しい順に表示されること、失敗時のメッセージが赤で表示されることを確認。
-
-### 9.4 ビルド / 配布フロー
-
-1. `cargo build --release` で `target/release/ttlaunch-{cli,gui}.exe` を生成。
-2. `dist/` に成果物と `config/default_profiles.toml` をコピー。
-3. `installer/setup.iss` を Inno Setup CLI でビルドし、`dist/setup.exe` を得る。
-4. クリーンな Windows VM でインストール→接続確認を行い、ログ・設定の書き込みを検証。
-
-### 9.5 リリース判定基準
-
-- P0 機能すべてが GUI/CLI から操作可能で、危険接続の安全装置が動作していること。
-- `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test` が Windows 環境で通ること。
-- 手動検証シナリオ 5 点が Windows 10/11 で再現済みであることを `docs/validation.md` に記録。
-- インストーラーでのクリーンインストール→アンインストールが警告なしで完了すること。
+* クリーンな Windows 環境に対し `setup.exe` → TeraDock インストール → SSH 接続が行える。
 
 ---
 
-## 10. リスク / 前提条件 / 対策
+## 7. リスクと対策
 
-* **Tera Term のパス検出が環境依存**
+* **OpenSSH 未インストール環境**
 
-  * 対策: 自動検出（レジストリ or 既知のパス） + 手動設定 UI の併用。
-* **プロファイル定義が増えすぎると UI が煩雑になる**
+  * 対策: 起動時にパス検出し、見つからなければ「設定画面で ssh.exe のパスを指定させる」＋ GUI 上で明示的に警告。
+* **Windows Terminal 未インストール**
 
-  * 対策: タグ / グループ / 検索前提の設計。P2 のトポロジビューなどは後回し。
-* **egui の UI 表現力限界**
+  * 対策: `WindowsTerminalSsh` が使えない場合は自動的に `PlainSsh` にフォールバック。
+* **社内ポリシーで SSH クライアントが固定されている場合**
 
-  * 対策: まずはシンプルで済ませる。凝った UI は scope 外とする。
-* **インストーラー環境ごとの差異**
-
-  * 対策: Inno Setup のテンプレをシンプルに保ち、配布前に複数 Windows バージョンでテスト。
+  * 対策: 将来的に `ClientKind::Custom` を追加し、任意の `.exe` とテンプレを設定できる余地を残す。
 
 ---
 
-## 11. やらないことリスト（明示）
+## 8. やらないこと（SSH 直接版）
 
-* クロスプラットフォーム（Linux/macOS）対応
-* 自動アップデータの実装
-* SSH 鍵管理ツール機能の内包
-* VPN 接続制御の実装（必要なら Pre Hook で外部ツールを叩く）
-* 派手なテーマ切り替え・スキン機能
+* Tera Term 特有のマクロ機能の代替は提供しない。
+* ウィンドウ内に独自のターミナルを埋め込まない（egui 内ターミナルは scope 外）。
+* SFTP/SCP やファイル転送 UI は別途ツール（WinSCP など）に任せる。
 
 ---
 
-## 12. ざっくりロードマップ
+## 9. まとめ
 
-1. **v0.1 (MVP)**
-
-   * フェーズ 0〜4 完了
-   * P0 機能のみ実装
-   * 自分用 / 社内限定配布
-
-2. **v0.2**
-
-   * フェーズ 5 で P1 機能を 2〜3 個追加
-   * ドキュメント整理（README, プロファイルサンプル）
-
-3. **v0.3 以降**
-
-   * 実際の利用状況から必要な P1/P2 を選定
-   * 必要なら AGENTS.md / 自動テスト拡充 / CI 導入
-
----
-
-### まとめ
-
-* 今のボトルネックは「どの機能から作るか」ではなく、**P0 のセットを v0.1 として切り出して一気に作り切ること**。
-* 技術的には Rust + egui + Inno Setup で、**単一インストーラーの Windows ランチャ**として実装するのが現実的な落とし所。
+* **SSH 接続自体に Tera Term は不要**なので、TeraDock を「SSH クライアントランチャ & プロファイルマネージャ」として再設計する。
+* 技術的には **外部クライアントとして OpenSSH (`ssh.exe`) と Windows Terminal を叩く形が、実装コストと安全性のバランスが最良。**
+* 既存の Rust ベースの構成を生かしつつ、`ClientKind` 抽象を入れてバックエンド差し替えできる設計にするのが現実的な落とし所。
