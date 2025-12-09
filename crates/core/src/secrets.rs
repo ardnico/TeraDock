@@ -105,6 +105,7 @@ impl SecretStore {
         use windows::Win32::Security::Cryptography::{
             CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
+        use windows::Win32::System::Memory::{LocalFree, HLOCAL};
 
         let mut data = CRYPT_INTEGER_BLOB {
             cbData: plaintext.len() as u32,
@@ -143,6 +144,7 @@ impl SecretStore {
         use windows::Win32::Security::Cryptography::{
             CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
+        use windows::Win32::System::Memory::{LocalFree, HLOCAL};
 
         let data = base64::engine::general_purpose::STANDARD
             .decode(ciphertext_b64)
