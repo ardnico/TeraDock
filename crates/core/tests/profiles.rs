@@ -23,7 +23,7 @@ fn build_command_includes_user_and_macro() {
 
     let paths = AppPaths::discover().unwrap();
     let config = ttcore::config::AppConfig::load_or_default(&paths).unwrap();
-    let cmd = build_command(&profile, &config);
+    let cmd = build_command(&profile, &config, None);
 
     assert!(cmd
         .args
