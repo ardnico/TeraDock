@@ -101,7 +101,7 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn encrypt_dpapi(&self, plaintext: &[u8]) -> Result<String> {
-        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Cryptography::{
             CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
@@ -126,7 +126,7 @@ impl SecretStore {
             return Err(Error::Crypto("CryptProtectData failed".into()));
         }
         let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe { windows::Win32::System::Memory::LocalFree(out.pbData as isize) };
+        unsafe { LocalFree(HLOCAL(out.pbData as isize)) };
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
@@ -139,6 +139,7 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn decrypt_dpapi(&self, ciphertext_b64: &str) -> Result<String> {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Cryptography::{
             CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
@@ -166,7 +167,7 @@ impl SecretStore {
             return Err(Error::Crypto("CryptUnprotectData failed".into()));
         }
         let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe { windows::Win32::System::Memory::LocalFree(out.pbData as isize) };
+        unsafe { LocalFree(HLOCAL(out.pbData as isize)) };
         String::from_utf8(bytes).map_err(|e| Error::Crypto(format!("utf8: {e}")))
     }
 
@@ -179,8 +180,7 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn save_credential(&self, plaintext: &[u8]) -> Result<String> {
-        use std::mem::size_of;
-        use windows::core::{PCWSTR, PWSTR};
+        use windows::core::PWSTR;
         use windows::Win32::Security::Credentials::{
             CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
         };
@@ -215,10 +215,8 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn read_credential(&self) -> Result<String> {
-        use windows::core::PWSTR;
-        use windows::Win32::Security::Credentials::{
-            CredFree, CredReadW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-        };
+        use windows::core::PCWSTR;
+        use windows::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
 
         let target: Vec<u16> = self
             .credential_target
