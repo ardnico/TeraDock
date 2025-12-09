@@ -11,6 +11,9 @@ use rand::RngCore;
 use crate::config::{AppPaths, SecretBackend, SecretsConfig};
 use crate::error::{Error, Result};
 
+#[cfg(windows)]
+use windows::Win32::Foundation::{LocalFree, HLOCAL};
+
 pub struct SecretStore {
     key_path: PathBuf,
     backend: SecretBackend,
@@ -101,7 +104,6 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn encrypt_dpapi(&self, plaintext: &[u8]) -> Result<String> {
-        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Cryptography::{
             CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
@@ -218,7 +220,9 @@ impl SecretStore {
     #[cfg(windows)]
     fn read_credential(&self) -> Result<String> {
         use windows::core::PCWSTR;
-        use windows::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
+        use windows::Win32::Security::Credentials::{
+            CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+        };
 
         let target: Vec<u16> = self
             .credential_target
