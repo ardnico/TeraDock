@@ -101,6 +101,7 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn encrypt_dpapi(&self, plaintext: &[u8]) -> Result<String> {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Cryptography::{
             CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
@@ -139,6 +140,7 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn decrypt_dpapi(&self, ciphertext_b64: &str) -> Result<String> {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Cryptography::{
             CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
@@ -215,10 +217,8 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn read_credential(&self) -> Result<String> {
-        use windows::core::{PCWSTR, PWSTR};
-        use windows::Win32::Security::Credentials::{
-            CredFree, CredReadW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-        };
+        use windows::core::PCWSTR;
+        use windows::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
 
         let target: Vec<u16> = self
             .credential_target
