@@ -142,7 +142,7 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn decrypt_dpapi(&self, ciphertext_b64: &str) -> Result<String> {
-        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
         use windows::Win32::Security::Cryptography::{
             CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };

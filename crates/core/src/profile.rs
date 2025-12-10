@@ -42,6 +42,8 @@ pub struct Profile {
     pub port: Option<u16>,
     #[serde(default)]
     pub protocol: Protocol,
+    #[serde(default = "ClientKind::default_kind")]
+    pub client_kind: ClientKind,
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
@@ -64,6 +66,26 @@ pub struct Profile {
     pub password: Option<String>,
     #[serde(default)]
     pub ssh_forwardings: Vec<SshForwarding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    WindowsTerminalSsh,
+    PlainSsh,
+    TeraTerm,
+}
+
+impl Default for ClientKind {
+    fn default() -> Self {
+        ClientKind::WindowsTerminalSsh
+    }
+}
+
+impl ClientKind {
+    pub fn default_kind() -> Self {
+        ClientKind::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

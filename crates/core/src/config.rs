@@ -7,9 +7,11 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::profile::SshForwarding;
 
+const DEFAULT_SSH_PATH: &str = "ssh";
+const DEFAULT_WINDOWS_TERMINAL_PATH: &str = "wt.exe";
 const DEFAULT_TERA_TERM_PATH: &str = "C:/Program Files (x86)/teraterm/ttermpro.exe";
 const DEFAULT_PROFILES: &str = include_str!("../../../config/default_profiles.toml");
 
@@ -58,7 +60,12 @@ impl AppPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub tera_term_path: PathBuf,
+    #[serde(default = "AppConfig::default_ssh_path")]
+    pub ssh_path: PathBuf,
+    #[serde(default = "AppConfig::default_windows_terminal_path")]
+    pub windows_terminal_path: Option<PathBuf>,
+    #[serde(default = "AppConfig::default_tera_term_path")]
+    pub tera_term_path: Option<PathBuf>,
     pub profiles_path: PathBuf,
     pub history_path: PathBuf,
     #[serde(default)]
@@ -114,6 +121,18 @@ impl ThemePreference {
 }
 
 impl AppConfig {
+    fn default_ssh_path() -> PathBuf {
+        PathBuf::from(DEFAULT_SSH_PATH)
+    }
+
+    fn default_windows_terminal_path() -> Option<PathBuf> {
+        Some(PathBuf::from(DEFAULT_WINDOWS_TERMINAL_PATH))
+    }
+
+    fn default_tera_term_path() -> Option<PathBuf> {
+        Some(PathBuf::from(DEFAULT_TERA_TERM_PATH))
+    }
+
     pub fn load_or_default(paths: &AppPaths) -> Result<Self> {
         paths.ensure_base()?;
         if paths.settings_path.exists() {
@@ -156,8 +175,18 @@ impl AppConfig {
     }
 
     fn normalize(&mut self, paths: &AppPaths) {
-        if self.tera_term_path.as_os_str().is_empty() {
-            self.tera_term_path = PathBuf::from(DEFAULT_TERA_TERM_PATH);
+        if self.ssh_path.as_os_str().is_empty() {
+            self.ssh_path = Self::default_ssh_path();
+        }
+        if let Some(path) = self.windows_terminal_path.as_ref() {
+            if path.as_os_str().is_empty() {
+                self.windows_terminal_path = Self::default_windows_terminal_path();
+            }
+        }
+        if let Some(path) = self.tera_term_path.as_ref() {
+            if path.as_os_str().is_empty() {
+                self.tera_term_path = None;
+            }
         }
         if self.profiles_path.as_os_str().is_empty() {
             self.profiles_path = paths.base_dir.join("default_profiles.toml");
@@ -177,10 +206,14 @@ impl AppConfig {
     }
 
     fn default_for(paths: &AppPaths) -> Self {
-        let tera_term_path = PathBuf::from(DEFAULT_TERA_TERM_PATH);
+        let ssh_path = Self::default_ssh_path();
+        let windows_terminal_path = Self::default_windows_terminal_path();
+        let tera_term_path = Self::default_tera_term_path();
         let profiles_path = paths.base_dir.join("default_profiles.toml");
         let history_path = paths.base_dir.join("history.jsonl");
         Self {
+            ssh_path,
+            windows_terminal_path,
             tera_term_path,
             profiles_path,
             history_path,
@@ -190,18 +223,39 @@ impl AppConfig {
         }
     }
 
-    pub fn validate_tera_term_path(&self) -> Result<()> {
-        if self.tera_term_path.exists() {
-            Ok(())
-        } else {
-            Err(Error::MissingConfig(self.tera_term_path.clone()))
-        }
+    pub fn windows_terminal_available(&self) -> bool {
+        self.windows_terminal_path
+            .as_ref()
+            .map(|p| {
+                if p.as_os_str().is_empty() {
+                    false
+                } else if p.is_absolute() {
+                    p.exists()
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn ssh_available(&self) -> bool {
+        !self.ssh_path.as_os_str().is_empty()
     }
 
     pub fn describe(&self) -> String {
         format!(
-            "Tera Term: {}\nProfiles: {}\nHistory: {}\nSecret backend: {:?}",
-            self.tera_term_path.display(),
+            "SSH: {}\nWindows Terminal: {}\nTera Term: {}\nProfiles: {}\nHistory: {}\nSecret backend: {:?}",
+            self.ssh_path.display(),
+            self
+                .windows_terminal_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unset>".into()),
+            self
+                .tera_term_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unset>".into()),
             self.profiles_path.display(),
             self.history_path.display(),
             self.secrets.backend
