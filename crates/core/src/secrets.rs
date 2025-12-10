@@ -107,7 +107,6 @@ impl SecretStore {
         use windows::Win32::Security::Cryptography::{
             CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
-        use windows::Win32::System::Memory::{LocalFree, HLOCAL};
 
         let mut data = CRYPT_INTEGER_BLOB {
             cbData: plaintext.len() as u32,
@@ -129,11 +128,7 @@ impl SecretStore {
             return Err(Error::Crypto("CryptProtectData failed".into()));
         }
         let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe {
-            windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
-                out.pbData as *mut _,
-            ))
-        };
+        unsafe { LocalFree(HLOCAL(out.pbData as *mut _)) };
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
@@ -146,11 +141,9 @@ impl SecretStore {
 
     #[cfg(windows)]
     fn decrypt_dpapi(&self, ciphertext_b64: &str) -> Result<String> {
-        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Cryptography::{
             CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
-        use windows::Win32::System::Memory::{LocalFree, HLOCAL};
 
         let data = base64::engine::general_purpose::STANDARD
             .decode(ciphertext_b64)
@@ -175,11 +168,7 @@ impl SecretStore {
             return Err(Error::Crypto("CryptUnprotectData failed".into()));
         }
         let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe {
-            windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
-                out.pbData as *mut _,
-            ))
-        };
+        unsafe { LocalFree(HLOCAL(out.pbData as *mut _)) };
         String::from_utf8(bytes).map_err(|e| Error::Crypto(format!("utf8: {e}")))
     }
 
