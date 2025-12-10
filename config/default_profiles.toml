@@ -11,6 +11,7 @@ danger_level = "normal"
 color = "#4caf50"
 pinned = true
 description = "Development API server for internal testing."
+client_kind = "windows_terminal_ssh"
 
 [[profiles]]
 id = "stg-batch"
@@ -25,7 +26,7 @@ danger_level = "warn"
 color = "#ffc107"
 pinned = false
 description = "Staging batch worker; confirm before running macros."
-macro_path = "C:/scripts/stg_bootstrap.ttl"
+client_kind = "windows_terminal_ssh"
 
 [[profiles]]
 id = "prod-gateway"
@@ -40,17 +41,4 @@ danger_level = "critical"
 color = "#f44336"
 pinned = true
 description = "Primary production gateway; requires confirmation before connecting."
-
-[[profiles]]
-id = "telnet-lab"
-name = "Lab Telnet"
-host = "10.0.0.42"
-port = 23
-protocol = "telnet"
-user = "lab"
-group = "lab"
-tags = ["telnet", "lab"]
-danger_level = "normal"
-color = "#2196f3"
-pinned = false
-description = "Legacy telnet device in lab network."
+client_kind = "windows_terminal_ssh"
