@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{convert::TryFrom, fmt};
 
 use common::id::{generate_id, normalize_id, validate_id};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -111,7 +111,7 @@ impl NewProfile {
             Some(explicit) => normalize_id(explicit),
             None => generate_id("p_"),
         };
-        validate_id(&id)?;
+        validate_id(&id).map_err(CoreError::InvalidId)?;
         Ok(id)
     }
 }
@@ -173,7 +173,9 @@ impl ProfileStore {
             "#,
         )?;
         let result = stmt
-            .query_row([profile_id], |row| deserialize_profile(row))
+            .query_row([profile_id], |row| {
+                deserialize_profile(row).map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
+            })
             .optional()?;
         Ok(result)
     }
@@ -190,7 +192,10 @@ impl ProfileStore {
         let mut rows = stmt.query([])?;
         let mut profiles = Vec::new();
         while let Some(row) = rows.next()? {
-            profiles.push(deserialize_profile(row)?);
+            profiles.push(
+                deserialize_profile(row)
+                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?,
+            );
         }
         Ok(profiles)
     }
@@ -231,7 +236,8 @@ fn deserialize_profile(row: &Row<'_>) -> Result<Profile> {
 }
 
 fn now_ms() -> i64 {
-    OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000
+    let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+    i64::try_from(nanos).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use rusqlite::{Connection, TransactionBehavior};
 use tracing::info;
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::paths::database_path;
 
 pub fn init_connection() -> Result<Connection> {

@@ -16,7 +16,7 @@ pub enum CoreError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("invalid id: {0:?}")]
-    InvalidId(#[from] IdError),
+    InvalidId(IdError),
     #[error("unknown profile: {0}")]
     NotFound(String),
 }
