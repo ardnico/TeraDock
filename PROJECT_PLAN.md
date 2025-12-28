@@ -1,385 +1,600 @@
-# PLAN.md
+# PROJECT_PLAN.md - TeraDock（内部設計 + 実装計画）v0.1
 
-## 0. 概要
-
-Windows 上で Tera Term（ttermpro.exe）を起動するためのランチャアプリケーションを実装する。  
-主目的は「**よく使う接続先に素早く・安全に・ミスなく接続するための入口**」を提供すること。
-
-- 実行環境: Windows 10/11
-- 配布形態: 単一インストーラー（.exe）で配布
-- 実行形式: GUI ランチャ + CLI モード両対応
+本ドキュメントは「外部設計 v0.3」を実装へ落とすための **内部設計（アーキテクチャ / データ設計 / 暗号設計 / 実行方式 / テスト方針）** と **実装計画（フェーズ）** を定義する。
 
 ---
 
-## 1. ゴール / アンチゴール
+## 0. ゴール / アンチゴール
 
-### 1.1 ゴール
+### ゴール
+- Windows / Linux の両方で動作する CLI + TUI の TeraDock を提供する。
+- ServerProfile を `profile_id`（小文字正規化・予約語禁止・base32自動生成）で管理し、`connect/exec/run/push/pull/xfer/config apply` を実行できる。
+- Secret（パスワード等）を暗号化保存し、`td show` で **userは平文表示**、**パスワードは絶対に表示しない**。
+- マスターパスワードを設定した場合、明示コマンドでのみ `secret reveal` を許可する（ログに値を残さない）。
+- 依存コマンドの検査と差分吸収（`td doctor` + クライアント指定）を備える。
+- v0.1では **SSHはフル対応**（connect/exec/run/transfer/config）、**Telnet/Serialはconnect中心**（初期送信のみ可、対話自動化なし）。
 
-- Tera Term をコマンドラインで起動する処理をラップし、**プロファイル選択だけで接続**できるようにする。
-- 接続先プロファイル（環境・タグ・色・マクロ等）を管理できる UI を提供する。
-- **本番環境など危険な接続に対して安全装置を提供**し、操作ミスを減らす。
-- Windows 向けに **インストーラーを提供**し、非エンジニアでも導入可能な形にする。
-- CLI からも同じプロファイルを使い回しできるようにし、バッチや他ツールからも利用可能にする。
-
-### 1.2 アンチゴール（やらないこと）
-
-- SSH クライアントそのものの実装（= Tera Term を置き換えること）はしない。
-- SSH 鍵管理ツールや VPN クライアントなどの「周辺ツール」本体は作らない（必要ならフックで呼び出す）。
-- 多プラットフォーム（Linux / macOS）対応は scope 外（Windows 専用で割り切る）。
-- 高機能な設定同期（クラウド・オンライン同期など）は v1.0 ではやらない。
-- 自動アップデート機構は初期バージョンでは対応しない（後続フェーズ候補）。
+### アンチゴール
+- SSH/Telnetプロトコルやターミナルエミュレーションの自前実装（Serialは最低限のパススルーのみ）。
+- Expect風の対話自動化（v0.1では一切やらない）。
+- FTPをデフォルト有効（危険）。明示設定＋明示フラグが必要。
 
 ---
 
-## 2. 想定環境 / 前提条件
+## 1. 全体アーキテクチャ
 
-- ユーザーが Windows 10/11 上に Tera Term（ttermpro.exe）をすでにインストール済みであること。
-- 権限周りは標準ユーザーで利用可能（インストール時に管理者権限が必要な場合あり）。
-- プロファイル定義はローカルファイル（TOML）で管理し、Git 等でバージョン管理可能な形を想定。
-- オフライン環境でも問題なく動作すること（外部ネット依存なし）。
+### 1.1 ワークスペース構成
+- `crates/core` : ドメイン・永続化・暗号・コマンド生成・実行・ログ記録
+- `crates/cli`  : clapベースのCLI（`td ...`）
+- `crates/tui`  : ratatui + crossterm のTUI（`td ui`）
+- `crates/common`（任意）: 共有ユーティリティ（id正規化、エラー型、serdeスキーマ）
 
----
+> 重要：UI（CLI/TUI）は **coreのユースケースAPI** を呼ぶだけにして、仕様逸脱を防ぐ。
 
-## 3. 技術選定
-
-### 3.1 言語・フレームワーク
-
-- **アプリ本体 & CLI & ロジック**: Rust (stable 1.8x 付近)
-- **GUI**:  
-  - `egui` + `eframe`（ネイティブウィンドウ / WebView 依存なし）
-- **設定ファイルフォーマット**: TOML
-  - ライブラリ: `toml`, `serde`
-- **ロギング**: `tracing` + `tracing-subscriber`
-- **ビルド / 配布**:
-  - ビルド: `cargo`（Windows x86_64 / aarch64 対応）
-  - インストーラー: **Inno Setup**（.iss スクリプトで exe, ショートカット, アンインストーラを生成）
-
-#### Rust + egui を選ぶ理由
-
-- 単一バイナリで配布しやすく、ランタイム依存が少ない（.NET ランタイム不要）。
-- CLI と GUI を **同一コードベースのコアロジック**から呼び出せる。
-- egui は比較的シンプルな GUI を素早く構築でき、Windows でも安定して動く。
-- ユーザーが Rust に慣れているので、メンテしやすい。
-
-#### 代替案（あえて書いておく）
-
-- C# + WPF / WinForms + WiX / Squirrel など
-  - Windows ネイティブ感は高いが、.NET ランタイム依存や将来の移植性を考えると今回は採用しない。
+### 1.2 層（責務）
+- Domain層（core）
+  - Profile/Secret/CommandSet/ConfigSet などのモデル
+  - ルール：ID正規化、予約語禁止、danger guardなど
+- Usecase層（core）
+  - `add_profile`, `connect`, `exec`, `run`, `push/pull/xfer`, `config_apply`, `doctor` 等
+- Infra層（core）
+  - DB（SQLite）
+  - 暗号（master password / keyring）
+  - 外部コマンド実行（ssh/scp/sftp/telnet）
+  - Serial接続（serialport + crossterm raw passthrough）
+- Presentation層（cli/tui）
+  - 引数解釈、表示、確認プロンプト、TUI操作
 
 ---
 
-## 4. 全体アーキテクチャ
+## 2. データ永続化設計
 
-### 4.1 コンポーネント構成
+### 2.1 ストレージ選定
+- 実行時DB：SQLite（単一ファイル、原子性、検索性、移行容易）
+- Export/Import：JSON（機械向け）＋必要ならTOML（人間向け）を追加
 
-- `core`（ライブラリ crate）
-  - プロファイル管理
-  - コマンドライン生成ロジック
-  - ログ/履歴保存
-  - 危険接続判定
-- `cli`（bin crate）
-  - サブコマンド: `list`, `connect`, `export`, `import` etc.
-- `gui`（bin crate）
-  - egui ベースのランチャ UI
-- `installer`（ツールではなく Inno Setup 設定ファイル）
-  - `setup.iss` により `gui.exe` / `cli.exe` / 設定フォルダ等をまとめてインストール
+理由：
+- プロファイル/コマンドセット/設定配布/ログなどが増えると、TOML単体は更新競合やクエリが厳しい。
+- SQLiteにしておけばTUIの検索/絞り込みが速くなる。
 
-### 4.2 ディレクトリ構成（案）
+### 2.2 DB配置
+- Windows: `%APPDATA%/TeraDock/teradock.db`
+- Linux: `~/.config/teradock/teradock.db`
+- ログ（テキスト）：同ディレクトリ配下 `logs/`
+- Exportファイル：ユーザ指定パス
 
-```text
-project-root/
-  Cargo.toml
-  crates/
-    core/
-      src/...
-    cli/
-      src/main.rs
-    gui/
-      src/main.rs
-  config/
-    default_profiles.toml
-  installer/
-    setup.iss      # Inno Setup スクリプト
-  dist/
-    # ビルド成果物、インストーラ出力先
-  docs/
-    PLAN.md
-    AGENTS.md (必要なら後で)
+（`directories` crateで決定）
+
+### 2.3 スキーマ（概要）
+- `settings`
+  - `key` TEXT PRIMARY KEY
+  - `value` TEXT
+- `profiles`
+  - `profile_id` TEXT PRIMARY KEY
+  - `name`, `type`(ssh/telnet/serial), `host`, `port`, `user`(平文)
+  - `danger_level`, `group`, `tags_json`, `note`
+  - `client_overrides_json`（ssh/scp/sftp/telnetの上書き）
+  - `created_at`, `updated_at`, `last_used_at`
+- `ssh_forwards`
+  - `id` INTEGER PRIMARY KEY
+  - `profile_id` TEXT FK
+  - `name`, `kind`(L/R/D), `listen`, `dest`
+- `ssh_jump`
+  - `profile_id` TEXT PRIMARY KEY FK
+  - `jump_profile_id` TEXT
+- `secrets`
+  - `secret_id` TEXT PRIMARY KEY
+  - `kind` TEXT（password/token/passphrase等）
+  - `label` TEXT
+  - `ciphertext` BLOB
+  - `nonce` BLOB
+  - `created_at`, `updated_at`
+- `cmdsets`
+  - `cmdset_id` TEXT PRIMARY KEY
+  - `name`, `vars_json`
+- `cmdsteps`
+  - `id` INTEGER PRIMARY KEY
+  - `cmdset_id` TEXT FK
+  - `ord` INTEGER
+  - `cmd` TEXT
+  - `timeout_ms` INTEGER
+  - `on_error` TEXT（stop/continue）
+  - `parser_spec` TEXT（raw/json/regex:<id>）
+- `parsers`
+  - `parser_id` TEXT PRIMARY KEY
+  - `type` TEXT（regex）
+  - `definition` TEXT（regex本体 + capture定義JSON等）
+- `configsets`
+  - `config_id` TEXT PRIMARY KEY
+  - `name`, `hooks_cmdset_id` TEXT NULL
+- `configfiles`
+  - `id` INTEGER PRIMARY KEY
+  - `config_id` TEXT FK
+  - `src` TEXT（ローカルパス or テンプレID）
+  - `dest` TEXT（`~/`解釈）
+  - `mode` TEXT NULL
+  - `when` TEXT（always/missing/changed）
+- `op_logs`（監査用：Secret値なし）
+  - `id` INTEGER PRIMARY KEY
+  - `ts` INTEGER
+  - `op` TEXT（connect/exec/run/push/pull/xfer/config_apply/doctor/test）
+  - `profile_id` TEXT NULL
+  - `client_used` TEXT NULL（実際に使ったssh等）
+  - `ok` INTEGER
+  - `exit_code` INTEGER NULL
+  - `duration_ms` INTEGER NULL
+  - `meta_json` TEXT（サイズ、転送方式、parser等）
+
+### 2.4 マイグレーション
+- `schema_version` を `settings` で持つか、`refinery` 等を導入して段階的に適用。
+
+---
+
+## 3. ID仕様（内部実装ルール）
+
+### 3.1 正規化・検証
+- すべてのID（profile/secret/cmdset/parser/config）は保存前に以下を通す：
+  - 小文字化
+  - 正規表現 `^[a-z0-9][a-z0-9_-]{2,63}$`
+  - 予約語テーブルに含まれていたら拒否
+
+### 3.2 自動生成
+- `p_`/`s_`/`c_`/`r_`/`g_` など接頭辞を付け、base32（6〜8桁）生成。
+- 生成衝突時は再生成。
+
+---
+
+## 4. Secret暗号設計（マスターパスワード対応）
+
+### 4.1 方針（安全側）
+- Secret（password/token/passphrase）は常に暗号化保存する。
+- `td show` では表示しない。
+- `td secret reveal` は **マスターパスワードが設定されている場合のみ可能**。
+  - 未設定なら `set-master` を促して終了（安全側に倒す）。
+
+### 4.2 暗号方式
+- 対称暗号：XChaCha20-Poly1305（nonce 24B、AEAD）
+- 鍵導出（マスターパスワード）：Argon2id
+  - saltはDB `settings` に保存（例：`master_salt`）
+  - パラメータは固定し、将来変更に備えて `master_kdf_params` を保存
+
+### 4.3 鍵管理
+- マスターパスワード設定時：
+  - `master_salt` を生成して保存
+  - ユーザ入力から Argon2id で `master_key` を導出
+- Secret保存時：
+  - `nonce` をランダム生成
+  - `ciphertext = AEAD_Encrypt(master_key, nonce, plaintext, aad)`
+  - AAD（追加認証データ）に `secret_id` と `kind` を入れて取り違え耐性を上げる
+
+### 4.4 revealの表示制御（外部設計要件）
+- `secret reveal` は以下を満たす：
+  - マスターパスワード入力必須（stdinから非エコー入力）
+  - 表示は最小限
+    - 既定は「コピーのみ」でも可（要件次第）
+    - 表示する場合は一定時間で自動マスク or 1回限り
+  - ログにSecret値を絶対に残さない
+
+---
+
+## 5. 外部コマンド実行設計（SSH/SCP/SFTP/Telnet）
+
+### 5.1 CommandSpec
+- `exe: PathBuf`
+- `args: Vec<OsString>`
+- `env: Vec<(OsString, OsString)>`（基本空）
+- `mask_rules`（ログ表示時に隠すトークン）
+
+> 重要：シェルを介さず `Command` の args で渡す（インジェクション回避）。
+
+### 5.2 クライアント解決
+- 解決順：
+  1) プロファイル `client_overrides`
+  2) グローバル設定 `settings.client.*`
+  3) PATHから探索（Windowsは`.exe`考慮）
+- `td doctor` で探索結果と欠落を表示。
+
+### 5.3 connect（対話）
+- `Command` を `stdin/stdout/stderr` 継承で `spawn`。
+- exit code を取得し `op_logs` へ記録。
+- `danger_level=critical` なら二段階確認。
+
+### 5.4 exec/run（非対話、SSHのみ）
+- `Command.output()` で stdout/stderr を回収。
+- timeout 対応：
+  - `wait_timeout` 相当の実装（platform差を吸収するcrate採用）または `tokio` で管理（内部設計で確定）
+- `--format json` のスキーマを必ず満たすように整形して返す：
+  - `ok, exit_code, stdout, stderr, duration_ms, parsed`
+
+---
+
+## 6. SSH機能設計
+
+### 6.1 接続
+- 生成するコマンドは以下の概念を満たす：
+  - `ssh user@host -p port`
+  - `ProxyJump`：`-J jumpuser@jumphost:port`（jump_profile参照）
+  - forward適用：`-L/-R/-D`
+  - keepalive/timeout：`-o ServerAliveInterval=...` 等（必要なら）
+
+### 6.2 `dest` の `~/` 解釈（ConfigSet/transfer）
+- scp/sftpのリモートパスは `user@host:~/path` 形式を使い、ホーム展開をリモート側に任せる。
+- plan/backup時のリモート操作は `ssh` で `sh -lc` を使って `~` を確実に解釈させる（ログにはコマンドをマスク/簡略化）。
+
+---
+
+## 7. Telnet/Serialのスコープ（v0.1実装線）
+
+### 7.1 Telnet（v0.1）
+- `connect` のみ。
+- 対話自動化はしない。
+- 初期送信文字列（任意）を1回送るだけは許容。
+  - 実装：telnet起動後に短い遅延→指定文字列送出（ただしOS/クライアント差があるので最初は控えめ）
+
+### 7.2 Serial（v0.1）
+- `connect` のみ。
+- 端末エミュレーションはしない（raw passthrough）。
+- 実装案：
+  - `serialport` crate でポートを開く
+  - `crossterm` raw mode で stdin を読み、serialへ書く
+  - serialからの受信を stdout へ書く
+- 初期送信文字列（任意）を開始時に1回送る。
+
+---
+
+## 8. ファイル転送設計
+
+### 8.1 push/pull（scp/sftp）
+- `push`: `scp local remote` または `sftp` バッチ
+- `pull`: `scp remote local` など
+- progress表示は将来（v0.1は最低限でOK）
+
+### 8.2 xfer（サーバ↔サーバ、ローカル中継）
+- 1) `pull` を temp dir へ
+- 2) `push` を dest へ
+- tempは `directories::BaseDirs::temp_dir()` 相当を使用し、終了後削除。
+
+### 8.3 FTP（安全装置）
+- 設定 `allow_insecure_transfers=true` が無い限り ftp は拒否。
+- 実行時に `--i-know-its-insecure` が無い限り拒否。
+- ログに明示的に「insecure transfer」を記録。
+
+---
+
+## 9. ConfigSet（設定配布）設計
+
+### 9.1 applyの手順（SSH前提）
+ファイル1件ごとに以下を行う（`--plan` は実行せず差分判定だけ）：
+
+1) dest解釈：
+   - `~/` はリモートホーム
+2) リモートの存在/ハッシュ確認（when=changedの場合）：
+   - `ssh` で `test -f` と `sha256sum`（無ければmissing扱い）
+3) バックアップ（--backup）：
+   - `cp dest dest.bak.<timestamp>`（存在する場合のみ）
+4) 転送：
+   - 一旦 `dest.tmp.<timestamp>` に upload
+5) 反映：
+   - `mv tmp dest`
+6) mode設定（指定があれば）：
+   - `chmod <mode> dest`
+
+> 重要：planは「何が変わるか」を出すだけで副作用ゼロ。
+
+---
+
+## 10. CommandSet / Parser 実装設計
+
+### 10.1 CommandSet実行
+- `run(profile, cmdset)` は `steps` を ord順に実行する。
+- stepごとに：
+  - timeout適用
+  - exit_code非0時：
+    - `on_error=stop` なら打ち切り
+    - `continue` なら続行
+  - parser適用して `parsed` を生成（stepごとにも保持）
+
+### 10.2 Parser
+- v0.1は以下のみ：
+  - `raw`
+  - `json`（stdoutがJSONとしてparseできた場合のみ `parsed` をJSON化）
+  - `regex`（定義は `parsers.definition` に保持）
+- regex抽出結果は `parsed` に統一フォーマットで格納：
+  - `parsed` は JSON object または JSON array（parser定義で指定）
+
+### 10.3 JSON出力スキーマ（固定）
+- `exec/run` の `--format json` は必ず以下の形にする：
+
+```json
+{
+  "ok": true,
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "...",
+  "duration_ms": 1234,
+  "parsed": {}
+}
 ````
 
 ---
 
-## 5. 機能一覧と優先度
+## 11. TUI（ratatui）設計
 
-### 5.1 P0（MVP 必須）
+### 11.1 画面
 
-1. **プロファイル管理（ホスト一覧）**
+* Profiles一覧（検索、type/tag/group/danger絞り込み）
+* Detailsペイン（show相当、ただしSecret値は表示しない）
+* Actions（connect/exec/run/push/pull/config apply）
+* Secrets一覧（revealはマスターパスワード必須）
 
-   * フィールド例：
+### 11.2 操作
 
-     * `id`, `name`, `host`, `port`, `protocol`(ssh/telnet), `user`
-     * `group`（dev/stg/prod etc.）
-     * `tags`（文字列リスト）
-     * `danger_level`（normal/warn/critical）
-     * `macro_path`（任意）
-     * `window_color` / `title_suffix` など
-   * 操作:
-
-     * 追加 / 編集 / 削除
-     * 永続化: `profiles.toml`
-
-2. **コマンドライン自動生成 & 起動**
-
-   * Tera Term 実行ファイルパス設定（手動指定 + 設定ファイル保存）
-   * 例: `ttermpro.exe /ssh host:22 /auth=user /F=profile.ini /W="title"`
-   * 生成されるコマンドラインをログに残す（デバッグオプション有り）
-
-3. **プロファイル検索・フィルタ・タグ**
-
-   * 名前 / ホスト / タグ / グループ でのフィルタリング
-   * egui のテキストボックス + リストでインクリメンタルフィルタ
-
-4. **最近使った接続 & ピン留め**
-
-   * 接続実行時に「最終接続時刻」を記録し、ソート表示
-   * プロファイルに「pinned: bool」フラグ
-
-5. **環境ごとのグルーピング & 色分け**
-
-   * `group` ごとにセクション表示
-   * `danger_level` に応じて GUI 上の色を変える
-   * Tera Term 起動時に `title_suffix` や背景色設定（可能な範囲で）
-
-6. **危険接続の安全装置**
-
-   * `danger_level == critical` のプロファイルは接続前に確認ダイアログ
-
-     * 「本番環境です。本当に接続しますか？」「今日は二度と聞かない」チェックボックス
-
-7. **ログ／履歴**
-
-   * ファイル形式: ローテートするテキスト / JSON Lines / SQLite のいずれか
-
-     * MVP では JSONL（1行1イベント）で十分
-   * 記録内容: datetime, profile_id, host, user, result(success/fail), duration 等
-
-8. **シンプル GUI ランチャ**
-
-   * メイン画面要素:
-
-     * 検索ボックス
-     * プロファイル一覧（グループごと）
-     * 接続ボタン
-     * プロファイル編集ボタン
-     * 設定ボタン（Tera Term パスなど）
-   * UI は egui で構築
-
-### 5.2 P1（完成度アップ用 / v0.2 以降）
-
-1. 接続前後フック（Pre/Post Hook）
-2. Tera Term マクロ (.ttl) の紐付け & オプション実行
-3. テンプレート & プレースホルダ
-4. プロファイル設定の Import/Export（TOML/JSON）
-5. CLI モード:
-
-   * `ttlaunch list`
-   * `ttlaunch connect <profile-id>`
-6. プロファイル階層構造 & 継承（共通設定親プロファイル）
-
-### 5.3 P2（遊び・余裕あれば）
-
-1. 使用統計ダッシュボード
-2. 実績・バッジシステム
-3. 簡易トポロジビュー
-4. 組織向け共通プロファイル配布機能
-5. コマンドパレット風 UI（Ctrl+P ライク）
+* インクリメンタル検索（絞り込みが最優先機能）
+* `danger_level=critical` は二段階確認
+* 実行前に CommandSpec 表示（Secretはマスク）
 
 ---
 
-## 6. データモデル（概要）
+## 12. ログ設計
 
-### 6.1 Profile
-
-```rust
-struct Profile {
-    id: String,
-    name: String,
-    host: String,
-    port: u16,
-    protocol: Protocol,        // Ssh, Telnet, Serial, etc. (MVPはSsh優先)
-    user: Option<String>,
-    group: Option<String>,     // "dev", "stg", "prod"...
-    tags: Vec<String>,
-    danger_level: DangerLevel, // Normal, Warn, Critical
-    macro_path: Option<PathBuf>,
-    window_color: Option<WindowColor>,
-    title_suffix: Option<String>,
-    pinned: bool,
-    last_used_at: Option<DateTime<Utc>>,
-}
-```
-
-### 6.2 Config
-
-```rust
-struct AppConfig {
-    tera_term_path: PathBuf,
-    profiles_path: PathBuf,
-    logs_path: PathBuf,
-    ui: UiConfig,
-}
-```
+* 永続ログ：SQLite `op_logs`（Secretなし）
+* ファイルログ：tracingで `logs/teradock.log`（Secretなし、コマンドはマスク）
+* すべての実行パスで「Secretがログに出ない」ことをテストする（後述）。
 
 ---
 
-## 7. フェーズ分け / マイルストーン
+## 13. テスト方針（壊れやすい所を優先）
 
-### フェーズ 0: プロジェクトセットアップ
+### 13.1 ユニットテスト
 
-* Rust ワークスペース構成 (`core`, `cli`, `gui`) を作成
-* 基本的な `Profile` / `AppConfig` 型定義
-* TOML 設定の読み書き実装
-* ロギング基盤（`tracing`）導入
+* ID正規化・予約語拒否
+* export/importのスキーマ互換
+* CommandSpec生成（ssh/scp/sftp/telnet）で「引数が正しい」「Secretが混入しない」
+* Secret暗号：
 
-**完了条件:**
+  * encrypt→decrypt一致
+  * AAD違いで復号失敗
+* FTPガード：
 
-* `cargo test` が通る
-* `profiles.toml` の読み書きが行えるユニットテストがある
+  * 設定なしで拒否
+  * 設定ありでもフラグなしで拒否
 
----
+### 13.2 結合テスト（任意）
 
-### フェーズ 1: コアロジック（P0 機能の「中身」）
+* `td doctor` が PATH差分を正しく検出する（OS別）
+* `--format json` の出力スキーマ検証
 
-* `core` に以下を実装:
+### 13.3 手動試験項目（v0.1で必須）
 
-  * プロファイル管理（追加/編集/削除/検索）
-  * コマンドライン生成
-  * 危険接続判定
-  * ログ／履歴記録
-
-**完了条件:**
-
-* CLI テスト用コードから `core` を呼び出し、指定プロファイルのコマンドライン文字列が得られる。
-* テスト実行時にログファイルが意図通り出力される。
+* SSH connect/exec/run（実機 or ローカルVM）
+* ConfigSet apply（backup/plan含む）
+* TUI操作（検索/confirm/実行）
 
 ---
 
-### フェーズ 2: CLI インターフェース（最小版）
+## 14. 配布（Windows/Linux）
 
-* `cli` crate でサブコマンド実装:
+* Windows：
 
-  * `list`
-  * `connect <profile-id>`
-* `connect` 実行時に:
+  * Inno Setup でインストーラー生成（`td.exe`、設定ディレクトリ作成、アンインストール）
+* Linux：
 
-  * `core` でコマンドライン文字列生成
-  * `std::process::Command` で `ttermpro.exe` を起動
+  * `cargo-deb` で `.deb`（Ubuntu想定）
+  * 併せて `tar.gz` のポータブル配布（依存が少ない前提）
 
-**完了条件:**
+CI（GitHub Actions）：
 
-* コマンドプロンプトから `ttlaunch connect dev1` などで実際に Tera Term が起動する。
-
----
-
-### フェーズ 3: GUI ランチャ（P0 UI）
-
-* `gui` crate で egui ベースのウィンドウアプリを作成
-
-  * プロファイル一覧表示
-  * 検索ボックス
-  * グルーピング & 色分け
-  * 接続ボタン
-  * 編集ダイアログ
-  * 設定ダイアログ（Tera Term パス等）
-* 危険接続時の確認ダイアログ実装
-
-**完了条件:**
-
-* GUI アプリから P0 機能一通りが操作できる。
-* プロファイル編集内容が TOML に保存され、再起動時も反映される。
+* matrix：windows-latest / ubuntu-latest
+* `cargo fmt`, `cargo clippy`, `cargo test`
+* リリース成果物生成（tag pushで配布物作成）
 
 ---
 
-### フェーズ 4: インストーラー
+## 15. 実装計画（フェーズ）
 
-* `installer/setup.iss` を作成
+外部仕様の「優先順位」を実装順に落とす。
 
-  * `gui.exe`, `cli.exe` を `Program Files\TeraTermLauncher` 等に配置
-  * スタートメニュー / デスクトップショートカット作成（任意）
-  * アンインストーラ登録
-* ビルドスクリプト（PowerShell / batch）で:
+### Phase 0: リポジトリ整備（足場）
 
-  * `cargo build --release`
-  * 成果物を `dist/` にコピー
-  * Inno Setup コマンドラインで `setup.exe` を生成
+* workspace分割（core/cli/tui）
+* エラー型・ログ基盤（tracing）
+* 設定ディレクトリ決定（directories）
+* SQLite導入 + migration基盤
 
-**完了条件:**
+成果物：
 
-* クリーンな Windows 環境に `setup.exe` を配布 → インストール → 起動 → 接続まで確認。
+* `td --version` がWindows/Linuxで動く
+* 空DB生成・マイグレーションが走る
+
+### Phase 1: IDルール確定（仕様の核）
+
+* profile_id/secret_id等の正規化・検証・予約語拒否
+* 自動生成（base32）
+
+成果物：
+
+* ID周りのユニットテスト完備
+
+### Phase 2: Profiles CRUD + list/show（Secret非表示）
+
+* profilesテーブル操作
+* `td add/edit/rm/list/show`
+* `td show` で user平文、password表示なし
+
+成果物：
+
+* CLIでプロファイル管理が成立
+
+### Phase 3: Secret暗号（マスターパスワード）
+
+* `set-master`（仮）で master_salt生成・保存
+* `secret add/edit/rm/list`
+* `secret reveal`（master必須、ログ漏れ防止）
+
+成果物：
+
+* 暗号化保存でき、revealはmaster必須で動く
+
+### Phase 4: doctor（OS差分吸収の核）
+
+* `td doctor` 実装（ssh/scp/sftp/telnet検出、TUI可否）
+* client override（global/profile）を設定に反映
+* 実行ログに client_used を記録
+
+成果物：
+
+* 環境差による「動かない」を早期に潰せる
+
+### Phase 5: 本番ガード（最優先機能 #1）
+
+* danger_level=critical 二段階確認（CLI/TUI共通）
+* 適用範囲：connect/exec/run/push/pull/xfer/config apply
+
+成果物：
+
+* critical操作が確実に止まる
+
+### Phase 6: SSH connect（最初の価値）
+
+* `td connect <profile_id>`（inherit stdio）
+* jump / forward（最低限 -L/-D）
+* last_used更新
+
+成果物：
+
+* SSH接続がプロファイル指定でできる
+
+### Phase 7: SSH exec/run + JSON出力（核）
+
+* `exec` 実装（timeout含む）
+* `run` 実装（cmdset/steps）
+* `--format json` スキーマ固定
+* parser（raw/json/regex）実装
+
+成果物：
+
+* ツール連携可能なJSONが安定して出る
+
+### Phase 8: 検索/絞り込み（最優先機能 #2）
+
+* `list` の `--tag/--group/--query/--type/--danger` 実装
+* TUIのインクリメンタル検索基盤
+
+成果物：
+
+* 運用での体感速度が出る
+
+### Phase 9: 転送（scp/sftp）+ xfer（ローカル中継）
+
+* push/pull（scp/sftp）
+* xfer（temp中継）
+
+成果物：
+
+* 基本転送が成立（FTPは未対応でOK）
+
+### Phase 10: ConfigSet（apply/backup/plan）
+
+* configset登録
+* apply（backup/plan/when）
+* `~/` 解釈ルールの反映
+
+成果物：
+
+* 設定配布が安全に回る（planで事故回避）
+
+### Phase 11: Import/Export（最優先機能 #3）
+
+* `export --include-secrets=no|refs|yes`
+
+  * v0.1は `refs` をまず安定させる
+* `import` 実装（ID衝突時の挙動を決める：reject/rename）
+
+成果物：
+
+* バックアップとチーム共有の下地
+
+### Phase 12: 鍵/agent優先（最優先機能 #4）
+
+* SSH authの優先順位を実装に反映
+* UI/ヘルプで誘導（passwordは最後の手段）
+
+成果物：
+
+* 運用の安全性が上がる
+
+### Phase 13: 到達性テスト（最優先機能 #5）
+
+* `td test`（DNS/TCP/任意でBatchMode）
+* doctorと整合する出力（json対応）
+
+成果物：
+
+* 接続トラブルの切り分けが速くなる
+
+### Phase 14: Telnet connect（v0.1範囲）
+
+* `connect` のみ（doctorで存在チェック）
+* 初期送信（任意、最小限）
+
+### Phase 15: Serial connect（v0.1範囲）
+
+* raw passthrough
+* 初期送信（任意）
+
+### Phase 16: FTP（安全装置付き）
+
+* 設定 `allow_insecure_transfers=true` がないと拒否
+* 実行フラグ `--i-know-its-insecure` がないと拒否
+* ログにinsecureを明記
+
+### Phase 17: TUI仕上げ（運用速度）
+
+* Profiles/Secrets/Actions統合
+* 二段階confirm、実行前コマンド表示（マスク）
+* exec/run結果ビュー（stdout/stderr/parsed）
+
+### Phase 18: 配布・CI
+
+* Windows installer
+* Linux deb/tar
+* GitHub Actionsのリリース生成
 
 ---
 
-### フェーズ 5: P1 機能の追加（必要なものから順に）
+## 16. リスクと対策（先に書いて潰す）
 
-優先度高め順:
+* OS差分でtelnetが無い：
 
-1. 接続前後フック（`hooks.toml` / プロファイルごとの設定）
-2. マクロ紐付け＆自動実行
-3. Import/Export（`profiles.toml` の CLI での操作）
-4. プロファイル継承（共通設定の親プロファイル機構）
+  * `doctor` と client override で吸収。無ければ機能を明確に使えないと出す。
+* Secret漏洩（最悪）：
 
-フェーズ 5 以降は、**実際の運用で不足を感じたものだけ選んで実装**する。
+  * ログ・dry-run・エラー経路すべてでSecret値を出さないテストを用意。
+  * revealはmaster必須、表示最小限。
+* Serialの入出力が崩れる：
 
----
+  * v0.1はraw passthroughのみ、期待値を上げない。
+* Config applyの事故：
 
-## 8. リスク / 前提条件 / 対策
-
-* **Tera Term のパス検出が環境依存**
-
-  * 対策: 自動検出（レジストリ or 既知のパス） + 手動設定 UI の併用。
-* **プロファイル定義が増えすぎると UI が煩雑になる**
-
-  * 対策: タグ / グループ / 検索前提の設計。P2 のトポロジビューなどは後回し。
-* **egui の UI 表現力限界**
-
-  * 対策: まずはシンプルで済ませる。凝った UI は scope 外とする。
-* **インストーラー環境ごとの差異**
-
-  * 対策: Inno Setup のテンプレをシンプルに保ち、配布前に複数 Windows バージョンでテスト。
+  * `--plan` と `--backup` を標準動作に近づける（バックアップはデフォONでも良い）
 
 ---
 
-## 9. やらないことリスト（明示）
+## 17. Done条件（v0.1の最低ライン）
 
-* クロスプラットフォーム（Linux/macOS）対応
-* 自動アップデータの実装
-* SSH 鍵管理ツール機能の内包
-* VPN 接続制御の実装（必要なら Pre Hook で外部ツールを叩く）
-* 派手なテーマ切り替え・スキン機能
+* Windows/Linuxでインストールまたは単体実行できる
+* `doctor` が依存不足を正しく言える
+* SSH：
 
----
+  * connect / exec / run / forwards（最低限） / transfer（scp/sftp） / config apply（backup/plan）
+* Secret：
 
-## 10. ざっくりロードマップ
+  * 暗号化保存
+  * showで非表示
+  * master設定済みなら reveal可能（ログ漏れなし）
+* TUI：
 
-1. **v0.1 (MVP)**
-
-   * フェーズ 0〜4 完了
-   * P0 機能のみ実装
-   * 自分用 / 社内限定配布
-
-2. **v0.2**
-
-   * フェーズ 5 で P1 機能を 2〜3 個追加
-   * ドキュメント整理（README, プロファイルサンプル）
-
-3. **v0.3 以降**
-
-   * 実際の利用状況から必要な P1/P2 を選定
-   * 必要なら AGENTS.md / 自動テスト拡充 / CI 導入
+  * 検索してプロファイル選択→connect/exec/runができる
+* Export/Import（refs）でバックアップ可能
 
 ---
-
-### まとめ
-
-* 今のボトルネックは「どの機能から作るか」ではなく、**P0 のセットを v0.1 として切り出して一気に作り切ること**。
-* 技術的には Rust + egui + Inno Setup で、**単一インストーラーの Windows ランチャ**として実装するのが現実的な落とし所。
