@@ -15,8 +15,18 @@ pub enum CoreError {
     Database(#[from] rusqlite::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("crypto error: {0}")]
+    Crypto(String),
     #[error("invalid id: {0:?}")]
     InvalidId(IdError),
     #[error("unknown profile: {0}")]
     NotFound(String),
+    #[error("master password not set")]
+    MasterNotSet,
+    #[error("master password already set")]
+    MasterAlreadySet,
+    #[error("master password verification failed")]
+    MasterVerificationFailed,
+    #[error("decryption failed")]
+    DecryptionFailed,
 }
