@@ -22,11 +22,13 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 
 ## Decision Log
 
-- None yet.
+- Decision: Leave secret metadata persistence out of v0.1 despite placeholder `meta` on `NewSecret` because the DB schema in PROJECT_PLAN.md lacks a target column; avoid inventing storage outside the plan.
+  Rationale: Keeps schema aligned with agreed plan and prevents silent drift that would require migrations later.
+  Date/Author: 2025-12-31 / assistant
 
 ## Outcomes & Retrospective
 
-Pending implementation.
+Still pending full validation; main blocker remains crates.io access to execute `cargo test` and exercise CLI flows end-to-end.
 
 ## Context and Orientation
 
