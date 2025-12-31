@@ -3,8 +3,10 @@ use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use tdcore::db;
 use tdcore::paths;
 use tdcore::profile::{DangerLevel, NewProfile, ProfileStore, ProfileType};
+use tdcore::secret::{NewSecret, SecretStore};
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "TeraDock CLI", long_about = None)]
@@ -19,6 +21,11 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         command: ProfileCommands,
+    },
+    /// Manage secrets (master password required for reveal)
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommands,
     },
 }
 
@@ -61,11 +68,37 @@ struct ProfileAddArgs {
     client_overrides_json: Option<String>,
 }
 
+#[derive(Debug, Subcommand)]
+enum SecretCommands {
+    /// Set the master password (one-time)
+    SetMaster,
+    /// Add a secret (requires master password)
+    Add(SecretAddArgs),
+    /// List secrets (metadata only)
+    List,
+    /// Reveal a secret value (requires master password)
+    Reveal { secret_id: String },
+    /// Remove a secret
+    Rm { secret_id: String },
+}
+
+#[derive(Debug, Args)]
+struct SecretAddArgs {
+    /// Explicit secret ID (auto-generated if omitted)
+    #[arg(long)]
+    secret_id: Option<String>,
+    #[arg(long)]
+    kind: String,
+    #[arg(long)]
+    label: String,
+}
+
 fn main() -> Result<()> {
     let _guard = init_logging()?;
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Profile { command }) => handle_profile(command),
+        Some(Commands::Secret { command }) => handle_secret(command),
         None => {
             Cli::command().print_help()?;
             println!();
@@ -136,6 +169,69 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
     }
 }
 
+fn handle_secret(cmd: SecretCommands) -> Result<()> {
+    let store = SecretStore::new(db::init_connection()?);
+    match cmd {
+        SecretCommands::SetMaster => {
+            if store.is_master_set()? {
+                return Err(anyhow!("master password already set"));
+            }
+            let first = prompt_password("Enter new master password: ")?;
+            let second = prompt_password("Confirm master password: ")?;
+            if first != second {
+                return Err(anyhow!("passwords did not match"));
+            }
+            store.set_master(&first)?;
+            info!("master password set");
+            Ok(())
+        }
+        SecretCommands::Add(args) => {
+            let master = load_master_prompt(&store)?;
+            let value = prompt_password("Secret value (input hidden): ")?;
+            let created = store.add(
+                &master,
+                NewSecret {
+                    secret_id: args.secret_id,
+                    kind: args.kind,
+                    label: args.label,
+                    value: Zeroizing::new(value),
+                    meta: None,
+                },
+            )?;
+            println!("{}", created.secret_id);
+            Ok(())
+        }
+        SecretCommands::List => {
+            let secrets = store.list()?;
+            if secrets.is_empty() {
+                println!("(no secrets)");
+                return Ok(());
+            }
+            for s in secrets {
+                println!(
+                    "{:<16} {:<12} {:<20} created:{} updated:{}",
+                    s.secret_id, s.kind, s.label, s.created_at, s.updated_at
+                );
+            }
+            Ok(())
+        }
+        SecretCommands::Reveal { secret_id } => {
+            let master = load_master_prompt(&store)?;
+            let value = store.reveal(&master, &secret_id)?;
+            println!("{value}");
+            Ok(())
+        }
+        SecretCommands::Rm { secret_id } => {
+            if store.delete(&secret_id)? {
+                info!("removed secret {}", secret_id);
+            } else {
+                warn!("secret not found: {}", secret_id);
+            }
+            Ok(())
+        }
+    }
+}
+
 fn parse_profile_type(value: &str) -> Result<ProfileType> {
     match value.to_lowercase().as_str() {
         "ssh" => Ok(ProfileType::Ssh),
@@ -174,4 +270,15 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .context("failed to initialize logging")?;
 
     Ok(guard)
+}
+
+fn prompt_password(prompt: &str) -> Result<String> {
+    let pw = rpassword::prompt_password(prompt)?;
+    Ok(pw)
+}
+
+fn load_master_prompt(store: &SecretStore) -> Result<tdcore::crypto::MasterKey> {
+    let password = prompt_password("Master password: ")?;
+    let master = store.load_master(&password)?;
+    Ok(master)
 }
