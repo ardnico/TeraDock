@@ -16,7 +16,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Manage profiles
-    Profile(ProfileCommands),
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -62,7 +65,7 @@ fn main() -> Result<()> {
     let _guard = init_logging()?;
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Profile(sub)) => handle_profile(sub),
+        Some(Commands::Profile { command }) => handle_profile(command),
         None => {
             Cli::command().print_help()?;
             println!();
