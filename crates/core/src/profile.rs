@@ -1,7 +1,7 @@
 use std::{convert::TryFrom, fmt};
 
 use common::id::{generate_id, normalize_id, validate_id};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -172,11 +172,11 @@ impl ProfileStore {
             WHERE profile_id = ?1
             "#,
         )?;
-        let result = stmt
-            .query_row([profile_id], |row| {
-                deserialize_profile(row).map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
-            })
-            .optional()?;
+        let mut rows = stmt.query([profile_id])?;
+        let result = match rows.next()? {
+            Some(row) => Some(deserialize_profile(row)?),
+            None => None,
+        };
         Ok(result)
     }
 
@@ -192,10 +192,7 @@ impl ProfileStore {
         let mut rows = stmt.query([])?;
         let mut profiles = Vec::new();
         while let Some(row) = rows.next()? {
-            profiles.push(
-                deserialize_profile(row)
-                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?,
-            );
+            profiles.push(deserialize_profile(row)?);
         }
         Ok(profiles)
     }
