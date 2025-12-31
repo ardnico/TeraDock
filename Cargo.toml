@@ -28,3 +28,8 @@ time = { version = "0.3.36", features = ["macros", "serde-human-readable"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "time"] }
 tracing-appender = "0.2.3"
+argon2 = "0.5.3"
+chacha20poly1305 = { version = "0.10.1", features = ["xchacha20"] }
+base64 = "0.22.1"
+rpassword = "7.3.1"
+zeroize = "1.8.1"
