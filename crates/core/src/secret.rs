@@ -7,7 +7,7 @@ use crate::crypto::{decrypt, derive_key, encrypt, random_bytes, KdfParams, Maste
 use crate::error::{CoreError, Result};
 use crate::settings::{get_setting, set_setting};
 use common::id::{generate_id, normalize_id, validate_id};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection};
 use time::OffsetDateTime;
 
 const KEY_SALT: &str = "master_salt";
