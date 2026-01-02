@@ -72,7 +72,11 @@ impl MasterState {
             Some(raw) => serde_json::from_str(&raw)?,
             None => return Ok(None),
         };
-        Ok(Some(Self { salt, params, check }))
+        Ok(Some(Self {
+            salt,
+            params,
+            check,
+        }))
     }
 
     pub fn load_and_verify(&self, password: &[u8]) -> Result<MasterKey> {
@@ -154,7 +158,12 @@ impl SecretStore {
         validate_id(&secret_id).map_err(CoreError::InvalidId)?;
         let aad = Self::aad(&secret_id, &input.kind);
         let nonce = random_bytes::<24>();
-        let ciphertext = encrypt(master.as_ref(), &nonce, aad.as_bytes(), input.value.as_bytes())?;
+        let ciphertext = encrypt(
+            master.as_ref(),
+            &nonce,
+            aad.as_bytes(),
+            input.value.as_bytes(),
+        )?;
         let now = now_ms();
         let meta_json = input
             .meta

@@ -13,12 +13,13 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 - [x] (2025-12-31 07:20Z) Persist master state in `settings` (salt, kdf params, check token) and expose load/set helpers.
 - [x] (2025-12-31 07:30Z) Implement `SecretStore` (add/list/delete/reveal) enforcing master presence and ID rules with in-memory DB tests.
 - [x] (2025-12-31 07:40Z) Wire CLI `secret` subcommands with non-echo password prompts; logging avoids secret material.
-- [ ] Add unit tests for CLI parsing paths and expand coverage if needed.
-- [ ] Run `cargo test` and document results (blocked previously by crates.io access; retry pending).
+- [x] (2025-12-31 09:15Z) Added CLI argument parsing tests for profile/secret commands to guard CLI surfaces.
+- [ ] (2025-12-31 09:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT 403; retry when registry reachable).
 
 ## Surprises & Discoveries
 
 - Cargo registry access is still blocked (CONNECT 403) when attempting `cargo test`, preventing dependency download; testing remains pending until access is available.
+- Latest retry on 2025-12-31 confirms the same crates.io 403 behavior, so workspace tests cannot be executed yet.
 
 ## Decision Log
 
@@ -28,7 +29,7 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 
 ## Outcomes & Retrospective
 
-Still pending full validation; main blocker remains crates.io access to execute `cargo test` and exercise CLI flows end-to-end.
+Core crypto, master password handling, and CLI wiring are implemented with added CLI parsing tests, but full validation is blocked by crates.io access (CONNECT 403). Next action is to rerun `cargo test` once registry connectivity is restored.
 
 ## Context and Orientation
 
@@ -83,3 +84,5 @@ Capture any notable test output or error cases in updates to this plan if encoun
 - Dependencies: `argon2` (Argon2id derivation), `chacha20poly1305` (XChaCha20-Poly1305 AEAD), `rand`/`rand_core` for salts/nonces, `base64` for settings encoding, `rpassword` for CLI prompts, `zeroize` optional for key wiping.
 
 ---
+
+Update 2025-12-31 09:16Z: Recorded CLI parsing test addition and the continued crates.io blockade preventing full `cargo test` execution.
