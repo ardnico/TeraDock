@@ -12,10 +12,12 @@ Establish a compilable Rust workspace with the core crates (`core`, `cli`, `tui`
 - [x] (2025-01-05 00:20Z) Workspace created (workspace Cargo.toml, crates/core, crates/cli, crates/tui, crates/common).
 - [x] (2025-01-05 00:25Z) Minimal CLI wired (`td --version` path via clap help/version).
 - [x] (2025-01-05 00:30Z) ID normalization/validation/generation in `crates/common` with unit tests.
+- [ ] (2025-12-31 09:05Z) Attempted `cargo test`; blocked by crates.io 403 (CONNECT tunnel failure), so validation remains pending until registry access is available.
 
 ## Surprises & Discoveries
 
 - Network access to crates.io failed during `cargo test` (CONNECT tunnel 403), so dependencies could not be fetched. Need network allowance or vendored crates to proceed with build/test in this environment.
+- Reattempt on 2025-12-31 confirms crates.io access is still blocked (CONNECT 403), leaving workspace validation pending.
 
 ## Decision Log
 
@@ -25,7 +27,7 @@ Establish a compilable Rust workspace with the core crates (`core`, `cli`, `tui`
 
 ## Outcomes & Retrospective
 
-Pending completion of the plan.
+Workspace scaffolding and ID utilities are implemented with unit tests in-tree, but full validation is deferred until crates.io access is restored; `cargo test` cannot currently download dependencies.
 
 ## Context and Orientation
 
@@ -68,3 +70,5 @@ Current repository has only documentation; no Rust workspace exists. PROJECT_PLA
 
 - Dependencies: `clap` (CLI parsing), `regex` (ID validation), `once_cell` (lazy static regex), `rand` + `data-encoding` (base32 ID generation). Expose public API:
   - `common::id::{normalize_id, validate_id, generate_id, IdError}`.
+
+Update 2025-12-31 09:12Z: Documented the blocked `cargo test` attempt and captured the current outcome status until registry access is fixed.

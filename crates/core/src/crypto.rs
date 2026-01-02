@@ -28,9 +28,13 @@ impl Default for KdfParams {
 pub type MasterKey = Zeroizing<[u8; 32]>;
 
 pub fn derive_key(password: &[u8], salt: &[u8], params: &KdfParams) -> Result<MasterKey> {
-    let argon_params =
-        Params::new(params.mem_cost_kib, params.iterations, params.parallelism, None)
-            .map_err(|e| CoreError::Crypto(e.to_string()))?;
+    let argon_params = Params::new(
+        params.mem_cost_kib,
+        params.iterations,
+        params.parallelism,
+        None,
+    )
+    .map_err(|e| CoreError::Crypto(e.to_string()))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
     let mut key = Zeroizing::new([0u8; 32]);
     argon2
@@ -45,29 +49,31 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     buf
 }
 
-pub fn encrypt(
-    key: &[u8; 32],
-    nonce: &[u8; 24],
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>> {
+pub fn encrypt(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = XNonce::from_slice(nonce);
     cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| CoreError::Crypto(e.to_string()))
 }
 
-pub fn decrypt(
-    key: &[u8; 32],
-    nonce: &[u8; 24],
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>> {
+pub fn decrypt(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = XNonce::from_slice(nonce);
     cipher
-        .decrypt(nonce, Payload { msg: ciphertext, aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| CoreError::DecryptionFailed)
 }
 

@@ -15,10 +15,12 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 - [x] (2025-12-28 07:40Z) Wire CLI subcommands `td profile add/list/show/rm` to the core use cases; ensure help text is discoverable.
 - [x] (2025-12-28 07:55Z) Add unit tests for ID enforcement in profile creation and happy-path add/list/show/remove against an in-memory SQLite database.
 - [ ] (2025-12-28 08:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT tunnel 403).
+- [ ] (2025-12-31 09:05Z) Retried `cargo test`; crates.io still unreachable (CONNECT 403), so validation remains pending until registry access is restored.
 
 ## Surprises & Discoveries
 
 - Cargo registry access is blocked in this environment (CONNECT tunnel 403 to crates.io), preventing `cargo test` from downloading dependencies as of 2025-12-28.
+- 2025-12-31 retry shows the same crates.io 403 behavior, so tests cannot yet be executed in this environment.
 
 ## Decision Log
 
@@ -28,7 +30,7 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 
 ## Outcomes & Retrospective
 
-Pending implementation.
+Profile CRUD and persistence scaffolding are implemented and covered by in-memory tests, but full workspace test runs remain blocked by crates.io access. Next step is to rerun `cargo test` once the registry becomes reachable.
 
 ## Context and Orientation
 
@@ -75,3 +77,5 @@ Capture notable command outputs (add/list/show) in future updates if behavior ch
 - New modules: `crates/core/src/paths.rs`, `crates/core/src/db.rs`, `crates/core/src/profile.rs`.
 - Public API (core): `paths::{config_dir, logs_dir, database_path}`, `db::{init_connection}`, `profile::{ProfileType, DangerLevel, Profile, NewProfile, ProfileStore}` with CRUD methods `insert`, `get`, `list`, `delete`.
 - Dependencies: `rusqlite` for SQLite, `directories` for platform paths, `serde/serde_json` for JSON columns, `thiserror` for error enums, `anyhow` for CLI error bubbling, `tracing`/`tracing-subscriber`/`tracing-appender` for logging, `time` or `chrono` for UTC timestamps.
+
+Update 2025-12-31 09:13Z: Logged the repeated crates.io access failure and captured the current pending validation status.

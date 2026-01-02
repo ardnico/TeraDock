@@ -282,3 +282,73 @@ fn load_master_prompt(store: &SecretStore) -> Result<tdcore::crypto::MasterKey> 
     let master = store.load_master(&password)?;
     Ok(master)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_profile_add_with_defaults_and_tags() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "profile",
+            "add",
+            "--name",
+            "demo",
+            "--host",
+            "example.com",
+            "--user",
+            "alice",
+            "--tag",
+            "a,b",
+            "--tag",
+            "c",
+        ])
+        .expect("parses profile add");
+
+        match cli.command {
+            Some(Commands::Profile {
+                command: ProfileCommands::Add(args),
+            }) => {
+                assert_eq!(args.name, "demo");
+                assert_eq!(args.host, "example.com");
+                assert_eq!(args.user, "alice");
+                assert_eq!(args.port, 22);
+                assert_eq!(args.r#type, "ssh");
+                assert_eq!(args.danger, "normal");
+                assert_eq!(
+                    args.tag,
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()]
+                );
+            }
+            _ => panic!("expected profile add command"),
+        }
+    }
+
+    #[test]
+    fn parses_secret_add_minimal() {
+        let cli =
+            Cli::try_parse_from(["td", "secret", "add", "--kind", "password", "--label", "db"])
+                .expect("parses secret add");
+
+        match cli.command {
+            Some(Commands::Secret {
+                command: SecretCommands::Add(args),
+            }) => {
+                assert_eq!(args.kind, "password");
+                assert_eq!(args.label, "db");
+                assert!(args.secret_id.is_none());
+            }
+            _ => panic!("expected secret add command"),
+        }
+    }
+
+    #[test]
+    fn parse_helpers_validate_known_values() {
+        assert!(parse_profile_type("ssh").is_ok());
+        assert!(parse_profile_type("bogus").is_err());
+        assert!(parse_danger("critical").is_ok());
+        assert!(parse_danger("unknown").is_err());
+    }
+}
