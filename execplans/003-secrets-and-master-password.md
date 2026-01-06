@@ -22,6 +22,7 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 - Cargo registry access is still blocked (CONNECT 403) when attempting `cargo test`, preventing dependency download; testing remains pending until access is available.
 - Latest retry on 2025-12-31 confirms the same crates.io 403 behavior, so workspace tests cannot be executed yet.
 - 2026-01-05 retry shows identical crates.io CONNECT 403 failures when fetching index/config, so tests remain unrun.
+- chacha20poly1305 usage requires importing the KeyInit trait for constructor access; encryption helpers were adjusted to accept byte slices to match the crate API and avoid array type mismatches.
 
 ## Decision Log
 
