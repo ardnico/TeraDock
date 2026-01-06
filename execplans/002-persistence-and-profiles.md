@@ -16,11 +16,13 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 - [x] (2025-12-28 07:55Z) Add unit tests for ID enforcement in profile creation and happy-path add/list/show/remove against an in-memory SQLite database.
 - [ ] (2025-12-28 08:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT tunnel 403).
 - [ ] (2025-12-31 09:05Z) Retried `cargo test`; crates.io still unreachable (CONNECT 403), so validation remains pending until registry access is restored.
+- [ ] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so build/test validation remains blocked.
 
 ## Surprises & Discoveries
 
 - Cargo registry access is blocked in this environment (CONNECT tunnel 403 to crates.io), preventing `cargo test` from downloading dependencies as of 2025-12-28.
 - 2025-12-31 retry shows the same crates.io 403 behavior, so tests cannot yet be executed in this environment.
+- 2026-01-05 retry continues to fail with CONNECT 403 when downloading crates.io index/config, leaving dependencies unfetched.
 
 ## Decision Log
 

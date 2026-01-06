@@ -1,6 +1,6 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,7 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     buf
 }
 
-pub fn encrypt(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+pub fn encrypt(key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = XNonce::from_slice(nonce);
     cipher
@@ -63,7 +63,7 @@ pub fn encrypt(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], plaintext: &[u8]) -
         .map_err(|e| CoreError::Crypto(e.to_string()))
 }
 
-pub fn decrypt(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt(key: &[u8], nonce: &[u8], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = XNonce::from_slice(nonce);
     cipher
