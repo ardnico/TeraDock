@@ -15,7 +15,7 @@ const KEY_KDF_PARAMS: &str = "master_kdf_params";
 const KEY_CHECK: &str = "master_check";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CheckToken {
+pub(crate) struct CheckToken {
     nonce: String,
     ciphertext: String,
 }
@@ -24,7 +24,7 @@ struct CheckToken {
 pub struct MasterState {
     pub salt: Vec<u8>,
     pub params: KdfParams,
-    pub check: CheckToken,
+    pub(crate) check: CheckToken,
 }
 
 impl MasterState {
@@ -87,15 +87,7 @@ impl MasterState {
         let cipher_bytes = B64
             .decode(self.check.ciphertext.as_bytes())
             .map_err(|e| CoreError::Crypto(e.to_string()))?;
-        let decrypted = decrypt(
-            key.as_ref(),
-            nonce_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| CoreError::MasterVerificationFailed)?,
-            b"master-check",
-            &cipher_bytes,
-        )?;
+        let decrypted = decrypt(key.as_ref(), &nonce_bytes, b"master-check", &cipher_bytes)?;
         if decrypted.is_empty() {
             return Err(CoreError::MasterVerificationFailed);
         }
@@ -237,15 +229,7 @@ impl SecretStore {
         let aad = Self::aad(secret_id, &kind);
         let ciphertext: Vec<u8> = row.get("ciphertext")?;
         let nonce: Vec<u8> = row.get("nonce")?;
-        let plaintext = decrypt(
-            master.as_ref(),
-            nonce
-                .as_slice()
-                .try_into()
-                .map_err(|_| CoreError::DecryptionFailed)?,
-            aad.as_bytes(),
-            &ciphertext,
-        )?;
+        let plaintext = decrypt(master.as_ref(), &nonce, aad.as_bytes(), &ciphertext)?;
         let value = String::from_utf8(plaintext).map_err(|_| CoreError::DecryptionFailed)?;
         Ok(value)
     }
