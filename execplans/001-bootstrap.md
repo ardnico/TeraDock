@@ -13,11 +13,13 @@ Establish a compilable Rust workspace with the core crates (`core`, `cli`, `tui`
 - [x] (2025-01-05 00:25Z) Minimal CLI wired (`td --version` path via clap help/version).
 - [x] (2025-01-05 00:30Z) ID normalization/validation/generation in `crates/common` with unit tests.
 - [ ] (2025-12-31 09:05Z) Attempted `cargo test`; blocked by crates.io 403 (CONNECT tunnel failure), so validation remains pending until registry access is available.
+- [ ] (2026-01-05 16:03Z) Retried `cargo test`; crates.io access still blocked with CONNECT tunnel 403, validation deferred until registry is reachable.
 
 ## Surprises & Discoveries
 
 - Network access to crates.io failed during `cargo test` (CONNECT tunnel 403), so dependencies could not be fetched. Need network allowance or vendored crates to proceed with build/test in this environment.
 - Reattempt on 2025-12-31 confirms crates.io access is still blocked (CONNECT 403), leaving workspace validation pending.
+- Reattempt on 2026-01-05 shows the same crates.io CONNECT 403 behavior; no artifacts downloaded yet.
 
 ## Decision Log
 
