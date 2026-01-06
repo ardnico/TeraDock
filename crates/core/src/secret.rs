@@ -15,7 +15,7 @@ const KEY_KDF_PARAMS: &str = "master_kdf_params";
 const KEY_CHECK: &str = "master_check";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CheckToken {
+pub(crate) struct CheckToken {
     nonce: String,
     ciphertext: String,
 }
@@ -24,7 +24,7 @@ struct CheckToken {
 pub struct MasterState {
     pub salt: Vec<u8>,
     pub params: KdfParams,
-    pub check: CheckToken,
+    pub(crate) check: CheckToken,
 }
 
 impl MasterState {
