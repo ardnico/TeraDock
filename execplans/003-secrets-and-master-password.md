@@ -15,11 +15,13 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 - [x] (2025-12-31 07:40Z) Wire CLI `secret` subcommands with non-echo password prompts; logging avoids secret material.
 - [x] (2025-12-31 09:15Z) Added CLI argument parsing tests for profile/secret commands to guard CLI surfaces.
 - [ ] (2025-12-31 09:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT 403; retry when registry reachable).
+- [ ] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so workspace validation still blocked.
 
 ## Surprises & Discoveries
 
 - Cargo registry access is still blocked (CONNECT 403) when attempting `cargo test`, preventing dependency download; testing remains pending until access is available.
 - Latest retry on 2025-12-31 confirms the same crates.io 403 behavior, so workspace tests cannot be executed yet.
+- 2026-01-05 retry shows identical crates.io CONNECT 403 failures when fetching index/config, so tests remain unrun.
 
 ## Decision Log
 
