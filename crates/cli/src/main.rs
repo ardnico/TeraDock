@@ -1,14 +1,15 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use std::io::{self, Write};
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tdcore::db;
 use tdcore::doctor;
 use tdcore::paths;
 use tdcore::profile::{DangerLevel, NewProfile, Profile, ProfileStore, ProfileType};
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::oplog;
+use wait_timeout::ChildExt;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use zeroize::Zeroizing;
@@ -32,6 +33,20 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Execute a non-interactive command over SSH
+    Exec {
+        /// Profile ID to use
+        profile_id: String,
+        /// Timeout in milliseconds
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Command to execute (pass after --)
+        #[arg(last = true)]
+        cmd: Vec<String>,
     },
     /// Connect to a profile (SSH/Telnet)
     Connect {
@@ -115,6 +130,12 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Profile { command }) => handle_profile(command),
         Some(Commands::Doctor { json }) => handle_doctor(json),
+        Some(Commands::Exec {
+            profile_id,
+            timeout_ms,
+            json,
+            cmd,
+        }) => handle_exec(profile_id, timeout_ms, json, cmd),
         Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
         Some(Commands::Secret { command }) => handle_secret(command),
         None => {
@@ -185,6 +206,81 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn handle_exec(
+    profile_id: String,
+    timeout_ms: Option<u64>,
+    json_output: bool,
+    cmd: Vec<String>,
+) -> Result<()> {
+    if cmd.is_empty() {
+        return Err(anyhow!("no command provided; pass after --"));
+    }
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
+    if profile.profile_type != ProfileType::Ssh {
+        return Err(anyhow!("exec only supports SSH profiles for now"));
+    }
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+
+    let ssh = doctor::resolve_client(&["ssh", "ssh.exe"])
+        .ok_or_else(|| anyhow!("ssh client not found in PATH"))?;
+    let mut command = Command::new(&ssh);
+    command
+        .arg(format!("{}@{}", profile.user, profile.host))
+        .arg("-p")
+        .arg(profile.port.to_string())
+        .arg("--")
+        .args(&cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let started = Instant::now();
+    let output = match timeout_ms {
+        Some(ms) => run_with_timeout(command, Duration::from_millis(ms))
+            .map_err(|e| anyhow!("exec timed out after {ms}ms: {e}"))?,
+        None => command.output().context("failed to execute ssh")?,
+    };
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let exit_code = output.status.code().unwrap_or_default();
+    let ok = output.status.success();
+
+    store.touch_last_used(&profile.profile_id)?;
+    let entry = oplog::OpLogEntry {
+        op: "exec".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(ssh.to_string_lossy().into_owned()),
+        ok,
+        exit_code: Some(exit_code),
+        duration_ms: Some(duration_ms),
+        meta_json: None,
+    };
+    oplog::log_operation(store.conn(), entry)?;
+
+    if json_output {
+        let json = serde_json::json!({
+            "ok": ok,
+            "exit_code": exit_code,
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+            "duration_ms": duration_ms,
+            "parsed": serde_json::json!({}),
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        io::stdout().write_all(&output.stdout)?;
+        io::stderr().write_all(&output.stderr)?;
+        if !ok {
+            return Err(anyhow!("ssh exited with code {exit_code}"));
+        }
+    }
+    Ok(())
 }
 
 fn handle_doctor(json: bool) -> Result<()> {
@@ -344,6 +440,21 @@ fn confirm_danger(profile: &Profile) -> Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("yes"))
 }
 
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process::Output> {
+    let mut child = cmd.spawn().context("failed to spawn command")?;
+    let status = child
+        .wait_timeout(timeout)
+        .context("failed waiting for command")?;
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(anyhow!("timeout after {}ms", timeout.as_millis()));
+    }
+    child
+        .wait_with_output()
+        .context("failed to collect command output")
+}
+
 fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
     let logs_dir = paths::logs_dir()?;
     let file_appender = tracing_appender::rolling::never(logs_dir, "teradock.log");
@@ -444,5 +555,36 @@ mod tests {
         assert!(parse_profile_type("bogus").is_err());
         assert!(parse_danger("critical").is_ok());
         assert!(parse_danger("unknown").is_err());
+    }
+
+    #[test]
+    fn parses_exec_command() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "exec",
+            "p1",
+            "--timeout-ms",
+            "5000",
+            "--json",
+            "--",
+            "echo",
+            "hello",
+        ])
+        .expect("parses exec");
+
+        match cli.command {
+            Some(Commands::Exec {
+                profile_id,
+                timeout_ms,
+                json,
+                cmd,
+            }) => {
+                assert_eq!(profile_id, "p1");
+                assert_eq!(timeout_ms, Some(5000));
+                assert!(json);
+                assert_eq!(cmd, vec!["echo".to_string(), "hello".to_string()]);
+            }
+            _ => panic!("expected exec command"),
+        }
     }
 }

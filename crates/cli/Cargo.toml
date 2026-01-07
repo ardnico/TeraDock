@@ -14,3 +14,4 @@ tracing-subscriber = { workspace = true }
 tdcore = { path = "../core" }
 rpassword = { workspace = true }
 zeroize = { workspace = true }
+wait-timeout = { workspace = true }
