@@ -6,9 +6,9 @@ use zeroize::Zeroizing;
 use crate::crypto::{decrypt, derive_key, encrypt, random_bytes, KdfParams, MasterKey};
 use crate::error::{CoreError, Result};
 use crate::settings::{get_setting, set_setting};
+use crate::util::now_ms;
 use common::id::{generate_id, normalize_id, validate_id};
 use rusqlite::{params, Connection};
-use time::OffsetDateTime;
 
 const KEY_SALT: &str = "master_salt";
 const KEY_KDF_PARAMS: &str = "master_kdf_params";
@@ -244,11 +244,6 @@ impl SecretStore {
     fn aad(secret_id: &str, kind: &str) -> String {
         format!("{secret_id}:{kind}")
     }
-}
-
-fn now_ms() -> i64 {
-    let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-    i64::try_from(nanos).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

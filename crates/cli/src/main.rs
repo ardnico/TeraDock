@@ -1,9 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use std::io::{self, Write};
+use std::process::Command;
+use std::time::Instant;
 use tdcore::db;
+use tdcore::doctor;
 use tdcore::paths;
-use tdcore::profile::{DangerLevel, NewProfile, ProfileStore, ProfileType};
+use tdcore::profile::{DangerLevel, NewProfile, Profile, ProfileStore, ProfileType};
 use tdcore::secret::{NewSecret, SecretStore};
+use tdcore::oplog;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use zeroize::Zeroizing;
@@ -21,6 +26,17 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         command: ProfileCommands,
+    },
+    /// Check environment and required clients
+    Doctor {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect to a profile (SSH/Telnet)
+    Connect {
+        /// Profile ID to connect to
+        profile_id: String,
     },
     /// Manage secrets (master password required for reveal)
     Secret {
@@ -98,6 +114,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Profile { command }) => handle_profile(command),
+        Some(Commands::Doctor { json }) => handle_doctor(json),
+        Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
         Some(Commands::Secret { command }) => handle_secret(command),
         None => {
             Cli::command().print_help()?;
@@ -166,6 +184,70 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn handle_doctor(json: bool) -> Result<()> {
+    let report = doctor::check_clients();
+    if json {
+        let serialized = serde_json::to_string_pretty(&report)?;
+        println!("{serialized}");
+        return Ok(());
+    }
+    println!("Client discovery:");
+    for client in report.clients {
+        match client.path {
+            Some(path) => println!("{:<8}: {}", client.name, path.display()),
+            None => println!("{:<8}: MISSING", client.name),
+        }
+    }
+    Ok(())
+}
+
+fn handle_connect(profile_id: String) -> Result<()> {
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+
+    match profile.profile_type {
+        ProfileType::Ssh => connect_ssh(&store, profile),
+        ProfileType::Telnet => Err(anyhow!("telnet connect not yet implemented")),
+        ProfileType::Serial => Err(anyhow!("serial connect not yet implemented")),
+    }
+}
+
+fn connect_ssh(store: &ProfileStore, profile: Profile) -> Result<()> {
+    let ssh = doctor::resolve_client(&["ssh", "ssh.exe"])
+        .ok_or_else(|| anyhow!("ssh client not found in PATH"))?;
+    let mut cmd = Command::new(&ssh);
+    cmd.arg(format!("{}@{}", profile.user, profile.host))
+        .arg("-p")
+        .arg(profile.port.to_string());
+    let started = Instant::now();
+    let status = cmd.status().context("failed to launch ssh")?;
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let ok = status.success();
+    let exit_code = status.code().unwrap_or_default();
+    store.touch_last_used(&profile.profile_id)?;
+    let entry = oplog::OpLogEntry {
+        op: "connect".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(ssh.to_string_lossy().into_owned()),
+        ok,
+        exit_code: Some(exit_code),
+        duration_ms: Some(duration_ms),
+        meta_json: None,
+    };
+    oplog::log_operation(store.conn(), entry)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!("ssh exited with code {}", exit_code))
     }
 }
 
@@ -248,6 +330,18 @@ fn parse_danger(value: &str) -> Result<DangerLevel> {
         "critical" => Ok(DangerLevel::Critical),
         _ => Err(anyhow!("invalid danger level: {value}")),
     }
+}
+
+fn confirm_danger(profile: &Profile) -> Result<bool> {
+    println!(
+        "Profile '{}' is marked critical. Proceed with connect to {}@{}:{} ?",
+        profile.profile_id, profile.user, profile.host, profile.port
+    );
+    print!("Type 'yes' to continue: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("yes"))
 }
 
 fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {

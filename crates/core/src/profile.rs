@@ -1,12 +1,12 @@
-use std::{convert::TryFrom, fmt};
+use std::fmt;
 
 use common::id::{generate_id, normalize_id, validate_id};
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::OffsetDateTime;
 
 use crate::error::{CoreError, Result};
+use crate::util::now_ms;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -125,6 +125,10 @@ impl ProfileStore {
         Self { conn }
     }
 
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn insert(&self, input: NewProfile) -> Result<Profile> {
         let profile_id = input.normalize_id()?;
         let now = now_ms();
@@ -203,6 +207,15 @@ impl ProfileStore {
             .execute("DELETE FROM profiles WHERE profile_id = ?1", [profile_id])?;
         Ok(count > 0)
     }
+
+    pub fn touch_last_used(&self, profile_id: &str) -> Result<()> {
+        let now = now_ms();
+        self.conn.execute(
+            "UPDATE profiles SET last_used_at = ?1 WHERE profile_id = ?2",
+            params![now, profile_id],
+        )?;
+        Ok(())
+    }
 }
 
 fn deserialize_profile(row: &Row<'_>) -> Result<Profile> {
@@ -230,11 +243,6 @@ fn deserialize_profile(row: &Row<'_>) -> Result<Profile> {
         updated_at: row.get("updated_at")?,
         last_used_at: row.get("last_used_at")?,
     })
-}
-
-fn now_ms() -> i64 {
-    let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-    i64::try_from(nanos).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -290,5 +298,15 @@ mod tests {
         assert!(store.delete("p_test123").unwrap());
         assert!(!store.delete("p_test123").unwrap());
         assert!(store.get("p_test123").unwrap().is_none());
+    }
+
+    #[test]
+    fn touch_last_used_sets_timestamp() {
+        let conn = init_in_memory().unwrap();
+        let store = ProfileStore::new(conn);
+        store.insert(base_profile()).unwrap();
+        store.touch_last_used("p_test123").unwrap();
+        let fetched = store.get("p_test123").unwrap().expect("profile exists");
+        assert!(fetched.last_used_at.is_some());
     }
 }
