@@ -116,6 +116,15 @@ impl NewProfile {
     }
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct ProfileFilters {
+    pub group: Option<String>,
+    pub tags: Vec<String>,
+    pub profile_type: Option<ProfileType>,
+    pub danger: Option<DangerLevel>,
+    pub query: Option<String>,
+}
+
 pub struct ProfileStore {
     conn: Connection,
 }
@@ -197,6 +206,41 @@ impl ProfileStore {
         let mut profiles = Vec::new();
         while let Some(row) = rows.next()? {
             profiles.push(deserialize_profile(row)?);
+        }
+        Ok(profiles)
+    }
+
+    pub fn list_filtered(&self, filters: &ProfileFilters) -> Result<Vec<Profile>> {
+        let mut profiles = self.list()?;
+        if let Some(group) = &filters.group {
+            profiles.retain(|p| match &p.group {
+                Some(g) => g.eq_ignore_ascii_case(group),
+                None => false,
+            });
+        }
+        if let Some(ptype) = filters.profile_type {
+            profiles.retain(|p| p.profile_type == ptype);
+        }
+        if let Some(danger) = filters.danger {
+            profiles.retain(|p| p.danger_level == danger);
+        }
+        if !filters.tags.is_empty() {
+            profiles.retain(|p| {
+                filters.tags.iter().all(|tag| {
+                    p.tags
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(tag.as_str()))
+                })
+            });
+        }
+        if let Some(query) = &filters.query {
+            let q = query.to_lowercase();
+            profiles.retain(|p| {
+                p.name.to_lowercase().contains(&q)
+                    || p.host.to_lowercase().contains(&q)
+                    || p.user.to_lowercase().contains(&q)
+                    || p.profile_id.to_lowercase().contains(&q)
+            });
         }
         Ok(profiles)
     }
@@ -308,5 +352,36 @@ mod tests {
         store.touch_last_used("p_test123").unwrap();
         let fetched = store.get("p_test123").unwrap().expect("profile exists");
         assert!(fetched.last_used_at.is_some());
+    }
+
+    #[test]
+    fn filters_by_group_tag_type_danger_and_query() {
+        let conn = init_in_memory().unwrap();
+        let store = ProfileStore::new(conn);
+        let mut p1 = base_profile();
+        p1.group = Some("grp".into());
+        p1.tags = vec!["alpha".into(), "beta".into()];
+        p1.danger_level = DangerLevel::High;
+        store.insert(p1).unwrap();
+
+        let mut p2 = base_profile();
+        p2.profile_id = Some("p_other".into());
+        p2.name = "Second".into();
+        p2.profile_type = ProfileType::Telnet;
+        p2.host = "other.example.com".into();
+        p2.group = Some("other".into());
+        p2.tags = vec!["gamma".into()];
+        store.insert(p2).unwrap();
+
+        let filters = ProfileFilters {
+            group: Some("grp".into()),
+            tags: vec!["alpha".into()],
+            profile_type: Some(ProfileType::Ssh),
+            danger: Some(DangerLevel::High),
+            query: Some("test".into()),
+        };
+        let filtered = store.list_filtered(&filters).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].profile_id, "p_test123");
     }
 }

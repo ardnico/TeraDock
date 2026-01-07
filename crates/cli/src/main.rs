@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use tdcore::db;
 use tdcore::doctor;
 use tdcore::paths;
-use tdcore::profile::{DangerLevel, NewProfile, Profile, ProfileStore, ProfileType};
+use tdcore::profile::{
+    DangerLevel, NewProfile, Profile, ProfileFilters, ProfileStore, ProfileType,
+};
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::oplog;
 use wait_timeout::ChildExt;
@@ -65,7 +67,7 @@ enum ProfileCommands {
     /// Add a profile
     Add(ProfileAddArgs),
     /// List profiles
-    List,
+    List(ProfileListArgs),
     /// Show a profile in JSON
     Show { profile_id: String },
     /// Remove a profile
@@ -97,6 +99,25 @@ struct ProfileAddArgs {
     note: Option<String>,
     #[arg(long)]
     client_overrides_json: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ProfileListArgs {
+    /// Filter by group
+    #[arg(long)]
+    group: Option<String>,
+    /// Filter by tag (comma-delimited, AND match)
+    #[arg(long, action = ArgAction::Append, value_delimiter = ',')]
+    tag: Vec<String>,
+    /// Filter by profile type (ssh/telnet/serial)
+    #[arg(long)]
+    r#type: Option<String>,
+    /// Filter by danger level (normal/high/critical)
+    #[arg(long)]
+    danger: Option<String>,
+    /// Free-text query over id/name/host/user
+    #[arg(long)]
+    query: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -173,8 +194,23 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
             println!("{}", created.profile_id);
             Ok(())
         }
-        ProfileCommands::List => {
-            let profiles = store.list()?;
+        ProfileCommands::List(args) => {
+            let profile_type = match args.r#type {
+                Some(ref t) => Some(parse_profile_type(t)?),
+                None => None,
+            };
+            let danger = match args.danger {
+                Some(ref d) => Some(parse_danger(d)?),
+                None => None,
+            };
+            let filters = ProfileFilters {
+                group: args.group,
+                tags: args.tag,
+                profile_type,
+                danger,
+                query: args.query,
+            };
+            let profiles = store.list_filtered(&filters)?;
             if profiles.is_empty() {
                 println!("(no profiles)");
                 return Ok(());
@@ -233,9 +269,9 @@ fn handle_exec(
         .ok_or_else(|| anyhow!("ssh client not found in PATH"))?;
     let mut command = Command::new(&ssh);
     command
-        .arg(format!("{}@{}", profile.user, profile.host))
         .arg("-p")
         .arg(profile.port.to_string())
+        .arg(format!("{}@{}", profile.user, profile.host))
         .arg("--")
         .args(&cmd)
         .stdout(Stdio::piped())
@@ -321,9 +357,9 @@ fn connect_ssh(store: &ProfileStore, profile: Profile) -> Result<()> {
     let ssh = doctor::resolve_client(&["ssh", "ssh.exe"])
         .ok_or_else(|| anyhow!("ssh client not found in PATH"))?;
     let mut cmd = Command::new(&ssh);
-    cmd.arg(format!("{}@{}", profile.user, profile.host))
-        .arg("-p")
-        .arg(profile.port.to_string());
+    cmd.arg("-p")
+        .arg(profile.port.to_string())
+        .arg(format!("{}@{}", profile.user, profile.host));
     let started = Instant::now();
     let status = cmd.status().context("failed to launch ssh")?;
     let duration_ms = started.elapsed().as_millis() as i64;
