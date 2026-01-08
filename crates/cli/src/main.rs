@@ -348,7 +348,7 @@ fn handle_connect(profile_id: String) -> Result<()> {
 
     match profile.profile_type {
         ProfileType::Ssh => connect_ssh(&store, profile),
-        ProfileType::Telnet => Err(anyhow!("telnet connect not yet implemented")),
+        ProfileType::Telnet => connect_telnet(&store, profile),
         ProfileType::Serial => Err(anyhow!("serial connect not yet implemented")),
     }
 }
@@ -380,6 +380,34 @@ fn connect_ssh(store: &ProfileStore, profile: Profile) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("ssh exited with code {}", exit_code))
+    }
+}
+
+fn connect_telnet(store: &ProfileStore, profile: Profile) -> Result<()> {
+    let telnet = doctor::resolve_client(&["telnet", "telnet.exe"])
+        .ok_or_else(|| anyhow!("telnet client not found in PATH"))?;
+    let mut cmd = Command::new(&telnet);
+    cmd.arg(&profile.host).arg(profile.port.to_string());
+    let started = Instant::now();
+    let status = cmd.status().context("failed to launch telnet")?;
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let ok = status.success();
+    let exit_code = status.code().unwrap_or_default();
+    store.touch_last_used(&profile.profile_id)?;
+    let entry = oplog::OpLogEntry {
+        op: "connect".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(telnet.to_string_lossy().into_owned()),
+        ok,
+        exit_code: Some(exit_code),
+        duration_ms: Some(duration_ms),
+        meta_json: None,
+    };
+    oplog::log_operation(store.conn(), entry)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!("telnet exited with code {}", exit_code))
     }
 }
 

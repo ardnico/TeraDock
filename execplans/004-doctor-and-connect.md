@@ -10,8 +10,9 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 
 - [x] (2026-01-06 23:31Z) Added `td doctor` with PATH-based discovery for ssh/scp/sftp/telnet and optional JSON output.
 - [x] (2026-01-06 23:31Z) Implemented SSH `connect` command with critical danger confirmation, last-used tracking, and op_logs insertion of outcome/duration.
+- [x] (2026-01-07 00:10Z) Added telnet `connect` support via system client with logging/last-used updates.
 - [ ] (2026-01-06 23:32Z) Run `cargo test` (still blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
-- [ ] (2026-01-06 23:32Z) Extend connect support to telnet/serial once client selection and passthrough handling are designed.
+- [ ] (2026-01-06 23:32Z) Extend connect support to serial once client selection and passthrough handling are designed.
 
 ## Surprises & Discoveries
 
@@ -30,7 +31,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 
 ## Outcomes & Retrospective
 
-Doctor and SSH connect are now exposed in the CLI with logging and last-used updates; telnet/serial remain unimplemented. Validation is pending until crates.io becomes reachable for `cargo test`.
+Doctor and SSH/telnet connect are now exposed in the CLI with logging and last-used updates; serial remains unimplemented. Validation is pending until crates.io becomes reachable for `cargo test`.
 
 ## Context and Orientation
 
@@ -41,7 +42,8 @@ Earlier phases delivered workspace scaffolding, ID rules, persistence, profiles,
 1) Build a reusable PATH scanner in `tdcore::doctor` returning discovered client paths.
 2) Wire `td doctor` CLI command with human-readable and JSON outputs.
 3) Add `td connect <profile_id>` for SSH profiles: resolve ssh client, spawn inheriting stdio, confirm critical danger, update `last_used`, and log to `op_logs`.
-4) Document remaining gaps (telnet/serial connect, tests blocked) and rerun tests when possible.
+4) Add telnet connect via system client (serial remains TODO).
+5) Document remaining gaps (serial connect, tests blocked) and rerun tests when possible.
 
 ## Concrete Steps
 
@@ -55,6 +57,7 @@ Earlier phases delivered workspace scaffolding, ID rules, persistence, profiles,
 
 - `td doctor` lists ssh/scp/sftp/telnet with paths or “MISSING”, and `--json` returns a structured report.
 - `td connect <ssh_profile>` spawns ssh, confirms when danger=critical, updates last_used, and writes an op_logs row with duration/exit code.
+- `td connect <telnet_profile>` spawns telnet <host> <port>, updates last_used, and logs outcome.
 - Tests pass once registry access permits running them.
 
 ## Idempotence and Recovery
