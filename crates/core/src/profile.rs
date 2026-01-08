@@ -3,8 +3,8 @@ use std::fmt;
 use common::id::{generate_id, normalize_id, validate_id};
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
+use crate::doctor::ClientOverrides;
 use crate::error::{CoreError, Result};
 use crate::util::now_ms;
 
@@ -84,7 +84,7 @@ pub struct Profile {
     pub group: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
-    pub client_overrides: Option<Value>,
+    pub client_overrides: Option<ClientOverrides>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_used_at: Option<i64>,
@@ -102,7 +102,7 @@ pub struct NewProfile {
     pub group: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
-    pub client_overrides: Option<Value>,
+    pub client_overrides: Option<ClientOverrides>,
 }
 
 impl NewProfile {

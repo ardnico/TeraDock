@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientStatus {
@@ -14,18 +14,65 @@ pub struct DoctorReport {
     pub clients: Vec<ClientStatus>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ClientKind {
+    Ssh,
+    Scp,
+    Sftp,
+    Telnet,
+}
+
+impl ClientKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClientKind::Ssh => "ssh",
+            ClientKind::Scp => "scp",
+            ClientKind::Sftp => "sftp",
+            ClientKind::Telnet => "telnet",
+        }
+    }
+
+    fn candidates(&self) -> &'static [&'static str] {
+        match self {
+            ClientKind::Ssh => &["ssh", "ssh.exe"],
+            ClientKind::Scp => &["scp", "scp.exe"],
+            ClientKind::Sftp => &["sftp", "sftp.exe"],
+            ClientKind::Telnet => &["telnet", "telnet.exe"],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClientOverrides {
+    pub ssh: Option<String>,
+    pub scp: Option<String>,
+    pub sftp: Option<String>,
+    pub telnet: Option<String>,
+}
+
+impl ClientOverrides {
+    fn path_for(&self, kind: ClientKind) -> Option<&str> {
+        match kind {
+            ClientKind::Ssh => self.ssh.as_deref(),
+            ClientKind::Scp => self.scp.as_deref(),
+            ClientKind::Sftp => self.sftp.as_deref(),
+            ClientKind::Telnet => self.telnet.as_deref(),
+        }
+    }
+}
+
 /// Check for required external clients (ssh/scp/sftp/telnet) in PATH.
 pub fn check_clients() -> DoctorReport {
     let mut clients = Vec::new();
-    for (name, aliases) in [
-        ("ssh", &["ssh", "ssh.exe"][..]),
-        ("scp", &["scp", "scp.exe"][..]),
-        ("sftp", &["sftp", "sftp.exe"][..]),
-        ("telnet", &["telnet", "telnet.exe"][..]),
+    for kind in [
+        ClientKind::Ssh,
+        ClientKind::Scp,
+        ClientKind::Sftp,
+        ClientKind::Telnet,
     ] {
         clients.push(ClientStatus {
-            name: name.to_string(),
-            path: resolve_client(aliases),
+            name: kind.as_str().to_string(),
+            path: resolve_client(kind.candidates()),
         });
     }
     DoctorReport { clients }
@@ -35,6 +82,27 @@ pub fn check_clients() -> DoctorReport {
 pub fn resolve_client(candidates: &[&str]) -> Option<PathBuf> {
     let path_env = env::var_os("PATH")?;
     find_in_path(&path_env, candidates)
+}
+
+/// Resolve a client honoring profile overrides, then global overrides, then PATH.
+pub fn resolve_client_with_overrides(
+    kind: ClientKind,
+    profile_overrides: Option<&ClientOverrides>,
+    global_overrides: Option<&ClientOverrides>,
+) -> Option<PathBuf> {
+    if let Some(path) = profile_overrides
+        .and_then(|ovr| ovr.path_for(kind))
+        .and_then(valid_override)
+    {
+        return Some(path);
+    }
+    if let Some(path) = global_overrides
+        .and_then(|ovr| ovr.path_for(kind))
+        .and_then(valid_override)
+    {
+        return Some(path);
+    }
+    resolve_client(kind.candidates())
 }
 
 fn find_in_path(path_env: &OsStr, candidates: &[&str]) -> Option<PathBuf> {
@@ -56,6 +124,15 @@ fn find_in_path(path_env: &OsStr, candidates: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn valid_override(path: &str) -> Option<PathBuf> {
+    let p = Path::new(path);
+    if p.is_file() {
+        Some(p.to_path_buf())
+    } else {
+        None
+    }
 }
 
 fn pathext() -> Vec<String> {
@@ -120,5 +197,30 @@ mod tests {
         } else {
             assert!(pathext().is_empty());
         }
+    }
+
+    #[test]
+    fn override_precedence() {
+        let temp = env::temp_dir().join("teradock-doctor-override");
+        let _ = fs::create_dir_all(&temp);
+        let override_path = temp.join(if cfg!(windows) { "ssh-custom.exe" } else { "ssh-custom" });
+        File::create(&override_path).expect("create override binary");
+
+        let profile_overrides = ClientOverrides {
+            ssh: Some(override_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_client_with_overrides(
+            ClientKind::Ssh,
+            Some(&profile_overrides),
+            None,
+        )
+        .expect("should resolve override");
+
+        assert_eq!(resolved, override_path);
+
+        let _ = fs::remove_file(&override_path);
+        let _ = fs::remove_dir_all(&temp);
     }
 }

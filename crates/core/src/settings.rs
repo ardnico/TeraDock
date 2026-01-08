@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 
+use crate::doctor::ClientOverrides;
 use crate::error::Result;
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -18,4 +19,17 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
         [key, value],
     )?;
     Ok(())
+}
+
+pub fn get_client_overrides(conn: &Connection) -> Result<Option<ClientOverrides>> {
+    let raw = get_setting(conn, "client_overrides")?;
+    match raw {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn set_client_overrides(conn: &Connection, overrides: &ClientOverrides) -> Result<()> {
+    let json = serde_json::to_string(overrides)?;
+    set_setting(conn, "client_overrides", &json)
 }

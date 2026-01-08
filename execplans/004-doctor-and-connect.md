@@ -11,6 +11,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - [x] (2026-01-06 23:31Z) Added `td doctor` with PATH-based discovery for ssh/scp/sftp/telnet and optional JSON output.
 - [x] (2026-01-06 23:31Z) Implemented SSH `connect` command with critical danger confirmation, last-used tracking, and op_logs insertion of outcome/duration.
 - [x] (2026-01-07 00:10Z) Added telnet `connect` support via system client with logging/last-used updates.
+- [x] (2026-01-08 14:46Z) Wired client override-aware client resolution for connect/exec and started logging `td doctor` runs into op_logs with discovery metadata.
 - [ ] (2026-01-06 23:32Z) Run `cargo test` (still blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
 - [ ] (2026-01-06 23:32Z) Extend connect support to serial once client selection and passthrough handling are designed.
 
@@ -28,10 +29,13 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - Decision: Gate `connect` on `danger_level=critical` with a strict “type yes” prompt before spawning ssh.
   Rationale: Aligns with PROJECT_PLAN.md Phase 5 guardrails without waiting for a broader confirmation framework.
   Date/Author: 2026-01-06 / assistant
+- Decision: Honor profile/global client overrides before PATH when resolving clients for connect/exec, and record doctor runs in op_logs for traceability.
+  Rationale: Matches the client resolution order in PROJECT_PLAN.md and keeps discovery results auditable for later troubleshooting.
+  Date/Author: 2026-01-08 / assistant
 
 ## Outcomes & Retrospective
 
-Doctor and SSH/telnet connect are now exposed in the CLI with logging and last-used updates; serial remains unimplemented. Validation is pending until crates.io becomes reachable for `cargo test`.
+Doctor and SSH/telnet connect are now exposed in the CLI with logging and last-used updates, and client resolution honors overrides before PATH; serial remains unimplemented. Validation is pending until crates.io becomes reachable for `cargo test`.
 
 ## Context and Orientation
 

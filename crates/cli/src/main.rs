@@ -1,16 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tdcore::db;
-use tdcore::doctor;
+use tdcore::doctor::{self, ClientKind, ClientOverrides};
+use tdcore::oplog;
 use tdcore::paths;
 use tdcore::profile::{
     DangerLevel, NewProfile, Profile, ProfileFilters, ProfileStore, ProfileType,
 };
 use tdcore::secret::{NewSecret, SecretStore};
-use tdcore::oplog;
+use tdcore::settings;
 use wait_timeout::ChildExt;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
@@ -173,10 +175,7 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
         ProfileCommands::Add(args) => {
             let profile_type = parse_profile_type(&args.r#type)?;
             let danger = parse_danger(&args.danger)?;
-            let overrides = match args.client_overrides_json {
-                Some(raw) => Some(serde_json::from_str(&raw)?),
-                None => None,
-            };
+            let overrides = parse_client_overrides(args.client_overrides_json)?;
             let created = store.insert(NewProfile {
                 profile_id: args.profile_id,
                 name: args.name,
@@ -265,14 +264,16 @@ fn handle_exec(
         return Ok(());
     }
 
-    let ssh = doctor::resolve_client(&["ssh", "ssh.exe"])
-        .ok_or_else(|| anyhow!("ssh client not found in PATH"))?;
+    let ssh = resolve_client_for(
+        ClientKind::Ssh,
+        profile.client_overrides.as_ref(),
+        &store,
+    )?;
     let mut command = Command::new(&ssh);
     command
         .arg("-p")
         .arg(profile.port.to_string())
         .arg(format!("{}@{}", profile.user, profile.host))
-        .arg("--")
         .args(&cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -321,6 +322,18 @@ fn handle_exec(
 
 fn handle_doctor(json: bool) -> Result<()> {
     let report = doctor::check_clients();
+    let conn = db::init_connection()?;
+    let meta_json = serde_json::to_value(&report)?;
+    let entry = oplog::OpLogEntry {
+        op: "doctor".into(),
+        profile_id: None,
+        client_used: None,
+        ok: true,
+        exit_code: None,
+        duration_ms: None,
+        meta_json: Some(meta_json),
+    };
+    oplog::log_operation(&conn, entry)?;
     if json {
         let serialized = serde_json::to_string_pretty(&report)?;
         println!("{serialized}");
@@ -346,16 +359,21 @@ fn handle_connect(profile_id: String) -> Result<()> {
         return Ok(());
     }
 
+    let overrides = profile.client_overrides.clone();
     match profile.profile_type {
-        ProfileType::Ssh => connect_ssh(&store, profile),
-        ProfileType::Telnet => connect_telnet(&store, profile),
+        ProfileType::Ssh => {
+            let ssh = resolve_client_for(ClientKind::Ssh, overrides.as_ref(), &store)?;
+            connect_ssh(&store, profile, ssh)
+        }
+        ProfileType::Telnet => {
+            let telnet = resolve_client_for(ClientKind::Telnet, overrides.as_ref(), &store)?;
+            connect_telnet(&store, profile, telnet)
+        }
         ProfileType::Serial => Err(anyhow!("serial connect not yet implemented")),
     }
 }
 
-fn connect_ssh(store: &ProfileStore, profile: Profile) -> Result<()> {
-    let ssh = doctor::resolve_client(&["ssh", "ssh.exe"])
-        .ok_or_else(|| anyhow!("ssh client not found in PATH"))?;
+fn connect_ssh(store: &ProfileStore, profile: Profile, ssh: PathBuf) -> Result<()> {
     let mut cmd = Command::new(&ssh);
     cmd.arg("-p")
         .arg(profile.port.to_string())
@@ -383,9 +401,7 @@ fn connect_ssh(store: &ProfileStore, profile: Profile) -> Result<()> {
     }
 }
 
-fn connect_telnet(store: &ProfileStore, profile: Profile) -> Result<()> {
-    let telnet = doctor::resolve_client(&["telnet", "telnet.exe"])
-        .ok_or_else(|| anyhow!("telnet client not found in PATH"))?;
+fn connect_telnet(store: &ProfileStore, profile: Profile, telnet: PathBuf) -> Result<()> {
     let mut cmd = Command::new(&telnet);
     cmd.arg(&profile.host).arg(profile.port.to_string());
     let started = Instant::now();
@@ -490,6 +506,23 @@ fn parse_danger(value: &str) -> Result<DangerLevel> {
         "critical" => Ok(DangerLevel::Critical),
         _ => Err(anyhow!("invalid danger level: {value}")),
     }
+}
+
+fn parse_client_overrides(raw: Option<String>) -> Result<Option<ClientOverrides>> {
+    match raw {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+fn resolve_client_for(
+    kind: ClientKind,
+    profile_overrides: Option<&ClientOverrides>,
+    store: &ProfileStore,
+) -> Result<PathBuf> {
+    let global_overrides = settings::get_client_overrides(store.conn())?;
+    doctor::resolve_client_with_overrides(kind, profile_overrides, global_overrides.as_ref())
+        .ok_or_else(|| anyhow!("{} client not found via overrides or PATH", kind.as_str()))
 }
 
 fn confirm_danger(profile: &Profile) -> Result<bool> {

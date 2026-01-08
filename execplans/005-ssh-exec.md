@@ -10,6 +10,7 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 
 - [x] (2026-01-06 23:50Z) Added CLI `td exec` for SSH profiles with optional `--timeout-ms` and `--json` output.
 - [x] (2026-01-06 23:50Z) Wired op_logs insertion, last-used tracking, and critical danger confirmation for exec.
+- [x] (2026-01-08 14:46Z) Fixed SSH invocation to avoid sending a stray `--` as the remote command and aligned client resolution with profile/global overrides.
 - [ ] (2026-01-06 23:51Z) Run `cargo test` (blocked by crates.io access / read-only sandbox; retry when registry reachable).
 - [ ] (2026-01-06 23:51Z) Extend parsing/structured `parsed` field and timeout policy once broader CommandSet/run implementation lands.
 
@@ -17,12 +18,16 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 
 - Timeout support required an extra crate (`wait-timeout`) since std lacks a portable timeout on child processes.
 - Sandbox remains read-only with restricted network; no test execution possible yet.
+- SSH treats `--` after the host as part of the remote command, so passing it by default caused an unexpected `--` command on the remote side; removed to keep commands intact.
 
 ## Decision Log
 
 - Decision: Use PATH-based SSH client resolution (shared with doctor) rather than embedding an SSH implementation.
   Rationale: Aligns with project plan to rely on system clients and keeps scope lean.
   Date/Author: 2026-01-06 / assistant
+- Decision: Keep SSH exec invocation free of an extra `--` delimiter and honor profile/global client overrides before falling back to PATH.
+  Rationale: Prevents an unintended `--` remote command and matches the client resolution order defined in PROJECT_PLAN.md.
+  Date/Author: 2026-01-08 / assistant
 
 ## Outcomes & Retrospective
 
