@@ -3,10 +3,30 @@ use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub enum ClientSource {
+    ProfileOverride,
+    GlobalOverride,
+    Path,
+    Missing,
+}
+
+impl std::fmt::Display for ClientSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientSource::ProfileOverride => write!(f, "profile override"),
+            ClientSource::GlobalOverride => write!(f, "global override"),
+            ClientSource::Path => write!(f, "path"),
+            ClientSource::Missing => write!(f, "missing"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientStatus {
     pub name: String,
     pub path: Option<PathBuf>,
+    pub source: ClientSource,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +83,14 @@ impl ClientOverrides {
 
 /// Check for required external clients (ssh/scp/sftp/telnet) in PATH.
 pub fn check_clients() -> DoctorReport {
+    check_clients_with_overrides(None, None)
+}
+
+/// Check for required external clients, honoring profile/global overrides when provided.
+pub fn check_clients_with_overrides(
+    profile_overrides: Option<&ClientOverrides>,
+    global_overrides: Option<&ClientOverrides>,
+) -> DoctorReport {
     let mut clients = Vec::new();
     for kind in [
         ClientKind::Ssh,
@@ -70,9 +98,12 @@ pub fn check_clients() -> DoctorReport {
         ClientKind::Sftp,
         ClientKind::Telnet,
     ] {
+        let resolved =
+            resolve_client_with_source(kind, profile_overrides, global_overrides);
         clients.push(ClientStatus {
             name: kind.as_str().to_string(),
-            path: resolve_client(kind.candidates()),
+            path: resolved.path,
+            source: resolved.source,
         });
     }
     DoctorReport { clients }
@@ -90,19 +121,50 @@ pub fn resolve_client_with_overrides(
     profile_overrides: Option<&ClientOverrides>,
     global_overrides: Option<&ClientOverrides>,
 ) -> Option<PathBuf> {
+    resolve_client_with_source(kind, profile_overrides, global_overrides).path
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedClient {
+    pub path: Option<PathBuf>,
+    pub source: ClientSource,
+}
+
+fn resolve_client_with_source(
+    kind: ClientKind,
+    profile_overrides: Option<&ClientOverrides>,
+    global_overrides: Option<&ClientOverrides>,
+) -> ResolvedClient {
     if let Some(path) = profile_overrides
         .and_then(|ovr| ovr.path_for(kind))
         .and_then(valid_override)
     {
-        return Some(path);
+        return ResolvedClient {
+            path: Some(path),
+            source: ClientSource::ProfileOverride,
+        };
     }
     if let Some(path) = global_overrides
         .and_then(|ovr| ovr.path_for(kind))
         .and_then(valid_override)
     {
-        return Some(path);
+        return ResolvedClient {
+            path: Some(path),
+            source: ClientSource::GlobalOverride,
+        };
     }
-    resolve_client(kind.candidates())
+    let path = resolve_client(kind.candidates());
+    if let Some(p) = path {
+        ResolvedClient {
+            path: Some(p),
+            source: ClientSource::Path,
+        }
+    } else {
+        ResolvedClient {
+            path: None,
+            source: ClientSource::Missing,
+        }
+    }
 }
 
 fn find_in_path(path_env: &OsStr, candidates: &[&str]) -> Option<PathBuf> {
@@ -211,16 +273,53 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = resolve_client_with_overrides(
-            ClientKind::Ssh,
-            Some(&profile_overrides),
-            None,
-        )
-        .expect("should resolve override");
+        let resolved =
+            resolve_client_with_source(ClientKind::Ssh, Some(&profile_overrides), None);
 
-        assert_eq!(resolved, override_path);
+        assert_eq!(resolved.path, Some(override_path.clone()));
+        assert_eq!(resolved.source, ClientSource::ProfileOverride);
 
         let _ = fs::remove_file(&override_path);
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn global_override_is_used_and_reported() {
+        let temp = env::temp_dir().join("teradock-doctor-global");
+        let _ = fs::create_dir_all(&temp);
+        let override_path = temp.join(if cfg!(windows) { "ssh-global.exe" } else { "ssh-global" });
+        File::create(&override_path).expect("create override binary");
+
+        let global = ClientOverrides {
+            ssh: Some(override_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let report = check_clients_with_overrides(None, Some(&global));
+        let ssh = report
+            .clients
+            .into_iter()
+            .find(|c| c.name == "ssh")
+            .expect("ssh present");
+        assert_eq!(ssh.path, Some(override_path.clone()));
+        assert_eq!(ssh.source, ClientSource::GlobalOverride);
+
+        let _ = fs::remove_file(&override_path);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn empty_path_reports_missing() {
+        let orig = env::var_os("PATH");
+        env::set_var("PATH", "");
+        let report = check_clients_with_overrides(None, None);
+        assert!(report
+            .clients
+            .iter()
+            .all(|c| c.source == ClientSource::Missing));
+        if let Some(old) = orig {
+            env::set_var("PATH", old);
+        } else {
+            env::remove_var("PATH");
+        }
     }
 }

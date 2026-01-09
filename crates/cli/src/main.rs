@@ -479,8 +479,9 @@ fn handle_exec(
 }
 
 fn handle_doctor(json: bool) -> Result<()> {
-    let report = doctor::check_clients();
     let conn = db::init_connection()?;
+    let global_overrides = settings::get_client_overrides(&conn)?;
+    let report = doctor::check_clients_with_overrides(None, global_overrides.as_ref());
     let meta_json = serde_json::to_value(&report)?;
     let entry = oplog::OpLogEntry {
         op: "doctor".into(),
@@ -497,11 +498,25 @@ fn handle_doctor(json: bool) -> Result<()> {
         println!("{serialized}");
         return Ok(());
     }
-    println!("Client discovery:");
+    let note = if global_overrides.is_some() {
+        " (global overrides applied)"
+    } else {
+        ""
+    };
+    println!("Client discovery{note}:");
     for client in report.clients {
         match client.path {
-            Some(path) => println!("{:<8}: {}", client.name, path.display()),
-            None => println!("{:<8}: MISSING", client.name),
+            Some(path) => println!(
+                "{:<8}: {} [{}]",
+                client.name,
+                path.display(),
+                client.source
+            ),
+            None => println!(
+                "{:<8}: MISSING [{}]",
+                client.name,
+                client.source
+            ),
         }
     }
     Ok(())

@@ -13,6 +13,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - [x] (2026-01-07 00:10Z) Added telnet `connect` support via system client with logging/last-used updates.
 - [x] (2026-01-08 14:46Z) Wired client override-aware client resolution for connect/exec and started logging `td doctor` runs into op_logs with discovery metadata.
 - [x] (2026-01-08 15:26Z) Added CLI for global client overrides (`td config set-client/show-client/clear-client`) persisting to settings for doctor/exec/connect resolution.
+- [x] (2026-01-09 15:32Z) Doctor output now reflects override sources (profile/global/path) and applies global overrides when reporting clients.
 - [ ] (2026-01-06 23:32Z) Run `cargo test` (still blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
 - [ ] (2026-01-06 23:32Z) Extend connect support to serial once client selection and passthrough handling are designed.
 
