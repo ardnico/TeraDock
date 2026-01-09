@@ -17,6 +17,7 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 - [ ] (2025-12-28 08:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT tunnel 403).
 - [ ] (2025-12-31 09:05Z) Retried `cargo test`; crates.io still unreachable (CONNECT 403), so validation remains pending until registry access is restored.
 - [ ] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so build/test validation remains blocked.
+- [x] (2026-01-08 15:26Z) Added profile edit support (core update API + CLI `td profile edit`) including clear flags for group/note/client overrides and tag replacement.
 
 ## Surprises & Discoveries
 
@@ -29,6 +30,9 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 - Decision: Use a dedicated `profile` subcommand namespace (`td profile add/list/show/rm`) rather than top-level verbs to keep room for other entities like secrets/configs without argument collisions.
   Rationale: Clap’s parser stays unambiguous and future expansion remains coherent with PROJECT_PLAN.md phases.
   Date/Author: 2025-12-28 / assistant
+- Decision: Implement profile edits as full-row updates via `td profile edit` rather than piecemeal setters, with explicit clear flags for optional fields.
+  Rationale: Keeps the interface compact while still allowing removal of optional metadata without extra commands.
+  Date/Author: 2026-01-08 / assistant
 
 ## Outcomes & Retrospective
 
@@ -68,7 +72,7 @@ Acceptance is met when `cargo test` passes and manual CLI checks show persistenc
 
 ## Idempotence and Recovery
 
-Path creation is idempotent. Migrations use `PRAGMA user_version` to avoid re-creating tables. CLI commands are safe to re-run; duplicate IDs are rejected by validation before insertion. Tests use in-memory DBs to avoid altering user data. If database initialization fails, delete the `teradock.db` file and rerun `td` to reapply migrations.
+Path creation is idempotent. Migrations use `PRAGMA user_version` to avoid re-creating tables. CLI commands are safe to re-run; duplicate IDs are rejected by validation before insertion. Edits replace the full record; optional fields can be cleared with dedicated flags. Tests use in-memory DBs to avoid altering user data. If database initialization fails, delete the `teradock.db` file and rerun `td` to reapply migrations.
 
 ## Artifacts and Notes
 

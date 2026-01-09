@@ -9,7 +9,7 @@ use tdcore::doctor::{self, ClientKind, ClientOverrides};
 use tdcore::oplog;
 use tdcore::paths;
 use tdcore::profile::{
-    DangerLevel, NewProfile, Profile, ProfileFilters, ProfileStore, ProfileType,
+    DangerLevel, NewProfile, Profile, ProfileFilters, ProfileStore, ProfileType, UpdateProfile,
 };
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::settings;
@@ -68,6 +68,8 @@ enum Commands {
 enum ProfileCommands {
     /// Add a profile
     Add(ProfileAddArgs),
+    /// Edit an existing profile
+    Edit(ProfileEditArgs),
     /// List profiles
     List(ProfileListArgs),
     /// Show a profile in JSON
@@ -101,6 +103,38 @@ struct ProfileAddArgs {
     note: Option<String>,
     #[arg(long)]
     client_overrides_json: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ProfileEditArgs {
+    /// Profile ID to edit
+    profile_id: String,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long)]
+    user: Option<String>,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    r#type: Option<String>,
+    #[arg(long)]
+    danger: Option<String>,
+    #[arg(long)]
+    group: Option<String>,
+    #[arg(long)]
+    clear_group: bool,
+    #[arg(long, value_delimiter = ',')]
+    tags: Option<Vec<String>>,
+    #[arg(long)]
+    note: Option<String>,
+    #[arg(long)]
+    clear_note: bool,
+    #[arg(long)]
+    client_overrides_json: Option<String>,
+    #[arg(long)]
+    clear_client_overrides: bool,
 }
 
 #[derive(Debug, Args)]
@@ -191,6 +225,49 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
             })?;
             info!("profile created: {}", created.profile_id);
             println!("{}", created.profile_id);
+            Ok(())
+        }
+        ProfileCommands::Edit(args) => {
+            let profile_type = match args.r#type {
+                Some(ref t) => Some(parse_profile_type(t)?),
+                None => None,
+            };
+            let danger = match args.danger {
+                Some(ref d) => Some(parse_danger(d)?),
+                None => None,
+            };
+            let overrides = if args.clear_client_overrides {
+                Some(None)
+            } else {
+                parse_client_overrides(args.client_overrides_json)?.map(Some)
+            };
+            let group = if args.clear_group {
+                Some(None)
+            } else {
+                args.group.map(Some)
+            };
+            let note = if args.clear_note {
+                Some(None)
+            } else {
+                args.note.map(Some)
+            };
+            let updated = store.update(
+                &args.profile_id,
+                UpdateProfile {
+                    name: args.name,
+                    profile_type,
+                    host: args.host,
+                    port: args.port,
+                    user: args.user,
+                    danger_level: danger,
+                    group,
+                    tags: args.tags,
+                    note,
+                    client_overrides: overrides,
+                },
+            )?;
+            info!("profile updated: {}", updated.profile_id);
+            println!("{}", updated.profile_id);
             Ok(())
         }
         ProfileCommands::List(args) => {
@@ -652,6 +729,44 @@ mod tests {
         assert!(parse_profile_type("bogus").is_err());
         assert!(parse_danger("critical").is_ok());
         assert!(parse_danger("unknown").is_err());
+    }
+
+    #[test]
+    fn parses_profile_edit_with_clears() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "profile",
+            "edit",
+            "p1",
+            "--name",
+            "new",
+            "--host",
+            "example.net",
+            "--clear-group",
+            "--clear-note",
+            "--clear-client-overrides",
+            "--tags",
+            "alpha,beta",
+        ])
+        .expect("parses profile edit");
+
+        match cli.command {
+            Some(Commands::Profile {
+                command: ProfileCommands::Edit(args),
+            }) => {
+                assert_eq!(args.profile_id, "p1");
+                assert_eq!(args.name.as_deref(), Some("new"));
+                assert_eq!(args.host.as_deref(), Some("example.net"));
+                assert!(args.clear_group);
+                assert!(args.clear_note);
+                assert!(args.clear_client_overrides);
+                assert_eq!(
+                    args.tags,
+                    Some(vec!["alpha".to_string(), "beta".to_string()])
+                );
+            }
+            _ => panic!("expected profile edit command"),
+        }
     }
 
     #[test]

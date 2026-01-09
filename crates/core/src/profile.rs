@@ -125,6 +125,20 @@ pub struct ProfileFilters {
     pub query: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UpdateProfile {
+    pub name: Option<String>,
+    pub profile_type: Option<ProfileType>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub danger_level: Option<DangerLevel>,
+    pub group: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
+    pub note: Option<Option<String>>,
+    pub client_overrides: Option<Option<ClientOverrides>>,
+}
+
 pub struct ProfileStore {
     conn: Connection,
 }
@@ -243,6 +257,86 @@ impl ProfileStore {
             });
         }
         Ok(profiles)
+    }
+
+    pub fn update(&self, profile_id: &str, changes: UpdateProfile) -> Result<Profile> {
+        let mut profile = self
+            .get(profile_id)?
+            .ok_or_else(|| CoreError::NotFound(profile_id.to_string()))?;
+
+        if let Some(name) = changes.name {
+            profile.name = name;
+        }
+        if let Some(ptype) = changes.profile_type {
+            profile.profile_type = ptype;
+        }
+        if let Some(host) = changes.host {
+            profile.host = host;
+        }
+        if let Some(port) = changes.port {
+            profile.port = port;
+        }
+        if let Some(user) = changes.user {
+            profile.user = user;
+        }
+        if let Some(danger) = changes.danger_level {
+            profile.danger_level = danger;
+        }
+        if let Some(group) = changes.group {
+            profile.group = group;
+        }
+        if let Some(tags) = changes.tags {
+            profile.tags = tags;
+        }
+        if let Some(note) = changes.note {
+            profile.note = note;
+        }
+        if let Some(overrides) = changes.client_overrides {
+            profile.client_overrides = overrides;
+        }
+
+        profile.updated_at = now_ms();
+        let tags_json = serde_json::to_string(&profile.tags)?;
+        let overrides_json = profile
+            .client_overrides
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()?;
+
+        self.conn.execute(
+            r#"
+            UPDATE profiles
+            SET name = ?1,
+                type = ?2,
+                host = ?3,
+                port = ?4,
+                user = ?5,
+                danger_level = ?6,
+                "group" = ?7,
+                tags_json = ?8,
+                note = ?9,
+                client_overrides_json = ?10,
+                updated_at = ?11
+            WHERE profile_id = ?12
+            "#,
+            params![
+                profile.name,
+                profile.profile_type.to_string(),
+                profile.host,
+                profile.port as i64,
+                profile.user,
+                profile.danger_level.to_string(),
+                profile.group,
+                tags_json,
+                profile.note,
+                overrides_json,
+                profile.updated_at,
+                profile.profile_id,
+            ],
+        )?;
+
+        self.get(profile_id)?
+            .ok_or_else(|| CoreError::NotFound(profile_id.to_string()))
     }
 
     pub fn delete(&self, profile_id: &str) -> Result<bool> {
@@ -383,5 +477,38 @@ mod tests {
         let filtered = store.list_filtered(&filters).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].profile_id, "p_test123");
+    }
+
+    #[test]
+    fn updates_profile_fields() {
+        let conn = init_in_memory().unwrap();
+        let store = ProfileStore::new(conn);
+        store.insert(base_profile()).unwrap();
+        let updated = store
+            .update(
+                "p_test123",
+                UpdateProfile {
+                    name: Some("Renamed".into()),
+                    host: Some("new.example.com".into()),
+                    port: Some(2022),
+                    danger_level: Some(DangerLevel::High),
+                    group: Some(Some("newgroup".into())),
+                    tags: Some(vec!["x".into(), "y".into()]),
+                    note: Some(None),
+                    client_overrides: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.host, "new.example.com");
+        assert_eq!(updated.port, 2022);
+        assert_eq!(updated.danger_level, DangerLevel::High);
+        assert_eq!(updated.group.as_deref(), Some("newgroup"));
+        assert_eq!(updated.tags, vec!["x", "y"]);
+        assert!(updated.note.is_none());
+        assert!(updated.client_overrides.is_none());
+        assert!(updated.updated_at >= updated.created_at);
     }
 }
