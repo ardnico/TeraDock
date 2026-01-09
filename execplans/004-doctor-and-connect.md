@@ -12,6 +12,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - [x] (2026-01-06 23:31Z) Implemented SSH `connect` command with critical danger confirmation, last-used tracking, and op_logs insertion of outcome/duration.
 - [x] (2026-01-07 00:10Z) Added telnet `connect` support via system client with logging/last-used updates.
 - [x] (2026-01-08 14:46Z) Wired client override-aware client resolution for connect/exec and started logging `td doctor` runs into op_logs with discovery metadata.
+- [x] (2026-01-08 15:26Z) Added CLI for global client overrides (`td config set-client/show-client/clear-client`) persisting to settings for doctor/exec/connect resolution.
 - [ ] (2026-01-06 23:32Z) Run `cargo test` (still blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
 - [ ] (2026-01-06 23:32Z) Extend connect support to serial once client selection and passthrough handling are designed.
 
@@ -31,6 +32,9 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
   Date/Author: 2026-01-06 / assistant
 - Decision: Honor profile/global client overrides before PATH when resolving clients for connect/exec, and record doctor runs in op_logs for traceability.
   Rationale: Matches the client resolution order in PROJECT_PLAN.md and keeps discovery results auditable for later troubleshooting.
+  Date/Author: 2026-01-08 / assistant
+- Decision: Expose global client overrides via `td config set-client/show-client/clear-client`, storing them in settings for reuse by doctor/connect/exec.
+  Rationale: Gives users a supported path to set client resolution order without editing the DB directly.
   Date/Author: 2026-01-08 / assistant
 
 ## Outcomes & Retrospective
@@ -60,8 +64,9 @@ Earlier phases delivered workspace scaffolding, ID rules, persistence, profiles,
 ## Validation and Acceptance
 
 - `td doctor` lists ssh/scp/sftp/telnet with paths or “MISSING”, and `--json` returns a structured report.
-- `td connect <ssh_profile>` spawns ssh, confirms when danger=critical, updates last_used, and writes an op_logs row with duration/exit code.
+- `td connect <ssh_profile>` spawns ssh, confirms when danger=critical, updates last_used, and writes an op_logs row with duration/exit code; client resolution honors profile/global overrides before PATH.
 - `td connect <telnet_profile>` spawns telnet <host> <port>, updates last_used, and logs outcome.
+- `td config set-client --ssh /path --scp /path ...` persists overrides, `show-client` prints JSON, and `clear-client` removes them; doctor/connect/exec use these overrides.
 - Tests pass once registry access permits running them.
 
 ## Idempotence and Recovery

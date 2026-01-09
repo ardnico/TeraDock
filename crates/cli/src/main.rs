@@ -32,6 +32,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProfileCommands,
     },
+    /// Manage global configuration (client overrides)
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Check environment and required clients
     Doctor {
         /// Output as JSON
@@ -181,11 +186,41 @@ struct SecretAddArgs {
     label: String,
 }
 
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    /// Set or clear global client overrides (ssh/scp/sftp/telnet)
+    SetClient(ClientOverrideArgs),
+    /// Show current global client overrides
+    ShowClient,
+    /// Clear all global client overrides
+    ClearClient,
+}
+
+#[derive(Debug, Args, Default)]
+struct ClientOverrideArgs {
+    /// Override ssh client path
+    #[arg(long)]
+    ssh: Option<String>,
+    /// Override scp client path
+    #[arg(long)]
+    scp: Option<String>,
+    /// Override sftp client path
+    #[arg(long)]
+    sftp: Option<String>,
+    /// Override telnet client path
+    #[arg(long)]
+    telnet: Option<String>,
+    /// Clear all overrides before applying provided values
+    #[arg(long)]
+    clear_all: bool,
+}
+
 fn main() -> Result<()> {
     let _guard = init_logging()?;
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Profile { command }) => handle_profile(command),
+        Some(Commands::Config { command }) => handle_config(command),
         Some(Commands::Doctor { json }) => handle_doctor(json),
         Some(Commands::Exec {
             profile_id,
@@ -315,6 +350,52 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
             } else {
                 warn!("profile not found: {}", profile_id);
             }
+            Ok(())
+        }
+    }
+}
+
+fn handle_config(cmd: ConfigCommands) -> Result<()> {
+    let conn = db::init_connection()?;
+    match cmd {
+        ConfigCommands::SetClient(args) => {
+            let mut overrides = if args.clear_all {
+                ClientOverrides::default()
+            } else {
+                settings::get_client_overrides(&conn)?.unwrap_or_default()
+            };
+            if let Some(path) = args.ssh {
+                overrides.ssh = Some(path);
+            }
+            if let Some(path) = args.scp {
+                overrides.scp = Some(path);
+            }
+            if let Some(path) = args.sftp {
+                overrides.sftp = Some(path);
+            }
+            if let Some(path) = args.telnet {
+                overrides.telnet = Some(path);
+            }
+            settings::set_client_overrides(&conn, &overrides)?;
+            info!("updated client overrides");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&overrides).unwrap_or_else(|_| "{}".into())
+            );
+            Ok(())
+        }
+        ConfigCommands::ShowClient => {
+            let overrides = settings::get_client_overrides(&conn)?.unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&overrides).unwrap_or_else(|_| "{}".into())
+            );
+            Ok(())
+        }
+        ConfigCommands::ClearClient => {
+            settings::clear_client_overrides(&conn)?;
+            info!("cleared client overrides");
+            println!("client overrides cleared");
             Ok(())
         }
     }
@@ -766,6 +847,29 @@ mod tests {
                 );
             }
             _ => panic!("expected profile edit command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_set_client() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "config",
+            "set-client",
+            "--ssh",
+            "/usr/bin/ssh",
+            "--clear-all",
+        ])
+        .expect("parses config set-client");
+
+        match cli.command {
+            Some(Commands::Config {
+                command: ConfigCommands::SetClient(args),
+            }) => {
+                assert_eq!(args.ssh.as_deref(), Some("/usr/bin/ssh"));
+                assert!(args.clear_all);
+            }
+            _ => panic!("expected config set-client command"),
         }
     }
 

@@ -33,3 +33,8 @@ pub fn set_client_overrides(conn: &Connection, overrides: &ClientOverrides) -> R
     let json = serde_json::to_string(overrides)?;
     set_setting(conn, "client_overrides", &json)
 }
+
+pub fn clear_client_overrides(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = 'client_overrides'", [])?;
+    Ok(())
+}
