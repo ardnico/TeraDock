@@ -14,8 +14,9 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 - [x] (2025-12-31 07:30Z) Implement `SecretStore` (add/list/delete/reveal) enforcing master presence and ID rules with in-memory DB tests.
 - [x] (2025-12-31 07:40Z) Wire CLI `secret` subcommands with non-echo password prompts; logging avoids secret material.
 - [x] (2025-12-31 09:15Z) Added CLI argument parsing tests for profile/secret commands to guard CLI surfaces.
-- [ ] (2025-12-31 09:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT 403; retry when registry reachable).
-- [ ] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so workspace validation still blocked.
+- [x] (2025-12-31 09:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT 403; retry when registry reachable).
+- [x] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so workspace validation still blocked.
+- [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 
 ## Surprises & Discoveries
 
@@ -23,6 +24,7 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 - Latest retry on 2025-12-31 confirms the same crates.io 403 behavior, so workspace tests cannot be executed yet.
 - 2026-01-05 retry shows identical crates.io CONNECT 403 failures when fetching index/config, so tests remain unrun.
 - chacha20poly1305 usage requires importing the KeyInit trait for constructor access; encryption helpers were adjusted to accept byte slices to match the crate API and avoid array type mismatches.
+- Registry access was restored by 2026-01-09, allowing `cargo test` to finish successfully across the workspace.
 
 ## Decision Log
 
@@ -32,7 +34,7 @@ Deliver the Phase 3 capabilities from PROJECT_PLAN.md: secrets are always stored
 
 ## Outcomes & Retrospective
 
-Core crypto, master password handling, and CLI wiring are implemented with added CLI parsing tests, but full validation is blocked by crates.io access (CONNECT 403). Next action is to rerun `cargo test` once registry connectivity is restored.
+Core crypto, master password handling, and CLI wiring are implemented with added CLI parsing tests, and full workspace validation now passes after registry connectivity was restored.
 
 ## Context and Orientation
 
@@ -89,3 +91,4 @@ Capture any notable test output or error cases in updates to this plan if encoun
 ---
 
 Update 2025-12-31 09:16Z: Recorded CLI parsing test addition and the continued crates.io blockade preventing full `cargo test` execution.
+Update 2026-01-09 15:49Z: Logged the successful workspace test run now that registry access is restored and updated progress/outcomes.
