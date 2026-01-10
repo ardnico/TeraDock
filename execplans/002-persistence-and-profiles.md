@@ -14,16 +14,18 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 - [x] (2025-12-28 07:20Z) Implement profile domain model, validation (ID normalization, reserved-word rejection), and CRUD use cases storing tags/client overrides as JSON.
 - [x] (2025-12-28 07:40Z) Wire CLI subcommands `td profile add/list/show/rm` to the core use cases; ensure help text is discoverable.
 - [x] (2025-12-28 07:55Z) Add unit tests for ID enforcement in profile creation and happy-path add/list/show/remove against an in-memory SQLite database.
-- [ ] (2025-12-28 08:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT tunnel 403).
-- [ ] (2025-12-31 09:05Z) Retried `cargo test`; crates.io still unreachable (CONNECT 403), so validation remains pending until registry access is restored.
-- [ ] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so build/test validation remains blocked.
+- [x] (2025-12-28 08:05Z) Run `cargo test` and document results (blocked by crates.io access: CONNECT tunnel 403).
+- [x] (2025-12-31 09:05Z) Retried `cargo test`; crates.io still unreachable (CONNECT 403), so validation remains pending until registry access is restored.
+- [x] (2026-01-05 16:03Z) Retried `cargo test`; crates.io CONNECT 403 persists, so build/test validation remains blocked.
 - [x] (2026-01-08 15:26Z) Added profile edit support (core update API + CLI `td profile edit`) including clear flags for group/note/client overrides and tag replacement.
+- [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 
 ## Surprises & Discoveries
 
 - Cargo registry access is blocked in this environment (CONNECT tunnel 403 to crates.io), preventing `cargo test` from downloading dependencies as of 2025-12-28.
 - 2025-12-31 retry shows the same crates.io 403 behavior, so tests cannot yet be executed in this environment.
 - 2026-01-05 retry continues to fail with CONNECT 403 when downloading crates.io index/config, leaving dependencies unfetched.
+- By 2026-01-09, registry access recovered and `cargo test` succeeded end-to-end.
 
 ## Decision Log
 
@@ -36,7 +38,7 @@ Enable TeraDock to persist data in SQLite at the expected config directory on Wi
 
 ## Outcomes & Retrospective
 
-Profile CRUD and persistence scaffolding are implemented and covered by in-memory tests, but full workspace test runs remain blocked by crates.io access. Next step is to rerun `cargo test` once the registry becomes reachable.
+Profile CRUD and persistence scaffolding are implemented and covered by in-memory tests, and full workspace `cargo test` now passes after registry access was restored.
 
 ## Context and Orientation
 
@@ -85,3 +87,4 @@ Capture notable command outputs (add/list/show) in future updates if behavior ch
 - Dependencies: `rusqlite` for SQLite, `directories` for platform paths, `serde/serde_json` for JSON columns, `thiserror` for error enums, `anyhow` for CLI error bubbling, `tracing`/`tracing-subscriber`/`tracing-appender` for logging, `time` or `chrono` for UTC timestamps.
 
 Update 2025-12-31 09:13Z: Logged the repeated crates.io access failure and captured the current pending validation status.
+Update 2026-01-09 15:49Z: Marked the successful workspace test run now that registry access is available and updated progress/outcomes accordingly.
