@@ -8,7 +8,7 @@ use crate::doctor::ClientOverrides;
 use crate::error::{CoreError, Result};
 use crate::util::now_ms;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileType {
     Ssh,
@@ -37,7 +37,7 @@ impl fmt::Display for ProfileType {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DangerLevel {
     Normal,
