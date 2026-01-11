@@ -18,7 +18,10 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - [x] (2026-01-10 01:58Z) Added serial connect passthrough using serialport + raw terminal mode and wired `td connect` to it.
 - [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 - [x] (2026-01-11 16:55Z) Restored CLI wiring for `td doctor` and `td connect`, ensuring initial_send handling and op_log entry creation behave as intended.
-- [x] (2026-01-10 01:58Z) Re-run `cargo test` after serial dependencies (blocked by crates.io CONNECT 403; retry when registry is reachable).
+- [ ] (2026-01-10 01:58Z) Re-run `cargo test` after serial dependencies (blocked by crates.io CONNECT 403; retry when registry is reachable).
+- [ ] (2026-01-10 15:56Z) Retried `cargo test`; crates.io CONNECT 403 persists with new dependencies, so validation remains blocked.
+- [ ] (2026-01-11 16:55Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
+- [ ] (2026-01-11 17:09Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 
 ## Surprises & Discoveries
 
@@ -29,6 +32,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - Registry access appears blocked again after adding serial dependencies, so the latest `cargo test` run failed while fetching crates.
 - Retried `cargo test` on 2026-01-10 and still hit CONNECT 403 fetching the crates.io index.
 - Discovered the CLI handler for `td doctor` and `td connect` was miswired (doctor output showed test data and connect ignored initial_send), requiring a wiring fix.
+- Retried `cargo test` on 2026-01-11 and still hit CONNECT 403 while downloading config.json from crates.io.
 
 ## Decision Log
 
@@ -93,3 +97,4 @@ Doctor is read-only. Connect updates `last_used_at` and logs; rerunning is safe.
 
 Update 2026-01-09 15:49Z: Recorded successful `cargo test` execution now that registry access is available and updated progress/outcomes.
 Update 2026-01-10 01:58Z: Marked serial connect as implemented and noted the renewed crates.io access block after adding serial dependencies.
+Update 2026-01-11 17:09Z: Retried `cargo test`; registry access is still blocked (CONNECT 403).

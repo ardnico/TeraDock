@@ -14,6 +14,7 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
 - [x] (2026-01-12 12:44Z) Updated CLI parsing tests for the new command and documented outcomes.
 - [x] (2026-01-11 16:55Z) Restored CLI handler wiring for `td test` and op_logs reporting after detecting a missing dispatch path.
 - [ ] (2026-01-12 12:50Z) Validate behavior against a reachable host (blocked: no known reachable host in this environment).
+- [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 
 ## Surprises & Discoveries
 
@@ -21,6 +22,8 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
   Evidence: Not attempted; would require a known reachable profile in the local database.
 - Observation: The CLI dispatch for `td test` was missing despite the handler implementation, requiring a wiring fix.
   Evidence: `main` did not route `Commands::Test` before the fix.
+- Observation: Validation is blocked because the `td` binary cannot be built in this environment.
+  Evidence: `cargo build -p td` fails downloading config.json from crates.io.
 
 ## Decision Log
 
@@ -33,7 +36,7 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
 
 ## Outcomes & Retrospective
 
-The `td test` implementation is complete with DNS/TCP probes, optional SSH BatchMode checking, JSON/text output, and op_logs recording. Manual connectivity validation is still pending due to the lack of a known reachable host in this environment, but the CLI dispatch is now correctly wired.
+The `td test` implementation is complete with DNS/TCP probes, optional SSH BatchMode checking, JSON/text output, and op_logs recording. Manual connectivity validation is still pending due to the lack of a known reachable host and because the CLI cannot be built in this environment (crates.io CONNECT 403), but the dispatch is now correctly wired.
 
 ## Context and Orientation
 
@@ -79,3 +82,4 @@ The test command is read-only. Re-running it is safe; failures produce structure
 - Dependencies: reuse `std::net` for DNS/TCP, `std::process::Command` for SSH BatchMode; no new crates.
 
 Update 2026-01-12 12:50Z: Marked implementation tasks complete, logged the decision to store reports in op_logs and update last_used_at, and noted the remaining manual validation gap.
+Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.

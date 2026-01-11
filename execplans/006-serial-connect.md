@@ -14,6 +14,7 @@ Enable PROJECT_PLAN.md Phase 15’s serial connect path so users can select a se
 - [ ] (2026-01-10 15:56Z) Retried `cargo test`; crates.io CONNECT 403 persists, so workspace validation remains blocked.
 - [ ] (2026-01-11 04:22Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download data-encoding), so workspace validation remains blocked.
 - [ ] (2026-01-11 16:55Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
+- [ ] (2026-01-11 17:09Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 
 ## Surprises & Discoveries
 
@@ -76,3 +77,4 @@ Serial connect does not mutate persistent state other than `last_used_at` and `o
   - `RawModeGuard` for terminal state management.
 
 Update 2026-01-11 04:22Z: Retried `cargo test` and recorded the ongoing crates.io CONNECT 403 failure in Progress and Surprises.
+Update 2026-01-11 17:09Z: Retried `cargo test`; registry access remains blocked (CONNECT 403).
