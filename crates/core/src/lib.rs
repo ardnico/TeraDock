@@ -1,6 +1,7 @@
 pub mod cmdset;
 pub mod configset;
 pub mod crypto;
+pub mod cmdset;
 pub mod db;
 pub mod agent;
 pub mod doctor;

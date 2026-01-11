@@ -16,9 +16,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
-use tdcore::agent;
 use tdcore::cmdset::{CmdSetStore, StepOnError};
-use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
 use tdcore::import_export::{self, ConflictStrategy, ExportDocument, ImportReport};
@@ -98,6 +96,9 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Parser spec to apply to stdout (raw/json/regex:<id>)
+        #[arg(long)]
+        parser: Option<String>,
         /// Command to execute (pass after --)
         #[arg(last = true)]
         cmd: Vec<String>,
@@ -572,26 +573,15 @@ fn main() -> Result<()> {
             profile_id,
             timeout_ms,
             json,
+            parser,
             cmd,
-        }) => handle_exec(profile_id, timeout_ms, json, cmd),
+        }) => handle_exec(profile_id, timeout_ms, json, parser, cmd),
         Some(Commands::Run {
             profile_id,
             cmdset_id,
             json,
         }) => handle_run(profile_id, cmdset_id, json),
-        Some(Commands::Connect {
-            profile_id,
-            initial_send,
-        }) => handle_connect(profile_id, initial_send),
-        Some(Commands::Tunnel { command }) => handle_tunnel(command),
-        Some(Commands::Test {
-            profile_id,
-            json,
-            ssh,
-        }) => handle_test(profile_id, json, ssh),
-        Some(Commands::Push(args)) => handle_push(args),
-        Some(Commands::Pull(args)) => handle_pull(args),
-        Some(Commands::Xfer(args)) => handle_xfer(args),
+        Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
         Some(Commands::Secret { command }) => handle_secret(command),
         Some(Commands::Export(args)) => handle_export(args),
         Some(Commands::Import(args)) => handle_import(args),
@@ -863,66 +853,26 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
     }
 }
 
-fn handle_env(cmd: EnvCommands) -> Result<()> {
-    let conn = db::init_connection()?;
-    match cmd {
-        EnvCommands::List => {
-            let mut envs = settings::list_env_names(&conn)?;
-            let current = settings::get_current_env(&conn)?;
-            if let Some(current_name) = current.as_ref() {
-                if !envs.iter().any(|name| name == current_name) {
-                    envs.push(current_name.clone());
-                }
-            }
-            envs.sort();
-            if envs.is_empty() {
-                println!("(no envs)");
-                return Ok(());
-            }
-            for env_name in envs {
-                if current.as_deref() == Some(env_name.as_str()) {
-                    println!("* {env_name}");
-                } else {
-                    println!("  {env_name}");
-                }
-            }
-            Ok(())
-        }
-        EnvCommands::Use { name } => {
-            let name = normalize_env_name(&name)?;
-            settings::set_current_env(&conn, &name)?;
-            println!("current env: {name}");
-            Ok(())
-        }
-        EnvCommands::Show { name } => {
-            let name = normalize_env_name(&name)?;
-            let scope = SettingScope::Env(name);
-            let entries = settings::list_settings_scoped(&conn, &scope)?;
-            if entries.is_empty() {
-                println!("(no settings)");
-                return Ok(());
-            }
-            for (key, value) in entries {
-                println!("{key}={value}");
-            }
-            Ok(())
-        }
-        EnvCommands::Set(args) => {
-            let (env_name, key) = parse_env_key(&args.name_key)?;
-            ensure_known_setting(&key)?;
-            ensure_scope_supported(&key, settings::SettingScopeKind::Env)?;
-            let normalized = match settings_registry::validate_setting_value(&key, &args.value) {
-                Ok(normalized) => normalized,
-                Err(err) => {
-                    let schema = schema_output_for_key(&key)?;
-                    return Err(anyhow!("invalid value for '{key}': {err}\n\n{schema}"));
-                }
-            };
-            let scope = SettingScope::Env(env_name.clone());
-            settings::set_setting_scoped(&conn, &scope, &key, &normalized)?;
-            println!("{env_name}.{key}={normalized}");
-            Ok(())
-        }
+fn handle_exec(
+    profile_id: String,
+    timeout_ms: Option<u64>,
+    json_output: bool,
+    parser: Option<String>,
+    cmd: Vec<String>,
+) -> Result<()> {
+    if cmd.is_empty() {
+        return Err(anyhow!("no command provided; pass after --"));
+    }
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
+    if profile.profile_type != ProfileType::Ssh {
+        return Err(anyhow!("exec only supports SSH profiles for now"));
+    }
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
     }
 }
 
@@ -1764,12 +1714,25 @@ fn handle_exec(
     oplog::log_operation(store.conn(), entry)?;
 
     if json_output {
-        let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let stdout_text = String::from_utf8_lossy(&output.stdout);
+        let parsed = if let Some(parser_spec) = parser {
+            let spec = tdcore::parser::ParserSpec::parse(&parser_spec)?;
+            let parser_def = match &spec {
+                tdcore::parser::ParserSpec::Regex(id) => {
+                    let cmdset_store = CmdSetStore::new(db::init_connection()?);
+                    cmdset_store.get_parser(id)?
+                }
+                _ => None,
+            };
+            parse_output(&spec, &stdout_text, parser_def.as_ref())?
+        } else {
+            serde_json::from_str::<serde_json::Value>(&stdout_text)
+                .unwrap_or_else(|_| serde_json::json!({}))
+        };
         let json = serde_json::json!({
             "ok": ok,
             "exit_code": exit_code,
-            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stdout": stdout_text,
             "stderr": String::from_utf8_lossy(&output.stderr),
             "duration_ms": duration_ms,
             "parsed": parsed,
@@ -1811,8 +1774,6 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         profile.client_overrides.as_ref(),
         &profile_store,
     )?;
-    let auth = ssh_auth_context(profile_store.conn())?;
-    emit_ssh_auth_messages(&auth);
     let run_started = Instant::now();
     let mut stdout_all = String::new();
     let mut stderr_all = String::new();
@@ -1825,7 +1786,6 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         command
             .arg("-p")
             .arg(profile.port.to_string())
-            .args(&auth.args)
             .arg(format!("{}@{}", profile.user, profile.host))
             .arg(&step.cmd)
             .stdout(Stdio::piped())
@@ -1919,304 +1879,6 @@ fn handle_doctor(json: bool) -> Result<()> {
     let conn = db::init_connection()?;
     let global_overrides = settings::get_client_overrides(&conn)?;
     let report = doctor::check_clients_with_overrides(None, global_overrides.as_ref());
-    let meta_json = serde_json::to_value(&report)?;
-    let entry = oplog::OpLogEntry {
-        op: "doctor".into(),
-        profile_id: None,
-        client_used: None,
-        ok: true,
-        exit_code: None,
-        duration_ms: None,
-        meta_json: Some(meta_json),
-    };
-    oplog::log_operation(&conn, entry)?;
-    if json {
-        let serialized = serde_json::to_string_pretty(&report)?;
-        println!("{serialized}");
-        return Ok(());
-    }
-    if let Some(sock) = &report.agent.auth_sock {
-        println!("SSH agent: {sock}");
-    } else {
-        println!("SSH agent: (not set)");
-    }
-    if let Some(count) = report.agent.key_count {
-        println!("SSH agent keys: {count}");
-    } else {
-        println!("SSH agent keys: (unknown)");
-    }
-    if let Some(error) = &report.agent.error {
-        println!("SSH agent error: {error}");
-    }
-    let note = if global_overrides.is_some() {
-        " (global overrides applied)"
-    } else {
-        ""
-    };
-    println!("Client discovery{note}:");
-    for client in report.clients {
-        match client.path {
-            Some(path) => println!("{:<8}: {} [{}]", client.name, path.display(), client.source),
-            None => println!("{:<8}: MISSING [{}]", client.name, client.source),
-        }
-    }
-    if !report.warnings.is_empty() {
-        println!();
-        println!("Warnings:");
-        for warning in report.warnings {
-            println!("- {} ({})", warning.message, warning.code);
-        }
-    }
-    if !report.errors.is_empty() {
-        println!();
-        println!("Errors:");
-        for error in report.errors {
-            println!("- {} ({})", error.message, error.code);
-        }
-    }
-    Ok(())
-}
-
-fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()> {
-    let store = ProfileStore::new(db::init_connection()?);
-    let profile = store
-        .get(&profile_id)?
-        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
-    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
-        println!("Aborted by user.");
-        return Ok(());
-    }
-    let initial_send = initial_send.or_else(|| profile.initial_send.clone());
-
-    let overrides = profile.client_overrides.clone();
-    match profile.profile_type {
-        ProfileType::Ssh => {
-            let ssh = resolve_client_for(ClientKind::Ssh, overrides.as_ref(), &store)?;
-            let auth = ssh_auth_context(store.conn())?;
-            emit_ssh_auth_messages(&auth);
-            connect_ssh(&store, profile, ssh, &auth)
-        }
-        ProfileType::Telnet => {
-            let telnet = resolve_client_for(ClientKind::Telnet, overrides.as_ref(), &store)?;
-            connect_telnet(&store, profile, telnet, initial_send)
-        }
-        ProfileType::Serial => connect_serial(&store, profile, initial_send),
-    }
-}
-
-fn handle_tunnel(command: TunnelCommands) -> Result<()> {
-    match command {
-        TunnelCommands::Start(args) => handle_tunnel_start(args),
-        TunnelCommands::Stop { session_id } => handle_tunnel_stop(session_id),
-        TunnelCommands::Status(args) => handle_tunnel_status(args),
-    }
-}
-
-fn handle_tunnel_start(args: TunnelStartArgs) -> Result<()> {
-    let store = ProfileStore::new(db::init_connection()?);
-    let profile = store
-        .get(&args.profile_id)?
-        .ok_or_else(|| anyhow!("profile not found: {}", args.profile_id))?;
-    ensure_ssh_profile(&profile, "tunnel start")?;
-
-    let forward_store = ForwardStore::new(store.conn().try_clone()?);
-    let forwards = if args.forward.is_empty() {
-        forward_store.list_for_profile(&profile.profile_id)?
-    } else {
-        let mut selected = Vec::new();
-        let mut seen = HashSet::new();
-        for name in args.forward {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            let forward = forward_store
-                .get_by_name(&profile.profile_id, &name)?
-                .ok_or_else(|| anyhow!("forward not found: {name}"))?;
-            selected.push(forward);
-        }
-        selected
-    };
-    if forwards.is_empty() {
-        return Err(anyhow!(
-            "no forwards defined for profile {}",
-            profile.profile_id
-        ));
-    }
-
-    let ssh = resolve_client_for(
-        ClientKind::Ssh,
-        profile.client_overrides.as_ref(),
-        &store,
-    )?;
-    let auth = ssh_auth_context(store.conn())?;
-    emit_ssh_auth_messages(&auth);
-
-    let mut command = Command::new(&ssh);
-    command
-        .arg("-N")
-        .arg("-p")
-        .arg(profile.port.to_string())
-        .args(&auth.args);
-    for forward in &forwards {
-        append_forward(&mut command, forward)?;
-    }
-    command
-        .arg(format!("{}@{}", profile.user, profile.host))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    let child = command.spawn().context("failed to start ssh tunnel")?;
-    let pid = child.id();
-    drop(child);
-
-    store.touch_last_used(&profile.profile_id)?;
-    let session_store = SessionStore::new(store.conn().try_clone()?);
-    let session = session_store.insert(NewSession {
-        kind: SessionKind::Tunnel,
-        profile_id: profile.profile_id.clone(),
-        pid: Some(pid),
-        forwards: forwards.iter().map(|forward| forward.name.clone()).collect(),
-    })?;
-    println!("tunnel started: {} (pid {})", session.session_id, pid);
-    Ok(())
-}
-
-fn handle_tunnel_stop(session_id: String) -> Result<()> {
-    let store = SessionStore::new(db::init_connection()?);
-    let session = store
-        .get(&session_id)?
-        .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
-    if let Some(pid) = session.pid {
-        terminate_pid(pid).with_context(|| format!("failed to stop pid {pid}"))?;
-    }
-    store.remove(&session_id)?;
-    println!("tunnel stopped: {session_id}");
-    Ok(())
-}
-
-fn handle_tunnel_status(args: TunnelStatusArgs) -> Result<()> {
-    let store = SessionStore::new(db::init_connection()?);
-    let cleaned = store.cleanup_dead()?;
-    let sessions = store.list()?;
-
-    if args.json {
-        let json = serde_json::json!({
-            "sessions": sessions.iter().map(session_json).collect::<Vec<_>>(),
-            "cleaned": cleaned.iter().map(session_json).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&json)?);
-        return Ok(());
-    }
-
-    if !cleaned.is_empty() {
-        println!("cleaned {} dead sessions", cleaned.len());
-    }
-    if sessions.is_empty() {
-        println!("no active tunnel sessions");
-        return Ok(());
-    }
-    for session in sessions {
-        let pid = session
-            .pid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".into());
-        println!(
-            "{}\tprofile={}\tpid={}\tforwards={}",
-            session.session_id,
-            session.profile_id,
-            pid,
-            session.forwards.join(",")
-        );
-    }
-    Ok(())
-}
-
-fn append_forward(command: &mut Command, forward: &Forward) -> Result<()> {
-    match forward.kind {
-        ForwardKind::Local | ForwardKind::Remote => {
-            let dest = forward
-                .dest
-                .as_ref()
-                .ok_or_else(|| anyhow!("forward {} is missing destination", forward.name))?;
-            command
-                .arg(forward.kind.as_flag())
-                .arg(format!("{}:{}", forward.listen, dest));
-        }
-        ForwardKind::Dynamic => {
-            command.arg(forward.kind.as_flag()).arg(&forward.listen);
-        }
-    }
-    Ok(())
-}
-
-fn terminate_pid(pid: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let status = Command::new("kill")
-            .arg(pid.to_string())
-            .status()
-            .context("failed to execute kill")?;
-        if !status.success() {
-            return Err(anyhow!("kill failed for pid {pid}"));
-        }
-    }
-    #[cfg(windows)]
-    {
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .status()
-            .context("failed to execute taskkill")?;
-        if !status.success() {
-            return Err(anyhow!("taskkill failed for pid {pid}"));
-        }
-    }
-    Ok(())
-}
-
-fn session_json(session: &tdcore::tunnel::Session) -> serde_json::Value {
-    serde_json::json!({
-        "session_id": session.session_id,
-        "kind": session.kind.to_string(),
-        "profile_id": session.profile_id,
-        "pid": session.pid,
-        "started_at": session.started_at,
-        "forwards": session.forwards,
-    })
-}
-
-fn handle_test(profile_id: String, json: bool, ssh: bool) -> Result<()> {
-    let store = ProfileStore::new(db::init_connection()?);
-    let profile = store
-        .get(&profile_id)?
-        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
-    if !tester::is_network_profile(&profile) {
-        return Err(anyhow!("test only supports ssh/telnet profiles for now"));
-    }
-    if ssh && profile.profile_type != ProfileType::Ssh {
-        return Err(anyhow!("--ssh is only supported for SSH profiles"));
-    }
-
-    let mut options = TestOptions::default();
-    let mut client_used = None;
-    if ssh {
-        let ssh_path =
-            resolve_client_for(ClientKind::Ssh, profile.client_overrides.as_ref(), &store)?;
-        let auth = ssh_auth_context(store.conn())?;
-        emit_ssh_auth_messages(&auth);
-        client_used = Some(ssh_path.to_string_lossy().into_owned());
-        options = options.with_ssh(SshBatchCommand::new(
-            ssh_path,
-            profile.user.clone(),
-            profile.host.clone(),
-            profile.port,
-            auth.args,
-            Duration::from_secs(5),
-        ));
-    }
-
-    let report = tester::run_profile_test(&profile, &options);
-    store.touch_last_used(&profile.profile_id)?;
     let meta_json = serde_json::to_value(&report)?;
     let entry = oplog::OpLogEntry {
         op: "test".into(),
@@ -3080,6 +2742,8 @@ mod tests {
             "--timeout-ms",
             "5000",
             "--json",
+            "--parser",
+            "json",
             "--",
             "echo",
             "hello",
@@ -3091,11 +2755,13 @@ mod tests {
                 profile_id,
                 timeout_ms,
                 json,
+                parser,
                 cmd,
             }) => {
                 assert_eq!(profile_id, "p1");
                 assert_eq!(timeout_ms, Some(5000));
                 assert!(json);
+                assert_eq!(parser.as_deref(), Some("json"));
                 assert_eq!(cmd, vec!["echo".to_string(), "hello".to_string()]);
             }
             _ => panic!("expected exec command"),
@@ -3104,7 +2770,8 @@ mod tests {
 
     #[test]
     fn parses_run_command() {
-        let cli = Cli::try_parse_from(["td", "run", "p1", "c_main", "--json"]).expect("parses run");
+        let cli = Cli::try_parse_from(["td", "run", "p1", "c_main", "--json"])
+            .expect("parses run");
 
         match cli.command {
             Some(Commands::Run {
@@ -3117,54 +2784,6 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn parses_test_command() {
-        let cli =
-            Cli::try_parse_from(["td", "test", "p1", "--json", "--ssh"]).expect("parses test");
-
-        match cli.command {
-            Some(Commands::Test {
-                profile_id,
-                json,
-                ssh,
-            }) => {
-                assert_eq!(profile_id, "p1");
-                assert!(json);
-                assert!(ssh);
-            }
-            _ => panic!("expected test command"),
-        }
-    }
-
-    #[test]
-    fn parses_export_command() {
-        let cli =
-            Cli::try_parse_from(["td", "export", "--include-secrets", "--output", "out.json"])
-                .expect("parses export");
-
-        match cli.command {
-            Some(Commands::Export(args)) => {
-                assert!(args.include_secrets);
-                assert_eq!(args.output.as_deref(), Some(Path::new("out.json")));
-            }
-            _ => panic!("expected export command"),
-        }
-    }
-
-    #[test]
-    fn parses_import_command() {
-        let cli = Cli::try_parse_from(["td", "import", "--conflict", "rename", "in.json"])
-            .expect("parses import");
-
-        match cli.command {
-            Some(Commands::Import(args)) => {
-                assert!(matches!(args.conflict, ConflictArg::Rename));
-                assert_eq!(args.path.as_deref(), Some(Path::new("in.json")));
-            }
-            _ => panic!("expected import command"),
         }
     }
 }

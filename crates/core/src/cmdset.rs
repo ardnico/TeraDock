@@ -64,22 +64,6 @@ impl CmdSetStore {
         Ok(Some(deserialize_cmdset(row)?))
     }
 
-    pub fn list(&self) -> Result<Vec<CmdSet>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT cmdset_id, name, vars_json
-            FROM cmdsets
-            ORDER BY name ASC, cmdset_id ASC
-            "#,
-        )?;
-        let mut rows = stmt.query([])?;
-        let mut cmdsets = Vec::new();
-        while let Some(row) = rows.next()? {
-            cmdsets.push(deserialize_cmdset(row)?);
-        }
-        Ok(cmdsets)
-    }
-
     pub fn list_steps(&self, cmdset_id: &str) -> Result<Vec<CmdStep>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -182,7 +166,10 @@ mod tests {
         let store = CmdSetStore::new(conn);
         let cmdset = store.get("c_main").unwrap().expect("cmdset");
         assert_eq!(cmdset.name, "Main");
-        assert_eq!(cmdset.vars, Some(serde_json::json!({ "env": "prod" })));
+        assert_eq!(
+            cmdset.vars,
+            Some(serde_json::json!({ "env": "prod" }))
+        );
 
         let steps = store.list_steps("c_main").unwrap();
         assert_eq!(steps.len(), 1);
