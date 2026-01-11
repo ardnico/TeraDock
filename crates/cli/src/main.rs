@@ -70,6 +70,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Manage environment presets
+    Env {
+        #[command(subcommand)]
+        command: EnvCommands,
+    },
     /// Check environment and required clients
     Doctor {
         /// Output as JSON
@@ -319,6 +324,26 @@ enum ConfigCommands {
     Apply(ConfigApplyArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum EnvCommands {
+    /// List available env presets
+    List,
+    /// Set the current env preset
+    Use { name: String },
+    /// Show settings for an env preset
+    Show { name: String },
+    /// Set a configuration value in an env preset (NAME.KEY VALUE)
+    Set(EnvSetArgs),
+}
+
+#[derive(Debug, Args)]
+struct EnvSetArgs {
+    /// Env setting key in the form NAME.KEY
+    name_key: String,
+    /// Setting value
+    value: String,
+}
+
 #[derive(Debug, Args, Default)]
 struct ClientOverrideArgs {
     /// Override ssh client path
@@ -358,7 +383,7 @@ struct ConfigSchemaArgs {
 struct ConfigGetArgs {
     /// Setting key
     key: String,
-    /// Setting scope (global or profile:ID)
+    /// Setting scope (global, env:NAME, or profile:ID)
     #[arg(long, default_value = "global")]
     scope: String,
     /// Resolve the value from the scope and fall back to global if unset
@@ -373,7 +398,7 @@ struct ConfigSetArgs {
     key: Option<String>,
     /// Setting value
     value: Option<String>,
-    /// Setting scope (global or profile:ID)
+    /// Setting scope (global, env:NAME, or profile:ID)
     #[arg(long, default_value = "global")]
     scope: String,
     /// Resolve the value after setting (falls back to global if unset)
@@ -479,6 +504,7 @@ fn main() -> Result<()> {
         Some(Commands::Profile { command }) => handle_profile(command),
         Some(Commands::ConfigSet { command }) => handle_configset(command),
         Some(Commands::Config { command }) => handle_config(command),
+        Some(Commands::Env { command }) => handle_env(command),
         Some(Commands::Doctor { json }) => handle_doctor(json),
         Some(Commands::Exec {
             profile_id,
@@ -774,6 +800,69 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
     }
 }
 
+fn handle_env(cmd: EnvCommands) -> Result<()> {
+    let conn = db::init_connection()?;
+    match cmd {
+        EnvCommands::List => {
+            let mut envs = settings::list_env_names(&conn)?;
+            let current = settings::get_current_env(&conn)?;
+            if let Some(current_name) = current.as_ref() {
+                if !envs.iter().any(|name| name == current_name) {
+                    envs.push(current_name.clone());
+                }
+            }
+            envs.sort();
+            if envs.is_empty() {
+                println!("(no envs)");
+                return Ok(());
+            }
+            for env_name in envs {
+                if current.as_deref() == Some(env_name.as_str()) {
+                    println!("* {env_name}");
+                } else {
+                    println!("  {env_name}");
+                }
+            }
+            Ok(())
+        }
+        EnvCommands::Use { name } => {
+            let name = normalize_env_name(&name)?;
+            settings::set_current_env(&conn, &name)?;
+            println!("current env: {name}");
+            Ok(())
+        }
+        EnvCommands::Show { name } => {
+            let name = normalize_env_name(&name)?;
+            let scope = SettingScope::Env(name);
+            let entries = settings::list_settings_scoped(&conn, &scope)?;
+            if entries.is_empty() {
+                println!("(no settings)");
+                return Ok(());
+            }
+            for (key, value) in entries {
+                println!("{key}={value}");
+            }
+            Ok(())
+        }
+        EnvCommands::Set(args) => {
+            let (env_name, key) = parse_env_key(&args.name_key)?;
+            ensure_known_setting(&key)?;
+            ensure_scope_supported(&key, settings::SettingScopeKind::Env)?;
+            let normalized = match settings_registry::validate_setting_value(&key, &args.value) {
+                Ok(normalized) => normalized,
+                Err(err) => {
+                    let schema = schema_output_for_key(&key)?;
+                    return Err(anyhow!("invalid value for '{key}': {err}\n\n{schema}"));
+                }
+            };
+            let scope = SettingScope::Env(env_name.clone());
+            settings::set_setting_scoped(&conn, &scope, &key, &normalized)?;
+            println!("{env_name}.{key}={normalized}");
+            Ok(())
+        }
+    }
+}
+
 fn handle_config_schema(args: ConfigSchemaArgs) -> Result<()> {
     let output = if let Some(key) = args.key {
         schema_output_for_key(&key)?
@@ -870,6 +959,7 @@ fn ensure_scope_supported(key: &str, scope: settings::SettingScopeKind) -> Resul
 fn format_scope_kind(scope: settings::SettingScopeKind) -> &'static str {
     match scope {
         settings::SettingScopeKind::Global => "global",
+        settings::SettingScopeKind::Env => "env",
         settings::SettingScopeKind::Profile => "profile",
     }
 }
@@ -878,6 +968,24 @@ fn schema_output_for_key(key: &str) -> Result<String> {
     let schema = settings_registry::schema_for_key(key)
         .ok_or_else(|| anyhow!("unknown config key: {key}"))?;
     Ok(serde_json::to_string_pretty(schema)?)
+}
+
+fn normalize_env_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("env name cannot be empty"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_env_key(raw: &str) -> Result<(String, String)> {
+    let mut parts = raw.splitn(2, '.');
+    let env = parts.next().unwrap_or("").trim();
+    let key = parts.next().unwrap_or("").trim();
+    if env.is_empty() || key.is_empty() {
+        return Err(anyhow!("env setting must be in the form NAME.KEY"));
+    }
+    Ok((env.to_string(), key.to_string()))
 }
 
 fn handle_configset(cmd: ConfigSetCommands) -> Result<()> {
@@ -2548,6 +2656,22 @@ mod tests {
                 assert!(!args.i_know_its_insecure);
             }
             _ => panic!("expected config apply command"),
+        }
+    }
+
+    #[test]
+    fn parses_env_set() {
+        let cli = Cli::try_parse_from(["td", "env", "set", "work.ssh_auth_order", "agent,keys"])
+            .expect("parses env set");
+
+        match cli.command {
+            Some(Commands::Env {
+                command: EnvCommands::Set(args),
+            }) => {
+                assert_eq!(args.name_key, "work.ssh_auth_order");
+                assert_eq!(args.value, "agent,keys");
+            }
+            _ => panic!("expected env set command"),
         }
     }
 
