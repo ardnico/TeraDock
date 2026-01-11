@@ -30,15 +30,16 @@ use tdcore::profile::{
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::settings;
 use tdcore::tester::{self, SshBatchCommand, TestOptions};
-use tdcore::transfer::{
-    build_scp_args, build_sftp_args, build_sftp_batch, TransferDirection, TransferTempDir,
-    TransferVia,
-};
+use tdcore::transfer::{TransferDirection, TransferTempDir, TransferVia};
 use tdcore::util::now_ms;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use wait_timeout::ChildExt;
 use zeroize::Zeroizing;
+
+mod transfer;
+
+use crate::transfer::{ensure_insecure_allowed, execute_transfer, run_transfer_with_log};
 
 const INITIAL_SEND_DELAY: Duration = Duration::from_millis(300);
 
@@ -62,7 +63,7 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigSetCommands,
     },
-    /// Manage global configuration (client overrides)
+    /// Manage global configuration (client overrides, settings)
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
@@ -239,9 +240,12 @@ struct TransferArgs {
     local_path: PathBuf,
     /// Remote path (destination for push, source for pull)
     remote_path: String,
-    /// Transfer client (scp or sftp)
+    /// Transfer client (scp, sftp, or ftp)
     #[arg(long, default_value = "scp")]
     via: String,
+    /// Acknowledge FTP is insecure when using --via ftp
+    #[arg(long)]
+    i_know_its_insecure: bool,
 }
 
 #[derive(Debug, Args)]
@@ -254,9 +258,12 @@ struct XferArgs {
     dst_profile_id: String,
     /// Destination remote path
     dst_path: String,
-    /// Transfer client (scp or sftp)
+    /// Transfer client (scp, sftp, or ftp)
     #[arg(long, default_value = "scp")]
     via: String,
+    /// Acknowledge FTP is insecure when using --via ftp
+    #[arg(long)]
+    i_know_its_insecure: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -286,8 +293,10 @@ struct SecretAddArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
-    /// Set or clear global client overrides (ssh/scp/sftp/telnet)
+    /// Set or clear global client overrides (ssh/scp/sftp/ftp/telnet)
     SetClient(ClientOverrideArgs),
+    /// Set a global config value (ex: allow_insecure_transfers=true)
+    Set(ConfigSetArgs),
     /// Show current global client overrides
     ShowClient,
     /// Clear all global client overrides
@@ -313,6 +322,9 @@ struct ClientOverrideArgs {
     /// Override sftp client path
     #[arg(long)]
     sftp: Option<String>,
+    /// Override ftp client path
+    #[arg(long)]
+    ftp: Option<String>,
     /// Override telnet client path
     #[arg(long)]
     telnet: Option<String>,
@@ -326,6 +338,12 @@ struct AuthOrderArgs {
     /// Preferred SSH auth order (comma-delimited: agent,keys,password)
     #[arg(long, value_delimiter = ',')]
     order: Vec<SshAuthMethod>,
+}
+
+#[derive(Debug, Args)]
+struct ConfigSetArgs {
+    /// Setting in key=value format (example: allow_insecure_transfers=true)
+    setting: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -366,9 +384,12 @@ struct ConfigApplyArgs {
     /// Backup existing remote files before applying
     #[arg(long)]
     backup: bool,
-    /// Transfer client (scp or sftp)
+    /// Transfer client (scp, sftp, or ftp)
     #[arg(long, default_value = "scp")]
     via: String,
+    /// Acknowledge FTP is insecure when using --via ftp
+    #[arg(long)]
+    i_know_its_insecure: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
@@ -660,6 +681,9 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
             if let Some(path) = args.sftp {
                 overrides.sftp = Some(path);
             }
+            if let Some(path) = args.ftp {
+                overrides.ftp = Some(path);
+            }
             if let Some(path) = args.telnet {
                 overrides.telnet = Some(path);
             }
@@ -684,6 +708,19 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
             info!("cleared client overrides");
             println!("client overrides cleared");
             Ok(())
+        }
+        ConfigCommands::Set(args) => {
+            let (key, value) = parse_config_setting(&args.setting)?;
+            match key.as_str() {
+                "allow_insecure_transfers" => {
+                    let allow = parse_bool_setting(&value)?;
+                    settings::set_allow_insecure_transfers(&conn, allow)?;
+                    info!("updated allow_insecure_transfers");
+                    println!("allow_insecure_transfers={allow}");
+                    Ok(())
+                }
+                _ => Err(anyhow!("unknown config key: {key}")),
+            }
         }
         ConfigCommands::SetAuthOrder(args) => {
             let order = normalize_auth_order(args.order)?;
@@ -776,11 +813,15 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
 
     let started = Instant::now();
     let via = TransferVia::from_str(&args.via)?;
+    let allow_insecure_transfers = settings::get_allow_insecure_transfers(profile_store.conn())?;
+    ensure_insecure_allowed(via, allow_insecure_transfers, args.i_know_its_insecure)?;
     let ssh = resolve_client_for(
         ClientKind::Ssh,
         profile.client_overrides.as_ref(),
         &profile_store,
     )?;
+    let transfer_client =
+        resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), &profile_store)?;
     let auth = ssh_auth_context(profile_store.conn())?;
     emit_ssh_auth_messages(&auth);
 
@@ -845,13 +886,15 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
 
         let temp_path = format!("{dest}.tmp.{}", now_ms());
         let transfer = execute_transfer(
-            &profile_store,
             &profile,
             TransferDirection::Push,
             &local_path,
             &temp_path,
             via,
-            &auth,
+            transfer_client.clone(),
+            &auth.args,
+            allow_insecure_transfers,
+            args.i_know_its_insecure,
         )?;
         if !transfer.ok {
             return Err(anyhow!(
@@ -883,6 +926,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         "plan": args.plan,
         "backup": args.backup,
         "via": via.as_str(),
+        "insecure": via.is_insecure(),
         "applied": applied,
         "skipped": skipped,
         "total": config.files.len(),
@@ -1642,8 +1686,10 @@ fn handle_push(args: TransferArgs) -> Result<()> {
         return Ok(());
     }
     let via = TransferVia::from_str(&args.via)?;
+    let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
+    let client = resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), &store)?;
     run_transfer_with_log(
         &store,
         &profile,
@@ -1651,7 +1697,10 @@ fn handle_push(args: TransferArgs) -> Result<()> {
         &args.local_path,
         &args.remote_path,
         via,
-        &auth,
+        client,
+        &auth.args,
+        allow_insecure_transfers,
+        args.i_know_its_insecure,
         "push",
     )
 }
@@ -1667,8 +1716,10 @@ fn handle_pull(args: TransferArgs) -> Result<()> {
         return Ok(());
     }
     let via = TransferVia::from_str(&args.via)?;
+    let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
+    let client = resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), &store)?;
     run_transfer_with_log(
         &store,
         &profile,
@@ -1676,7 +1727,10 @@ fn handle_pull(args: TransferArgs) -> Result<()> {
         &args.local_path,
         &args.remote_path,
         via,
-        &auth,
+        client,
+        &auth.args,
+        allow_insecure_transfers,
+        args.i_know_its_insecure,
         "pull",
     )
 }
@@ -1701,20 +1755,27 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     }
 
     let via = TransferVia::from_str(&args.via)?;
+    let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
+    let src_client =
+        resolve_client_for(via.client_kind(), src_profile.client_overrides.as_ref(), &store)?;
+    let dst_client =
+        resolve_client_for(via.client_kind(), dst_profile.client_overrides.as_ref(), &store)?;
     let temp_dir = TransferTempDir::new("xfer")?;
     let temp_file = temp_dir.path().join(filename_from_remote(&args.src_path));
 
     let started = Instant::now();
     let pull = execute_transfer(
-        &store,
         &src_profile,
         TransferDirection::Pull,
         &temp_file,
         &args.src_path,
         via,
-        &auth,
+        src_client,
+        &auth.args,
+        allow_insecure_transfers,
+        args.i_know_its_insecure,
     )?;
     let mut push = None;
     let mut ok = pull.ok;
@@ -1722,13 +1783,15 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
 
     if pull.ok {
         let push_outcome = execute_transfer(
-            &store,
             &dst_profile,
             TransferDirection::Push,
             &temp_file,
             &args.dst_path,
             via,
-            &auth,
+            dst_client,
+            &auth.args,
+            allow_insecure_transfers,
+            args.i_know_its_insecure,
         )?;
         ok = push_outcome.ok;
         exit_code = push_outcome.exit_code;
@@ -1740,6 +1803,7 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     let duration_ms = started.elapsed().as_millis() as i64;
     let meta_json = serde_json::json!({
         "via": via.as_str(),
+        "insecure": via.is_insecure(),
         "src_profile_id": src_profile.profile_id,
         "dst_profile_id": dst_profile.profile_id,
         "src_path": args.src_path,
@@ -2064,6 +2128,29 @@ fn parse_client_overrides(raw: Option<String>) -> Result<Option<ClientOverrides>
     }
 }
 
+fn parse_config_setting(raw: &str) -> Result<(String, String)> {
+    let mut parts = raw.splitn(2, '=');
+    let key = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("invalid setting (missing key): {raw}"))?;
+    let value = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("invalid setting (missing value): {raw}"))?;
+    Ok((key.to_string(), value.to_string()))
+}
+
+fn parse_bool_setting(raw: &str) -> Result<bool> {
+    match raw.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" => Ok(true),
+        "false" | "0" | "no" | "n" => Ok(false),
+        _ => Err(anyhow!("invalid boolean value: {raw}")),
+    }
+}
+
 fn resolve_client_for(
     kind: ClientKind,
     profile_overrides: Option<&ClientOverrides>,
@@ -2080,95 +2167,6 @@ fn ensure_ssh_profile(profile: &Profile, op: &str) -> Result<()> {
     } else {
         Ok(())
     }
-}
-
-struct TransferOutcome {
-    ok: bool,
-    exit_code: i32,
-    duration_ms: i64,
-    client_used: PathBuf,
-}
-
-fn run_transfer_with_log(
-    store: &ProfileStore,
-    profile: &Profile,
-    direction: TransferDirection,
-    local_path: &Path,
-    remote_path: &str,
-    via: TransferVia,
-    auth: &SshAuthContext,
-    op: &str,
-) -> Result<()> {
-    let outcome = execute_transfer(store, profile, direction, local_path, remote_path, via, auth)?;
-    store.touch_last_used(&profile.profile_id)?;
-    let meta_json = serde_json::json!({
-        "via": via.as_str(),
-        "direction": match direction {
-            TransferDirection::Push => "push",
-            TransferDirection::Pull => "pull",
-        },
-        "local_path": local_path.display().to_string(),
-        "remote_path": remote_path,
-    });
-    let entry = oplog::OpLogEntry {
-        op: op.into(),
-        profile_id: Some(profile.profile_id.clone()),
-        client_used: Some(outcome.client_used.to_string_lossy().into_owned()),
-        ok: outcome.ok,
-        exit_code: Some(outcome.exit_code),
-        duration_ms: Some(outcome.duration_ms),
-        meta_json: Some(meta_json),
-    };
-    oplog::log_operation(store.conn(), entry)?;
-    if outcome.ok {
-        Ok(())
-    } else {
-        Err(anyhow!("{op} failed with exit code {}", outcome.exit_code))
-    }
-}
-
-fn execute_transfer(
-    store: &ProfileStore,
-    profile: &Profile,
-    direction: TransferDirection,
-    local_path: &Path,
-    remote_path: &str,
-    via: TransferVia,
-    auth: &SshAuthContext,
-) -> Result<TransferOutcome> {
-    let client = resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), store)?;
-    let mut cmd = Command::new(&client);
-    let _batch_guard: Option<TransferTempDir>;
-    let args = match via {
-        TransferVia::Scp => {
-            _batch_guard = None;
-            build_scp_args(profile, direction, local_path, remote_path)
-        }
-        TransferVia::Sftp => {
-            let batch_dir = TransferTempDir::new("sftp-batch")?;
-            let batch_path = batch_dir.path().join("batch.txt");
-            let batch_contents = build_sftp_batch(direction, local_path, remote_path);
-            std::fs::write(&batch_path, batch_contents)?;
-            _batch_guard = Some(batch_dir);
-            build_sftp_args(profile, &batch_path)
-        }
-    };
-    cmd.args(&auth.args)
-        .args(args)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    let started = Instant::now();
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to execute {}", via.as_str()))?;
-    let duration_ms = started.elapsed().as_millis() as i64;
-    let exit_code = status.code().unwrap_or_default();
-    Ok(TransferOutcome {
-        ok: status.success(),
-        exit_code,
-        duration_ms,
-        client_used: client,
-    })
 }
 
 fn filename_from_remote(remote_path: &str) -> PathBuf {
@@ -2369,6 +2367,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_set_allow_insecure_transfers() {
+        let cli = Cli::try_parse_from(["td", "config", "set", "allow_insecure_transfers=true"])
+            .expect("parses config set");
+
+        match cli.command {
+            Some(Commands::Config {
+                command: ConfigCommands::Set(args),
+            }) => {
+                assert_eq!(args.setting, "allow_insecure_transfers=true");
+            }
+            _ => panic!("expected config set command"),
+        }
+    }
+
+    #[test]
     fn parses_configset_add_with_file() {
         let cli = Cli::try_parse_from([
             "td",
@@ -2408,6 +2421,7 @@ mod tests {
                 assert!(args.plan);
                 assert!(args.backup);
                 assert_eq!(args.via, "sftp");
+                assert!(!args.i_know_its_insecure);
             }
             _ => panic!("expected config apply command"),
         }

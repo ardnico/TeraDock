@@ -17,6 +17,7 @@ pub enum TransferDirection {
 pub enum TransferVia {
     Scp,
     Sftp,
+    Ftp,
 }
 
 impl TransferVia {
@@ -24,6 +25,7 @@ impl TransferVia {
         match value.to_lowercase().as_str() {
             "scp" => Ok(Self::Scp),
             "sftp" => Ok(Self::Sftp),
+            "ftp" => Ok(Self::Ftp),
             _ => Err(CoreError::InvalidCommandSpec(format!(
                 "invalid transfer client: {value}"
             ))),
@@ -34,6 +36,7 @@ impl TransferVia {
         match self {
             Self::Scp => "scp",
             Self::Sftp => "sftp",
+            Self::Ftp => "ftp",
         }
     }
 
@@ -41,7 +44,12 @@ impl TransferVia {
         match self {
             Self::Scp => ClientKind::Scp,
             Self::Sftp => ClientKind::Sftp,
+            Self::Ftp => ClientKind::Ftp,
         }
+    }
+
+    pub fn is_insecure(&self) -> bool {
+        matches!(self, Self::Ftp)
     }
 }
 

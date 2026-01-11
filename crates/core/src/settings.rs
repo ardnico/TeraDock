@@ -51,3 +51,27 @@ pub fn clear_ssh_auth_order(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM settings WHERE key = 'ssh_auth_order'", [])?;
     Ok(())
 }
+
+pub fn get_allow_insecure_transfers(conn: &Connection) -> Result<bool> {
+    let raw = get_setting(conn, "allow_insecure_transfers")?;
+    match raw {
+        Some(value) => Ok(value.trim().eq_ignore_ascii_case("true")),
+        None => Ok(false),
+    }
+}
+
+pub fn set_allow_insecure_transfers(conn: &Connection, allow: bool) -> Result<()> {
+    set_setting(
+        conn,
+        "allow_insecure_transfers",
+        if allow { "true" } else { "false" },
+    )
+}
+
+pub fn clear_allow_insecure_transfers(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key = 'allow_insecure_transfers'",
+        [],
+    )?;
+    Ok(())
+}
