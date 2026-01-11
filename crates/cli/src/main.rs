@@ -1817,6 +1817,20 @@ fn handle_doctor(json: bool) -> Result<()> {
             None => println!("{:<8}: MISSING [{}]", client.name, client.source),
         }
     }
+    if !report.warnings.is_empty() {
+        println!();
+        println!("Warnings:");
+        for warning in report.warnings {
+            println!("- {} ({})", warning.message, warning.code);
+        }
+    }
+    if !report.errors.is_empty() {
+        println!();
+        println!("Errors:");
+        for error in report.errors {
+            println!("- {} ({})", error.message, error.code);
+        }
+    }
     Ok(())
 }
 
