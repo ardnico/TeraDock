@@ -265,7 +265,7 @@ fn load_profiles(conn: &Connection) -> Result<Vec<Profile>> {
     let mut stmt = conn.prepare(
         r#"
         SELECT profile_id, name, type, host, port, user, danger_level, "group",
-               tags_json, note, client_overrides_json, created_at, updated_at, last_used_at
+               tags_json, note, initial_send, client_overrides_json, created_at, updated_at, last_used_at
         FROM profiles
         ORDER BY name ASC
         "#,
@@ -444,6 +444,7 @@ fn deserialize_profile(row: &Row<'_>) -> Result<Profile> {
         group: row.get("group")?,
         tags: serde_json::from_str(&tags_json)?,
         note: row.get("note")?,
+        initial_send: row.get("initial_send")?,
         client_overrides: match overrides {
             Some(raw) => Some(serde_json::from_str(&raw)?),
             None => None,
@@ -543,8 +544,8 @@ fn insert_profile(tx: &Transaction<'_>, profile: &Profile) -> Result<()> {
         r#"
         INSERT INTO profiles (
             profile_id, name, type, host, port, user, danger_level, "group",
-            tags_json, note, client_overrides_json, created_at, updated_at, last_used_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            tags_json, note, initial_send, client_overrides_json, created_at, updated_at, last_used_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         "#,
         params![
             profile.profile_id,
@@ -557,6 +558,7 @@ fn insert_profile(tx: &Transaction<'_>, profile: &Profile) -> Result<()> {
             profile.group,
             tags_json,
             profile.note,
+            profile.initial_send,
             overrides_json,
             profile.created_at,
             profile.updated_at,

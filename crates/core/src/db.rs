@@ -25,7 +25,7 @@ fn configure_connection(conn: &mut Connection) -> Result<()> {
 }
 
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
-    let current: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut current: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if current < 1 {
         info!("applying schema v1");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
@@ -137,6 +137,19 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
             "#,
         )?;
         tx.commit()?;
+        current = 1;
+    }
+    if current < 2 {
+        info!("applying schema v2");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            ALTER TABLE profiles ADD COLUMN initial_send TEXT;
+            PRAGMA user_version = 2;
+            "#,
+        )?;
+        tx.commit()?;
+        current = 2;
     }
     Ok(())
 }
