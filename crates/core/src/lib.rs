@@ -9,6 +9,7 @@ pub mod paths;
 pub mod profile;
 pub mod secret;
 pub mod settings;
+pub mod transfer;
 pub mod util;
 
 pub use common::id;
