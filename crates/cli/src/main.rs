@@ -1,6 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use directories::BaseDirs;
+use rusqlite::Connection;
+use std::collections::HashSet;
+use std::env;
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -263,6 +268,12 @@ enum ConfigCommands {
     ShowClient,
     /// Clear all global client overrides
     ClearClient,
+    /// Set the SSH authentication order (agent/keys/password)
+    SetAuthOrder(AuthOrderArgs),
+    /// Show the SSH authentication order
+    ShowAuthOrder,
+    /// Clear the SSH authentication order
+    ClearAuthOrder,
     /// Apply a config set to a profile
     Apply(ConfigApplyArgs),
 }
@@ -284,6 +295,13 @@ struct ClientOverrideArgs {
     /// Clear all overrides before applying provided values
     #[arg(long)]
     clear_all: bool,
+}
+
+#[derive(Debug, Args)]
+struct AuthOrderArgs {
+    /// Preferred SSH auth order (comma-delimited: agent,keys,password)
+    #[arg(long, value_delimiter = ',')]
+    order: Vec<SshAuthMethod>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +345,23 @@ struct ConfigApplyArgs {
     /// Transfer client (scp or sftp)
     #[arg(long, default_value = "scp")]
     via: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+enum SshAuthMethod {
+    Agent,
+    Keys,
+    Password,
+}
+
+impl SshAuthMethod {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Keys => "keys",
+            Self::Password => "password",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -611,6 +646,25 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
             println!("client overrides cleared");
             Ok(())
         }
+        ConfigCommands::SetAuthOrder(args) => {
+            let order = normalize_auth_order(args.order)?;
+            let serialized = format_auth_order(&order);
+            settings::set_ssh_auth_order(&conn, &serialized)?;
+            info!("updated ssh auth order");
+            println!("{serialized}");
+            Ok(())
+        }
+        ConfigCommands::ShowAuthOrder => {
+            let order = load_ssh_auth_order(&conn)?;
+            println!("{}", format_auth_order(&order));
+            Ok(())
+        }
+        ConfigCommands::ClearAuthOrder => {
+            settings::clear_ssh_auth_order(&conn)?;
+            info!("cleared ssh auth order");
+            println!("ssh auth order cleared");
+            Ok(())
+        }
         ConfigCommands::Apply(args) => handle_config_apply(args),
     }
 }
@@ -688,10 +742,12 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         profile.client_overrides.as_ref(),
         &profile_store,
     )?;
+    let auth = ssh_auth_context(profile_store.conn())?;
+    emit_ssh_auth_messages(&auth);
 
     let needs_home = config.files.iter().any(|file| file.dest.starts_with("~/"));
     let remote_home = if needs_home {
-        Some(fetch_remote_home(&ssh, &profile)?)
+        Some(fetch_remote_home(&ssh, &profile, &auth)?)
     } else {
         None
     };
@@ -704,7 +760,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
             return Err(anyhow!("local file not found: {}", local_path.display()));
         }
         let dest = resolve_remote_dest(&file.dest, remote_home.as_deref())?;
-        let status = remote_file_status(&ssh, &profile, &dest, file.when)?;
+        let status = remote_file_status(&ssh, &profile, &auth, &dest, file.when)?;
         let local_hash = if file.when == ConfigFileWhen::Changed {
             Some(sha256_file(&local_path)?)
         } else {
@@ -743,6 +799,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
             run_remote_command(
                 &ssh,
                 &profile,
+                &auth,
                 &format!("cp {} {}", shell_quote(&dest), shell_quote(&backup_path)),
             )?;
         }
@@ -755,6 +812,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
             &local_path,
             &temp_path,
             via,
+            &auth,
         )?;
         if !transfer.ok {
             return Err(anyhow!(
@@ -765,12 +823,14 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         run_remote_command(
             &ssh,
             &profile,
+            &auth,
             &format!("mv {} {}", shell_quote(&temp_path), shell_quote(&dest)),
         )?;
         if let Some(mode) = &file.mode {
             run_remote_command(
                 &ssh,
                 &profile,
+                &auth,
                 &format!("chmod {} {}", mode, shell_quote(&dest)),
             )?;
         }
@@ -851,6 +911,183 @@ fn resolve_remote_dest(dest: &str, remote_home: Option<&str>) -> Result<String> 
     }
 }
 
+struct SshAuthAvailability {
+    agent: bool,
+    keys: bool,
+}
+
+struct SshAuthContext {
+    order: Vec<SshAuthMethod>,
+    args: Vec<OsString>,
+    hint: Option<String>,
+    warn_password_fallback: bool,
+}
+
+fn normalize_auth_order(order: Vec<SshAuthMethod>) -> Result<Vec<SshAuthMethod>> {
+    if order.is_empty() {
+        return Err(anyhow!("auth order cannot be empty"));
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for method in order {
+        if !seen.insert(method) {
+            return Err(anyhow!("auth order contains duplicate '{}'", method.as_str()));
+        }
+        normalized.push(method);
+    }
+    Ok(normalized)
+}
+
+fn parse_auth_order_setting(raw: &str) -> Result<Vec<SshAuthMethod>> {
+    if raw.trim().is_empty() {
+        return Err(anyhow!("auth order setting is empty"));
+    }
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    for item in raw.split(',') {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let method = match trimmed {
+            "agent" => SshAuthMethod::Agent,
+            "keys" => SshAuthMethod::Keys,
+            "password" => SshAuthMethod::Password,
+            _ => return Err(anyhow!("unknown auth method '{trimmed}'")),
+        };
+        if !seen.insert(method) {
+            return Err(anyhow!("auth order contains duplicate '{trimmed}'"));
+        }
+        order.push(method);
+    }
+    if order.is_empty() {
+        return Err(anyhow!("auth order setting is empty"));
+    }
+    Ok(order)
+}
+
+fn format_auth_order(order: &[SshAuthMethod]) -> String {
+    order
+        .iter()
+        .map(SshAuthMethod::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn default_auth_order() -> Vec<SshAuthMethod> {
+    vec![SshAuthMethod::Agent, SshAuthMethod::Keys, SshAuthMethod::Password]
+}
+
+fn load_ssh_auth_order(conn: &Connection) -> Result<Vec<SshAuthMethod>> {
+    match settings::get_ssh_auth_order(conn)? {
+        Some(raw) => parse_auth_order_setting(&raw)
+            .map_err(|err| anyhow!("invalid ssh auth order setting: {err}")),
+        None => Ok(default_auth_order()),
+    }
+}
+
+fn detect_ssh_auth_availability() -> SshAuthAvailability {
+    let agent = env::var_os("SSH_AUTH_SOCK")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    let keys = if let Some(dirs) = BaseDirs::new() {
+        let ssh_dir = dirs.home_dir().join(".ssh");
+        [
+            "id_ed25519",
+            "id_rsa",
+            "id_ecdsa",
+            "id_ed25519_sk",
+            "id_ecdsa_sk",
+            "id_dsa",
+            "identity",
+        ]
+        .iter()
+        .any(|name| ssh_dir.join(name).exists())
+    } else {
+        false
+    };
+    SshAuthAvailability { agent, keys }
+}
+
+fn build_ssh_auth_args(order: &[SshAuthMethod], availability: &SshAuthAvailability) -> Vec<OsString> {
+    let mut preferred = Vec::new();
+    let mut publickey_added = false;
+    for method in order {
+        match method {
+            SshAuthMethod::Agent | SshAuthMethod::Keys => {
+                if !publickey_added {
+                    preferred.push("publickey");
+                    publickey_added = true;
+                }
+            }
+            SshAuthMethod::Password => {
+                preferred.push("keyboard-interactive");
+                preferred.push("password");
+            }
+        }
+    }
+    let mut args = Vec::new();
+    if !preferred.is_empty() {
+        args.push(OsString::from("-o"));
+        args.push(OsString::from(format!(
+            "PreferredAuthentications={}",
+            preferred.join(",")
+        )));
+    }
+    if !availability.agent || !order.contains(&SshAuthMethod::Agent) {
+        args.push(OsString::from("-o"));
+        args.push(OsString::from("IdentityAgent=none"));
+    }
+    args
+}
+
+fn is_auth_method_available(method: SshAuthMethod, availability: &SshAuthAvailability) -> bool {
+    match method {
+        SshAuthMethod::Agent => availability.agent,
+        SshAuthMethod::Keys => availability.keys,
+        SshAuthMethod::Password => true,
+    }
+}
+
+fn ssh_auth_context(conn: &Connection) -> Result<SshAuthContext> {
+    let order = load_ssh_auth_order(conn)?;
+    let availability = detect_ssh_auth_availability();
+    let args = build_ssh_auth_args(&order, &availability);
+    let hint = match order.first().copied() {
+        Some(SshAuthMethod::Agent) if !availability.agent => Some(
+            "Hint: SSH auth order prefers agent; start ssh-agent or set SSH_AUTH_SOCK to avoid password prompts.".to_string(),
+        ),
+        Some(SshAuthMethod::Keys) if !availability.keys => Some(
+            "Hint: SSH auth order prefers keys; add a key under ~/.ssh or update the auth order.".to_string(),
+        ),
+        _ => None,
+    };
+    let first_available = order
+        .iter()
+        .copied()
+        .find(|method| is_auth_method_available(*method, &availability));
+    let warn_password_fallback = matches!(first_available, Some(SshAuthMethod::Password))
+        && order.first().copied() != Some(SshAuthMethod::Password);
+    Ok(SshAuthContext {
+        order,
+        args,
+        hint,
+        warn_password_fallback,
+    })
+}
+
+fn emit_ssh_auth_messages(auth: &SshAuthContext) {
+    if let Some(hint) = &auth.hint {
+        eprintln!("{hint}");
+    }
+    if auth.warn_password_fallback {
+        eprintln!(
+            "Warning: falling back to password auth (order: {}).",
+            format_auth_order(&auth.order)
+        );
+    }
+}
+
 struct RemoteFileStatus {
     exists: bool,
     sha256: Option<String>,
@@ -859,22 +1096,24 @@ struct RemoteFileStatus {
 fn remote_file_status(
     ssh: &Path,
     profile: &Profile,
+    auth: &SshAuthContext,
     dest: &str,
     when: ConfigFileWhen,
 ) -> Result<RemoteFileStatus> {
     match when {
         ConfigFileWhen::Always => Ok(RemoteFileStatus {
-            exists: remote_exists(ssh, profile, dest)?,
+            exists: remote_exists(ssh, profile, auth, dest)?,
             sha256: None,
         }),
         ConfigFileWhen::Missing => Ok(RemoteFileStatus {
-            exists: remote_exists(ssh, profile, dest)?,
+            exists: remote_exists(ssh, profile, auth, dest)?,
             sha256: None,
         }),
         ConfigFileWhen::Changed => {
             let output = run_remote_command(
                 ssh,
                 profile,
+                auth,
                 &format!(
                     "if test -f {path}; then sha256sum {path} | awk '{{print $1}}'; else echo MISSING; fi",
                     path = shell_quote(dest)
@@ -896,10 +1135,11 @@ fn remote_file_status(
     }
 }
 
-fn remote_exists(ssh: &Path, profile: &Profile, dest: &str) -> Result<bool> {
+fn remote_exists(ssh: &Path, profile: &Profile, auth: &SshAuthContext, dest: &str) -> Result<bool> {
     let output = run_remote_command(
         ssh,
         profile,
+        auth,
         &format!(
             "if test -f {path}; then echo EXISTS; else echo MISSING; fi",
             path = shell_quote(dest)
@@ -941,8 +1181,8 @@ fn should_apply_config(
     }
 }
 
-fn fetch_remote_home(ssh: &Path, profile: &Profile) -> Result<String> {
-    let output = run_remote_command(ssh, profile, "printf %s \"$HOME\"")?;
+fn fetch_remote_home(ssh: &Path, profile: &Profile, auth: &SshAuthContext) -> Result<String> {
+    let output = run_remote_command(ssh, profile, auth, "printf %s \"$HOME\"")?;
     let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if home.is_empty() {
         return Err(anyhow!("failed to resolve remote home"));
@@ -950,10 +1190,16 @@ fn fetch_remote_home(ssh: &Path, profile: &Profile) -> Result<String> {
     Ok(home)
 }
 
-fn run_remote_command(ssh: &Path, profile: &Profile, cmd: &str) -> Result<std::process::Output> {
+fn run_remote_command(
+    ssh: &Path,
+    profile: &Profile,
+    auth: &SshAuthContext,
+    cmd: &str,
+) -> Result<std::process::Output> {
     let output = Command::new(ssh)
         .arg("-p")
         .arg(profile.port.to_string())
+        .args(&auth.args)
         .arg(format!("{}@{}", profile.user, profile.host))
         .arg(cmd)
         .stdout(Stdio::piped())
@@ -1014,10 +1260,13 @@ fn handle_exec(
     }
 
     let ssh = resolve_client_for(ClientKind::Ssh, profile.client_overrides.as_ref(), &store)?;
+    let auth = ssh_auth_context(store.conn())?;
+    emit_ssh_auth_messages(&auth);
     let mut command = Command::new(&ssh);
     command
         .arg("-p")
         .arg(profile.port.to_string())
+        .args(&auth.args)
         .arg(format!("{}@{}", profile.user, profile.host))
         .args(&cmd)
         .stdout(Stdio::piped())
@@ -1093,6 +1342,8 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         profile.client_overrides.as_ref(),
         &profile_store,
     )?;
+    let auth = ssh_auth_context(profile_store.conn())?;
+    emit_ssh_auth_messages(&auth);
     let run_started = Instant::now();
     let mut stdout_all = String::new();
     let mut stderr_all = String::new();
@@ -1105,6 +1356,7 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         command
             .arg("-p")
             .arg(profile.port.to_string())
+            .args(&auth.args)
             .arg(format!("{}@{}", profile.user, profile.host))
             .arg(&step.cmd)
             .stdout(Stdio::piped())
@@ -1243,7 +1495,9 @@ fn handle_connect(profile_id: String) -> Result<()> {
     match profile.profile_type {
         ProfileType::Ssh => {
             let ssh = resolve_client_for(ClientKind::Ssh, overrides.as_ref(), &store)?;
-            connect_ssh(&store, profile, ssh)
+            let auth = ssh_auth_context(store.conn())?;
+            emit_ssh_auth_messages(&auth);
+            connect_ssh(&store, profile, ssh, &auth)
         }
         ProfileType::Telnet => {
             let telnet = resolve_client_for(ClientKind::Telnet, overrides.as_ref(), &store)?;
@@ -1264,6 +1518,8 @@ fn handle_push(args: TransferArgs) -> Result<()> {
         return Ok(());
     }
     let via = TransferVia::from_str(&args.via)?;
+    let auth = ssh_auth_context(store.conn())?;
+    emit_ssh_auth_messages(&auth);
     run_transfer_with_log(
         &store,
         &profile,
@@ -1271,6 +1527,7 @@ fn handle_push(args: TransferArgs) -> Result<()> {
         &args.local_path,
         &args.remote_path,
         via,
+        &auth,
         "push",
     )
 }
@@ -1286,6 +1543,8 @@ fn handle_pull(args: TransferArgs) -> Result<()> {
         return Ok(());
     }
     let via = TransferVia::from_str(&args.via)?;
+    let auth = ssh_auth_context(store.conn())?;
+    emit_ssh_auth_messages(&auth);
     run_transfer_with_log(
         &store,
         &profile,
@@ -1293,6 +1552,7 @@ fn handle_pull(args: TransferArgs) -> Result<()> {
         &args.local_path,
         &args.remote_path,
         via,
+        &auth,
         "pull",
     )
 }
@@ -1317,6 +1577,8 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     }
 
     let via = TransferVia::from_str(&args.via)?;
+    let auth = ssh_auth_context(store.conn())?;
+    emit_ssh_auth_messages(&auth);
     let temp_dir = TransferTempDir::new("xfer")?;
     let temp_file = temp_dir.path().join(filename_from_remote(&args.src_path));
 
@@ -1328,6 +1590,7 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
         &temp_file,
         &args.src_path,
         via,
+        &auth,
     )?;
     let mut push = None;
     let mut ok = pull.ok;
@@ -1341,6 +1604,7 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
             &temp_file,
             &args.dst_path,
             via,
+            &auth,
         )?;
         ok = push_outcome.ok;
         exit_code = push_outcome.exit_code;
@@ -1381,10 +1645,16 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     }
 }
 
-fn connect_ssh(store: &ProfileStore, profile: Profile, ssh: PathBuf) -> Result<()> {
+fn connect_ssh(
+    store: &ProfileStore,
+    profile: Profile,
+    ssh: PathBuf,
+    auth: &SshAuthContext,
+) -> Result<()> {
     let mut cmd = Command::new(&ssh);
     cmd.arg("-p")
         .arg(profile.port.to_string())
+        .args(&auth.args)
         .arg(format!("{}@{}", profile.user, profile.host));
     let started = Instant::now();
     let status = cmd.status().context("failed to launch ssh")?;
@@ -1639,9 +1909,10 @@ fn run_transfer_with_log(
     local_path: &Path,
     remote_path: &str,
     via: TransferVia,
+    auth: &SshAuthContext,
     op: &str,
 ) -> Result<()> {
-    let outcome = execute_transfer(store, profile, direction, local_path, remote_path, via)?;
+    let outcome = execute_transfer(store, profile, direction, local_path, remote_path, via, auth)?;
     store.touch_last_used(&profile.profile_id)?;
     let meta_json = serde_json::json!({
         "via": via.as_str(),
@@ -1676,6 +1947,7 @@ fn execute_transfer(
     local_path: &Path,
     remote_path: &str,
     via: TransferVia,
+    auth: &SshAuthContext,
 ) -> Result<TransferOutcome> {
     let client = resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), store)?;
     let mut cmd = Command::new(&client);
@@ -1694,7 +1966,8 @@ fn execute_transfer(
             build_sftp_args(profile, &batch_path)
         }
     };
-    cmd.args(args)
+    cmd.args(&auth.args)
+        .args(args)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     let started = Instant::now();

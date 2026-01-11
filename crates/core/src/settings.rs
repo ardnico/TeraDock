@@ -38,3 +38,16 @@ pub fn clear_client_overrides(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM settings WHERE key = 'client_overrides'", [])?;
     Ok(())
 }
+
+pub fn get_ssh_auth_order(conn: &Connection) -> Result<Option<String>> {
+    get_setting(conn, "ssh_auth_order")
+}
+
+pub fn set_ssh_auth_order(conn: &Connection, order: &str) -> Result<()> {
+    set_setting(conn, "ssh_auth_order", order)
+}
+
+pub fn clear_ssh_auth_order(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = 'ssh_auth_order'", [])?;
+    Ok(())
+}
