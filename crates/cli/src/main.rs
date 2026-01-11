@@ -10,9 +10,11 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use tdcore::cmdset::{CmdSetStore, StepOnError};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
 use tdcore::oplog;
+use tdcore::parser::parse_output;
 use tdcore::paths;
 use tdcore::profile::{
     DangerLevel, NewProfile, Profile, ProfileFilters, ProfileStore, ProfileType, UpdateProfile,
@@ -62,6 +64,16 @@ enum Commands {
         /// Command to execute (pass after --)
         #[arg(last = true)]
         cmd: Vec<String>,
+    },
+    /// Execute a stored CommandSet over SSH
+    Run {
+        /// Profile ID to use
+        profile_id: String,
+        /// CommandSet ID to execute
+        cmdset_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Connect to a profile (SSH/Telnet/Serial)
     Connect {
@@ -234,6 +246,11 @@ fn main() -> Result<()> {
             json,
             cmd,
         }) => handle_exec(profile_id, timeout_ms, json, cmd),
+        Some(Commands::Run {
+            profile_id,
+            cmdset_id,
+            json,
+        }) => handle_run(profile_id, cmdset_id, json),
         Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
         Some(Commands::Secret { command }) => handle_secret(command),
         None => {
@@ -482,6 +499,133 @@ fn handle_exec(
         if !ok {
             return Err(anyhow!("ssh exited with code {exit_code}"));
         }
+    }
+    Ok(())
+}
+
+fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Result<()> {
+    let profile_store = ProfileStore::new(db::init_connection()?);
+    let cmdset_store = CmdSetStore::new(db::init_connection()?);
+    let profile = profile_store
+        .get(&profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
+    if profile.profile_type != ProfileType::Ssh {
+        return Err(anyhow!("run only supports SSH profiles for now"));
+    }
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+    if cmdset_store.get(&cmdset_id)?.is_none() {
+        return Err(anyhow!("cmdset not found: {cmdset_id}"));
+    }
+    let steps = cmdset_store.list_steps(&cmdset_id)?;
+    if steps.is_empty() {
+        return Err(anyhow!("cmdset has no steps: {cmdset_id}"));
+    }
+
+    let ssh = resolve_client_for(
+        ClientKind::Ssh,
+        profile.client_overrides.as_ref(),
+        &profile_store,
+    )?;
+    let run_started = Instant::now();
+    let mut stdout_all = String::new();
+    let mut stderr_all = String::new();
+    let mut step_results = Vec::new();
+    let mut overall_ok = true;
+    let mut last_exit_code = 0;
+
+    for step in steps {
+        let mut command = Command::new(&ssh);
+        command
+            .arg("-p")
+            .arg(profile.port.to_string())
+            .arg(format!("{}@{}", profile.user, profile.host))
+            .arg(&step.cmd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let step_started = Instant::now();
+        let output = match step.timeout_ms {
+            Some(ms) => run_with_timeout(command, Duration::from_millis(ms))
+                .map_err(|e| anyhow!("step {} timed out after {ms}ms: {e}", step.ord))?,
+            None => command.output().context("failed to execute ssh")?,
+        };
+        let duration_ms = step_started.elapsed().as_millis() as i64;
+        let exit_code = output.status.code().unwrap_or_default();
+        let ok = output.status.success();
+        last_exit_code = exit_code;
+        if !ok {
+            overall_ok = false;
+        }
+
+        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+        stdout_all.push_str(&stdout_text);
+        stderr_all.push_str(&stderr_text);
+
+        let parser_def = match &step.parser_spec {
+            tdcore::parser::ParserSpec::Regex(id) => cmdset_store.get_parser(id)?,
+            _ => None,
+        };
+        let parsed = parse_output(&step.parser_spec, &stdout_text, parser_def.as_ref())?;
+
+        step_results.push(serde_json::json!({
+            "ord": step.ord,
+            "cmd": step.cmd,
+            "ok": ok,
+            "exit_code": exit_code,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "duration_ms": duration_ms,
+            "parsed": parsed,
+        }));
+
+        if !json_output {
+            io::stdout().write_all(output.stdout.as_slice())?;
+            io::stderr().write_all(output.stderr.as_slice())?;
+        }
+
+        if !ok && step.on_error == StepOnError::Stop {
+            break;
+        }
+    }
+
+    let duration_ms = run_started.elapsed().as_millis() as i64;
+    profile_store.touch_last_used(&profile.profile_id)?;
+    let meta_json = serde_json::json!({
+        "cmdset_id": cmdset_id,
+        "steps_executed": step_results.len(),
+    });
+    let entry = oplog::OpLogEntry {
+        op: "run".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(ssh.to_string_lossy().into_owned()),
+        ok: overall_ok,
+        exit_code: Some(last_exit_code),
+        duration_ms: Some(duration_ms),
+        meta_json: Some(meta_json),
+    };
+    oplog::log_operation(profile_store.conn(), entry)?;
+
+    if json_output {
+        let json = serde_json::json!({
+            "ok": overall_ok,
+            "exit_code": last_exit_code,
+            "stdout": stdout_all,
+            "stderr": stderr_all,
+            "duration_ms": duration_ms,
+            "parsed": {
+                "steps": step_results,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    if !overall_ok {
+        return Err(anyhow!("run failed with exit code {last_exit_code}"));
     }
     Ok(())
 }
@@ -1008,6 +1152,25 @@ mod tests {
                 assert_eq!(cmd, vec!["echo".to_string(), "hello".to_string()]);
             }
             _ => panic!("expected exec command"),
+        }
+    }
+
+    #[test]
+    fn parses_run_command() {
+        let cli = Cli::try_parse_from(["td", "run", "p1", "c_main", "--json"])
+            .expect("parses run");
+
+        match cli.command {
+            Some(Commands::Run {
+                profile_id,
+                cmdset_id,
+                json,
+            }) => {
+                assert_eq!(profile_id, "p1");
+                assert_eq!(cmdset_id, "c_main");
+                assert!(json);
+            }
+            _ => panic!("expected run command"),
         }
     }
 }
