@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ use tdcore::cmdset::{CmdSetStore, StepOnError};
 use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
+use tdcore::import_export::{self, ConflictStrategy, ExportDocument, ImportReport};
 use tdcore::oplog;
 use tdcore::parser::parse_output;
 use tdcore::paths;
@@ -27,9 +28,9 @@ use tdcore::transfer::{
     TransferVia,
 };
 use tdcore::util::now_ms;
-use wait_timeout::ChildExt;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
+use wait_timeout::ChildExt;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
@@ -103,6 +104,10 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+    /// Export profiles, command sets, configs, and secrets metadata as JSON
+    Export(ExportArgs),
+    /// Import profiles, command sets, configs, and secrets metadata from JSON
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -324,6 +329,31 @@ struct ConfigApplyArgs {
     via: String,
 }
 
+#[derive(Debug, Args)]
+struct ExportArgs {
+    /// Include decrypted secret values in the export
+    #[arg(long)]
+    include_secrets: bool,
+    /// Write output to a file instead of stdout
+    #[arg(long, short = 'o')]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    /// Conflict strategy for name collisions (reject or rename)
+    #[arg(long, default_value = "reject")]
+    conflict: ConflictArg,
+    /// Path to an export JSON file (reads stdin if omitted)
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConflictArg {
+    Reject,
+    Rename,
+}
+
 fn main() -> Result<()> {
     let _guard = init_logging()?;
     let cli = Cli::parse();
@@ -348,12 +378,77 @@ fn main() -> Result<()> {
         Some(Commands::Pull(args)) => handle_pull(args),
         Some(Commands::Xfer(args)) => handle_xfer(args),
         Some(Commands::Secret { command }) => handle_secret(command),
+        Some(Commands::Export(args)) => handle_export(args),
+        Some(Commands::Import(args)) => handle_import(args),
         None => {
             Cli::command().print_help()?;
             println!();
             Ok(())
         }
     }
+}
+
+fn handle_export(args: ExportArgs) -> Result<()> {
+    let master = if args.include_secrets {
+        let store = SecretStore::new(db::init_connection()?);
+        Some(load_master_prompt(&store)?)
+    } else {
+        None
+    };
+    let conn = db::init_connection()?;
+    let json = import_export::export_to_json(&conn, args.include_secrets, master.as_ref())?;
+    if let Some(path) = args.output {
+        std::fs::write(&path, json)?;
+        info!("export written to {}", path.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
+fn handle_import(args: ImportArgs) -> Result<()> {
+    let json = read_import_payload(args.path.as_deref())?;
+    let document: ExportDocument = serde_json::from_str(&json)?;
+    let needs_master = document.secrets.iter().any(|secret| secret.value.is_some());
+    let master = if needs_master {
+        let store = SecretStore::new(db::init_connection()?);
+        Some(load_master_prompt(&store)?)
+    } else {
+        None
+    };
+    let mut conn = db::init_connection()?;
+    let report = import_export::import_document(
+        &mut conn,
+        document,
+        match args.conflict {
+            ConflictArg::Reject => ConflictStrategy::Reject,
+            ConflictArg::Rename => ConflictStrategy::Rename,
+        },
+        master.as_ref(),
+    )?;
+    print_import_report(&report);
+    Ok(())
+}
+
+fn read_import_payload(path: Option<&Path>) -> Result<String> {
+    if let Some(path) = path {
+        return Ok(std::fs::read_to_string(path)?);
+    }
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    Ok(input)
+}
+
+fn print_import_report(report: &ImportReport) {
+    println!(
+        "imported: profiles={}, cmdsets={}, parsers={}, configs={}, secrets={}, secrets_skipped={}",
+        report.profiles,
+        report.cmdsets,
+        report.parsers,
+        report.configs,
+        report.secrets,
+        report.secrets_skipped
+    );
 }
 
 fn handle_profile(cmd: ProfileCommands) -> Result<()> {
@@ -594,10 +689,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         &profile_store,
     )?;
 
-    let needs_home = config
-        .files
-        .iter()
-        .any(|file| file.dest.starts_with("~/"));
+    let needs_home = config.files.iter().any(|file| file.dest.starts_with("~/"));
     let remote_home = if needs_home {
         Some(fetch_remote_home(&ssh, &profile)?)
     } else {
@@ -618,7 +710,12 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         } else {
             None
         };
-        let (should_apply, reason) = should_apply_config(file.when, status.exists, status.sha256.as_deref(), local_hash.as_deref());
+        let (should_apply, reason) = should_apply_config(
+            file.when,
+            status.exists,
+            status.sha256.as_deref(),
+            local_hash.as_deref(),
+        );
 
         if args.plan {
             if should_apply {
@@ -629,22 +726,14 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
                 );
                 applied += 1;
             } else {
-                println!(
-                    "PLAN skip: {} -> {} ({reason})",
-                    local_path.display(),
-                    dest
-                );
+                println!("PLAN skip: {} -> {} ({reason})", local_path.display(), dest);
                 skipped += 1;
             }
             continue;
         }
 
         if !should_apply {
-            println!(
-                "skip: {} -> {} ({reason})",
-                local_path.display(),
-                dest
-            );
+            println!("skip: {} -> {} ({reason})", local_path.display(), dest);
             skipped += 1;
             continue;
         }
@@ -654,11 +743,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
             run_remote_command(
                 &ssh,
                 &profile,
-                &format!(
-                    "cp {} {}",
-                    shell_quote(&dest),
-                    shell_quote(&backup_path)
-                ),
+                &format!("cp {} {}", shell_quote(&dest), shell_quote(&backup_path)),
             )?;
         }
 
@@ -680,11 +765,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         run_remote_command(
             &ssh,
             &profile,
-            &format!(
-                "mv {} {}",
-                shell_quote(&temp_path),
-                shell_quote(&dest)
-            ),
+            &format!("mv {} {}", shell_quote(&temp_path), shell_quote(&dest)),
         )?;
         if let Some(mode) = &file.mode {
             run_remote_command(
@@ -932,11 +1013,7 @@ fn handle_exec(
         return Ok(());
     }
 
-    let ssh = resolve_client_for(
-        ClientKind::Ssh,
-        profile.client_overrides.as_ref(),
-        &store,
-    )?;
+    let ssh = resolve_client_for(ClientKind::Ssh, profile.client_overrides.as_ref(), &store)?;
     let mut command = Command::new(&ssh);
     command
         .arg("-p")
@@ -1145,17 +1222,8 @@ fn handle_doctor(json: bool) -> Result<()> {
     println!("Client discovery{note}:");
     for client in report.clients {
         match client.path {
-            Some(path) => println!(
-                "{:<8}: {} [{}]",
-                client.name,
-                path.display(),
-                client.source
-            ),
-            None => println!(
-                "{:<8}: MISSING [{}]",
-                client.name,
-                client.source
-            ),
+            Some(path) => println!("{:<8}: {} [{}]", client.name, path.display(), client.source),
+            None => println!("{:<8}: MISSING [{}]", client.name, client.source),
         }
     }
     Ok(())
@@ -1250,9 +1318,7 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
 
     let via = TransferVia::from_str(&args.via)?;
     let temp_dir = TransferTempDir::new("xfer")?;
-    let temp_file = temp_dir
-        .path()
-        .join(filename_from_remote(&args.src_path));
+    let temp_file = temp_dir.path().join(filename_from_remote(&args.src_path));
 
     let started = Instant::now();
     let pull = execute_transfer(
@@ -1611,11 +1677,7 @@ fn execute_transfer(
     remote_path: &str,
     via: TransferVia,
 ) -> Result<TransferOutcome> {
-    let client = resolve_client_for(
-        via.client_kind(),
-        profile.client_overrides.as_ref(),
-        store,
-    )?;
+    let client = resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), store)?;
     let mut cmd = Command::new(&client);
     let _batch_guard: Option<TransferTempDir>;
     let args = match via {
@@ -1873,15 +1935,7 @@ mod tests {
     #[test]
     fn parses_config_apply() {
         let cli = Cli::try_parse_from([
-            "td",
-            "config",
-            "apply",
-            "p1",
-            "cfg_main",
-            "--plan",
-            "--backup",
-            "--via",
-            "sftp",
+            "td", "config", "apply", "p1", "cfg_main", "--plan", "--backup", "--via", "sftp",
         ])
         .expect("parses config apply");
 
@@ -1932,8 +1986,7 @@ mod tests {
 
     #[test]
     fn parses_run_command() {
-        let cli = Cli::try_parse_from(["td", "run", "p1", "c_main", "--json"])
-            .expect("parses run");
+        let cli = Cli::try_parse_from(["td", "run", "p1", "c_main", "--json"]).expect("parses run");
 
         match cli.command {
             Some(Commands::Run {
@@ -1946,6 +1999,35 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_export_command() {
+        let cli =
+            Cli::try_parse_from(["td", "export", "--include-secrets", "--output", "out.json"])
+                .expect("parses export");
+
+        match cli.command {
+            Some(Commands::Export(args)) => {
+                assert!(args.include_secrets);
+                assert_eq!(args.output.as_deref(), Some(Path::new("out.json")));
+            }
+            _ => panic!("expected export command"),
+        }
+    }
+
+    #[test]
+    fn parses_import_command() {
+        let cli = Cli::try_parse_from(["td", "import", "--conflict", "rename", "in.json"])
+            .expect("parses import");
+
+        match cli.command {
+            Some(Commands::Import(args)) => {
+                assert!(matches!(args.conflict, ConflictArg::Rename));
+                assert_eq!(args.path.as_deref(), Some(Path::new("in.json")));
+            }
+            _ => panic!("expected import command"),
         }
     }
 }

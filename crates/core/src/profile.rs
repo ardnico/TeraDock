@@ -17,7 +17,7 @@ pub enum ProfileType {
 }
 
 impl ProfileType {
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "ssh" => Ok(Self::Ssh),
             "telnet" => Ok(Self::Telnet),
@@ -62,7 +62,7 @@ impl fmt::Display for DangerLevel {
 }
 
 impl DangerLevel {
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "normal" => Ok(DangerLevel::Normal),
             "high" => Ok(DangerLevel::High),
@@ -240,11 +240,10 @@ impl ProfileStore {
         }
         if !filters.tags.is_empty() {
             profiles.retain(|p| {
-                filters.tags.iter().all(|tag| {
-                    p.tags
-                        .iter()
-                        .any(|t| t.eq_ignore_ascii_case(tag.as_str()))
-                })
+                filters
+                    .tags
+                    .iter()
+                    .all(|tag| p.tags.iter().any(|t| t.eq_ignore_ascii_case(tag.as_str())))
             });
         }
         if let Some(query) = &filters.query {
