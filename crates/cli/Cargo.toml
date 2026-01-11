@@ -12,7 +12,9 @@ tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 tdcore = { path = "../core" }
+directories = { workspace = true }
 rpassword = { workspace = true }
+rusqlite = { workspace = true }
 zeroize = { workspace = true }
 wait-timeout = { workspace = true }
 serialport = { workspace = true }
