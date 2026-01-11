@@ -12,7 +12,7 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - [x] (2026-01-06 23:50Z) Wired op_logs insertion, last-used tracking, and critical danger confirmation for exec.
 - [x] (2026-01-08 14:46Z) Fixed SSH invocation to avoid sending a stray `--` as the remote command and aligned client resolution with profile/global overrides.
 - [x] (2026-01-06 23:51Z) Run `cargo test` (blocked by crates.io access / read-only sandbox; retry when registry reachable).
-- [ ] (2026-01-06 23:51Z) Extend parsing/structured `parsed` field and timeout policy once broader CommandSet/run implementation lands.
+- [ ] (2026-01-06 23:51Z) Extend parsing/structured `parsed` field and timeout policy once broader CommandSet/run implementation lands (completed: basic JSON stdout parsing; remaining: CommandSet/parser-backed `parsed` and timeout policy integration).
 - [x] (2026-01-11 03:39Z) Added basic JSON stdout parsing for `td exec --json`, populating `parsed` when stdout is valid JSON.
 - [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 
