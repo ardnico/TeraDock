@@ -465,13 +465,15 @@ fn handle_exec(
     oplog::log_operation(store.conn(), entry)?;
 
     if json_output {
+        let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .unwrap_or_else(|_| serde_json::json!({}));
         let json = serde_json::json!({
             "ok": ok,
             "exit_code": exit_code,
             "stdout": String::from_utf8_lossy(&output.stdout),
             "stderr": String::from_utf8_lossy(&output.stderr),
             "duration_ms": duration_ms,
-            "parsed": serde_json::json!({}),
+            "parsed": parsed,
         });
         println!("{}", serde_json::to_string_pretty(&json)?);
     } else {

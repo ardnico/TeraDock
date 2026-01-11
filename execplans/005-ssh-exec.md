@@ -13,6 +13,7 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - [x] (2026-01-08 14:46Z) Fixed SSH invocation to avoid sending a stray `--` as the remote command and aligned client resolution with profile/global overrides.
 - [x] (2026-01-06 23:51Z) Run `cargo test` (blocked by crates.io access / read-only sandbox; retry when registry reachable).
 - [ ] (2026-01-06 23:51Z) Extend parsing/structured `parsed` field and timeout policy once broader CommandSet/run implementation lands.
+- [x] (2026-01-11 03:39Z) Added basic JSON stdout parsing for `td exec --json`, populating `parsed` when stdout is valid JSON.
 - [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 
 ## Surprises & Discoveries
@@ -30,6 +31,9 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - Decision: Keep SSH exec invocation free of an extra `--` delimiter and honor profile/global client overrides before falling back to PATH.
   Rationale: Prevents an unintended `--` remote command and matches the client resolution order defined in PROJECT_PLAN.md.
   Date/Author: 2026-01-08 / assistant
+- Decision: Populate `parsed` with stdout JSON when available for `td exec --json`, leaving it empty otherwise.
+  Rationale: Provides immediate structured output for JSON-producing commands without waiting on full CommandSet/parser plumbing.
+  Date/Author: 2026-01-11 / assistant
 
 ## Outcomes & Retrospective
 
