@@ -14,10 +14,12 @@ Users need a reliable way to export their profiles, command sets, configs, and r
 - [x] (2025-09-27 00:55Z) Added new core import/export module with schema types and JSON serialization for profiles/cmdsets/configs, including default secret references and optional raw secrets when `--include-secrets` is set.
 - [x] (2025-09-27 01:10Z) Wired `td export` and `td import` CLI commands in `crates/cli/src/main.rs` to call the new module, parse flags, and implement conflict strategy (reject or rename) on import.
 - [ ] (2025-09-27 01:15Z) Validate end-to-end: export JSON, wipe DB, re-import, verify preserved IDs and conflict behavior; document commands and results here.
+- [ ] (2026-01-11 17:09Z) Attempted validation, but could not run `td` because `cargo build -p td` fails with crates.io CONNECT 403 in this environment.
 
 ## Surprises & Discoveries
 
-- Observation: None yet.
+- Observation: Validation requires the `td` binary, but the build is blocked by crates.io CONNECT 403, preventing end-to-end testing here.
+  Evidence: `cargo build -p td` fails downloading config.json from crates.io.
 
 ## Decision Log
 
@@ -27,7 +29,7 @@ Users need a reliable way to export their profiles, command sets, configs, and r
 
 ## Outcomes & Retrospective
 
-- Pending.
+- Import/export functionality is implemented, but end-to-end validation is blocked in this environment due to build failures when fetching crates.io dependencies.
 
 ## Context and Orientation
 
@@ -113,3 +115,4 @@ Note: exact types and paths must be confirmed during discovery and recorded here
 
 
 Change Log: 2025-09-27 - Initial ExecPlan created for import/export CLI feature.
+Update 2026-01-11 17:09Z: Recorded validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.

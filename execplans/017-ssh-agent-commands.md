@@ -13,11 +13,14 @@ Users need to see and manage their SSH agent state directly from TeraDock, inclu
 - [x] (2025-02-15 01:35Z) Wired `td agent status/list/add/clear` CLI commands with confirmation prompts and output formatting.
 - [x] (2025-02-15 01:40Z) Registered SSH agent config key in settings registry so resolved config commands recognize it.
 - [ ] (2025-02-15 01:45Z) Validate behavior with manual CLI invocations and update progress logs.
+- [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 
 ## Surprises & Discoveries
 
 - Observation: None yet.
   Evidence: No unexpected behavior encountered during implementation.
+- Observation: Validation is blocked because the `td` binary cannot be built in this environment.
+  Evidence: `cargo build -p td` fails downloading config.json from crates.io.
 
 ## Decision Log
 
@@ -27,7 +30,7 @@ Users need to see and manage their SSH agent state directly from TeraDock, inclu
 
 ## Outcomes & Retrospective
 
-- Pending validation; implementation complete but manual CLI checks still required.
+- Pending validation; implementation complete but manual CLI checks still required. Validation is blocked here because the CLI cannot be built due to crates.io CONNECT 403.
 
 ## Context and Orientation
 
@@ -105,3 +108,4 @@ In `crates/core/src/agent.rs`, define:
 These helpers should invoke the `ssh-add` binary in `PATH`.
 
 Plan update note: marked implementation steps complete, added decision log, and noted pending manual validation.
+Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.

@@ -13,13 +13,19 @@ Users need a way to persist SSH forward definitions, start long-running SSH tunn
 - [x] (2026-01-11 15:53Z) Reviewed repository structure, database schema, and CLI command layout for adding tunnel/forward/session support.
 - [x] (2026-01-11 16:01Z) Implemented SSH forward storage, validation, and normalization rules in core.
 - [x] (2026-01-11 16:01Z) Added session tracking schema and core store, plus CLI tunnel start/stop/status wiring.
+- [x] (2026-01-11 16:55Z) Restored CLI dispatch for `td tunnel` commands and added process termination handling for tunnel stop.
 - [ ] (2026-01-11 16:01Z) Validate tunnel lifecycle manually and record any observed output in this plan.
+- [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 - [x] (2026-01-11 16:01Z) Updated the ExecPlan with implementation outcomes and decisions.
 
 ## Surprises & Discoveries
 
 - Observation: Existing database migrations already go up to schema v3 and include the `ssh_forwards` table but no session table.
   Evidence: `crates/core/src/db.rs` defines migrations through `PRAGMA user_version = 3`.
+- Observation: Tunnel CLI dispatch paths were missing, so `td tunnel start/status/stop` did not execute.
+  Evidence: No `Commands::Tunnel` branch in the CLI match prior to wiring.
+- Observation: Validation is blocked because the `td` binary cannot be built in this environment.
+  Evidence: `cargo build -p td` fails downloading config.json from crates.io.
 
 ## Decision Log
 
@@ -32,9 +38,9 @@ Users need a way to persist SSH forward definitions, start long-running SSH tunn
 
 ## Outcomes & Retrospective
 
-- Implemented forward storage/validation, session tracking, and tunnel CLI commands. The system now records tunnel sessions with PID and forwards, and `tunnel status` prunes dead sessions before listing.
+- Implemented forward storage/validation, session tracking, and tunnel CLI commands. The system now records tunnel sessions with PID and forwards, and `tunnel status` prunes dead sessions before listing. CLI dispatch has been restored so tunnel commands execute and stop sessions via PID termination.
 
-Remaining: manual validation run and transcript capture, plus any adjustments discovered during live SSH tunnel checks.
+Remaining: manual validation run and transcript capture, plus any adjustments discovered during live SSH tunnel checks. Validation is blocked here because the CLI cannot be built due to crates.io CONNECT 403.
 
 ## Context and Orientation
 
@@ -98,3 +104,4 @@ The CLI should use `SessionStore` and `ForwardStore` and rely on existing SSH cl
 
 Change note: Initial ExecPlan created from repo research and project plan requirements.
 Change note: Updated progress, decisions, and outcomes after implementing tunnel/forward/session support.
+Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
