@@ -394,28 +394,36 @@ impl AppState {
     }
 
     pub fn request_run(&mut self) -> Result<()> {
-        let Some(profile) = self.selected_profile() else {
-            self.status_message = Some("No profile selected.".to_string());
-            return Ok(());
+        let (profile_id, cmdset_id, danger_level, profile_label) = {
+            let Some(profile) = self.selected_profile() else {
+                self.status_message = Some("No profile selected.".to_string());
+                return Ok(());
+            };
+            let Some(cmdset) = self.selected_cmdset() else {
+                self.status_message = Some("No CommandSet selected.".to_string());
+                return Ok(());
+            };
+            (
+                profile.profile_id.clone(),
+                cmdset.cmdset_id.clone(),
+                profile.danger_level,
+                format!("{}@{}:{}", profile.user, profile.host, profile.port),
+            )
         };
-        let Some(cmdset) = self.selected_cmdset() else {
-            self.status_message = Some("No CommandSet selected.".to_string());
-            return Ok(());
-        };
-        if profile.danger_level == DangerLevel::Critical {
+        if danger_level == DangerLevel::Critical {
             self.confirm = Some(ConfirmState {
                 message: format!(
-                    "Profile '{}' is critical. Run CommandSet '{}' on {}@{}:{} ?",
-                    profile.profile_id, cmdset.cmdset_id, profile.user, profile.host, profile.port
+                    "Profile '{}' is critical. Run CommandSet '{}' on {} ?",
+                    profile_id, cmdset_id, profile_label
                 ),
                 action: PendingAction::RunCmdSet {
-                    profile_id: profile.profile_id.clone(),
-                    cmdset_id: cmdset.cmdset_id.clone(),
+                    profile_id,
+                    cmdset_id,
                 },
             });
             return Ok(());
         }
-        self.execute_cmdset_run(&profile.profile_id, &cmdset.cmdset_id)
+        self.execute_cmdset_run(&profile_id, &cmdset_id)
     }
 
     fn execute_cmdset_run(&mut self, profile_id: &str, cmdset_id: &str) -> Result<()> {
