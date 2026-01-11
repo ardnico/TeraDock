@@ -102,3 +102,27 @@ fn parse_regex_output(pattern: &str, stdout: &str) -> Result<serde_json::Value> 
     }
     Ok(serde_json::Value::Array(matches))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_json_output() {
+        let parsed = parse_output(&ParserSpec::Json, r#"{"ok":true}"#, None).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "ok": true }));
+    }
+
+    #[test]
+    fn parses_regex_output() {
+        let parser = ParserDefinition {
+            parser_id: "r_status".into(),
+            parser_type: ParserType::Regex,
+            definition: r"status=(?P<code>\d+)".into(),
+        };
+        let parsed =
+            parse_output(&ParserSpec::Regex("r_status".into()), "status=200", Some(&parser))
+                .unwrap();
+        assert_eq!(parsed, serde_json::json!([{"code":"200"}]));
+    }
+}

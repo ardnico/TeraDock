@@ -9,6 +9,7 @@ Users can execute a stored CommandSet against an SSH profile using `td run <prof
 ## Progress
 
 - [x] (2026-01-11 05:58Z) Drafted and implemented CommandSet storage types, parser handling, and CLI `td run` execution path.
+- [x] (2026-01-11 06:51Z) Added unit tests for CommandSet loading and parser behavior.
 - [ ] (2026-01-11 05:58Z) Run `cargo test` (blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
 - [ ] (2026-01-11 06:00Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download data-encoding), so workspace validation remains blocked.
 
@@ -69,3 +70,4 @@ Reading CommandSets is read-only; repeated runs are safe and only update `last_u
   - `regex` added to `crates/core`.
 
 Update 2026-01-11 06:00Z: Retried `cargo test` and recorded the ongoing crates.io CONNECT 403 failure in Progress and Surprises.
+Update 2026-01-11 06:51Z: Added CommandSet/parser unit tests to the plan Progress.

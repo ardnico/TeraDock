@@ -127,3 +127,58 @@ fn deserialize_cmdstep(row: &Row<'_>) -> Result<CmdStep> {
         parser_spec: ParserSpec::parse(&parser_spec)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_in_memory;
+
+    #[test]
+    fn loads_cmdset_steps_and_parser() {
+        let conn = init_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO cmdsets (cmdset_id, name, vars_json) VALUES (?1, ?2, ?3)",
+            ["c_main", "Main", "{\"env\":\"prod\"}"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parsers (parser_id, type, definition) VALUES (?1, ?2, ?3)",
+            ["r_status", "regex", "(?P<code>\\d+)"],
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO cmdsteps (id, cmdset_id, ord, cmd, timeout_ms, on_error, parser_spec)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            [
+                "1",
+                "c_main",
+                "1",
+                "echo 200",
+                "5000",
+                "stop",
+                "regex:r_status",
+            ],
+        )
+        .unwrap();
+
+        let store = CmdSetStore::new(conn);
+        let cmdset = store.get("c_main").unwrap().expect("cmdset");
+        assert_eq!(cmdset.name, "Main");
+        assert_eq!(
+            cmdset.vars,
+            Some(serde_json::json!({ "env": "prod" }))
+        );
+
+        let steps = store.list_steps("c_main").unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].cmd, "echo 200");
+        assert_eq!(steps[0].timeout_ms, Some(5000));
+        assert_eq!(steps[0].on_error, StepOnError::Stop);
+
+        let parser = store.get_parser("r_status").unwrap().expect("parser");
+        assert_eq!(parser.parser_id, "r_status");
+        assert_eq!(parser.parser_type, ParserType::Regex);
+    }
+}
