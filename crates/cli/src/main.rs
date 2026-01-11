@@ -594,6 +594,10 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
 
     let duration_ms = run_started.elapsed().as_millis() as i64;
     profile_store.touch_last_used(&profile.profile_id)?;
+    let meta_json = serde_json::json!({
+        "cmdset_id": cmdset_id,
+        "steps_executed": step_results.len(),
+    });
     let entry = oplog::OpLogEntry {
         op: "run".into(),
         profile_id: Some(profile.profile_id.clone()),
@@ -601,7 +605,7 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         ok: overall_ok,
         exit_code: Some(last_exit_code),
         duration_ms: Some(duration_ms),
-        meta_json: None,
+        meta_json: Some(meta_json),
     };
     oplog::log_operation(profile_store.conn(), entry)?;
 
