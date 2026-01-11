@@ -6,6 +6,7 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -38,6 +39,8 @@ use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use wait_timeout::ChildExt;
 use zeroize::Zeroizing;
+
+const INITIAL_SEND_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "TeraDock CLI", long_about = None)]
@@ -98,6 +101,9 @@ enum Commands {
     Connect {
         /// Profile ID to connect to
         profile_id: String,
+        /// One-time string to send right after connect (overrides profile)
+        #[arg(long)]
+        initial_send: Option<String>,
     },
     /// Test connectivity to a profile
     Test {
@@ -165,6 +171,8 @@ struct ProfileAddArgs {
     #[arg(long)]
     note: Option<String>,
     #[arg(long)]
+    initial_send: Option<String>,
+    #[arg(long)]
     client_overrides_json: Option<String>,
 }
 
@@ -194,6 +202,10 @@ struct ProfileEditArgs {
     note: Option<String>,
     #[arg(long)]
     clear_note: bool,
+    #[arg(long)]
+    initial_send: Option<String>,
+    #[arg(long)]
+    clear_initial_send: bool,
     #[arg(long)]
     client_overrides_json: Option<String>,
     #[arg(long)]
@@ -420,7 +432,10 @@ fn main() -> Result<()> {
             cmdset_id,
             json,
         }) => handle_run(profile_id, cmdset_id, json),
-        Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
+        Some(Commands::Connect {
+            profile_id,
+            initial_send,
+        }) => handle_connect(profile_id, initial_send),
         Some(Commands::Test {
             profile_id,
             json,
@@ -521,6 +536,7 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
                 group: args.group,
                 tags: args.tag,
                 note: args.note,
+                initial_send: args.initial_send,
                 client_overrides: overrides,
             })?;
             info!("profile created: {}", created.profile_id);
@@ -551,6 +567,11 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
             } else {
                 args.note.map(Some)
             };
+            let initial_send = if args.clear_initial_send {
+                Some(None)
+            } else {
+                args.initial_send.map(Some)
+            };
             let updated = store.update(
                 &args.profile_id,
                 UpdateProfile {
@@ -563,6 +584,7 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
                     group,
                     tags: args.tags,
                     note,
+                    initial_send,
                     client_overrides: overrides,
                 },
             )?;
@@ -1498,7 +1520,7 @@ fn handle_doctor(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_connect(profile_id: String) -> Result<()> {
+fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()> {
     let store = ProfileStore::new(db::init_connection()?);
     let profile = store
         .get(&profile_id)?
@@ -1507,6 +1529,7 @@ fn handle_connect(profile_id: String) -> Result<()> {
         println!("Aborted by user.");
         return Ok(());
     }
+    let initial_send = initial_send.or_else(|| profile.initial_send.clone());
 
     let overrides = profile.client_overrides.clone();
     match profile.profile_type {
@@ -1518,9 +1541,9 @@ fn handle_connect(profile_id: String) -> Result<()> {
         }
         ProfileType::Telnet => {
             let telnet = resolve_client_for(ClientKind::Telnet, overrides.as_ref(), &store)?;
-            connect_telnet(&store, profile, telnet)
+            connect_telnet(&store, profile, telnet, initial_send)
         }
-        ProfileType::Serial => connect_serial(&store, profile),
+        ProfileType::Serial => connect_serial(&store, profile, initial_send),
     }
 }
 
@@ -1780,11 +1803,23 @@ fn connect_ssh(
     }
 }
 
-fn connect_telnet(store: &ProfileStore, profile: Profile, telnet: PathBuf) -> Result<()> {
+fn connect_telnet(
+    store: &ProfileStore,
+    profile: Profile,
+    telnet: PathBuf,
+    initial_send: Option<String>,
+) -> Result<()> {
     let mut cmd = Command::new(&telnet);
     cmd.arg(&profile.host).arg(profile.port.to_string());
+    if let Some(initial_send) = initial_send {
+        spawn_tty_initial_send(initial_send);
+    }
     let started = Instant::now();
-    let status = cmd.status().context("failed to launch telnet")?;
+    let status = cmd
+        .spawn()
+        .context("failed to launch telnet")?
+        .wait()
+        .context("failed to wait for telnet")?;
     let duration_ms = started.elapsed().as_millis() as i64;
     let ok = status.success();
     let exit_code = status.code().unwrap_or_default();
@@ -1821,7 +1856,11 @@ impl Drop for RawModeGuard {
     }
 }
 
-fn connect_serial(store: &ProfileStore, profile: Profile) -> Result<()> {
+fn connect_serial(
+    store: &ProfileStore,
+    profile: Profile,
+    initial_send: Option<String>,
+) -> Result<()> {
     let port_name = profile.host.clone();
     let baud_rate = profile.port as u32;
     let mut port = serialport::new(&port_name, baud_rate)
@@ -1829,7 +1868,7 @@ fn connect_serial(store: &ProfileStore, profile: Profile) -> Result<()> {
         .open()
         .with_context(|| format!("failed to open serial port {port_name} at {baud_rate}"))?;
     let started = Instant::now();
-    let result = run_serial_session(&mut port);
+    let result = run_serial_session(&mut port, initial_send);
     let duration_ms = started.elapsed().as_millis() as i64;
     store.touch_last_used(&profile.profile_id)?;
     let entry = oplog::OpLogEntry {
@@ -1845,8 +1884,14 @@ fn connect_serial(store: &ProfileStore, profile: Profile) -> Result<()> {
     result
 }
 
-fn run_serial_session(port: &mut Box<dyn serialport::SerialPort>) -> Result<()> {
+fn run_serial_session(
+    port: &mut Box<dyn serialport::SerialPort>,
+    initial_send: Option<String>,
+) -> Result<()> {
     let _raw = RawModeGuard::enter()?;
+    if let Some(initial_send) = initial_send {
+        spawn_serial_initial_send(port, initial_send);
+    }
     let running = Arc::new(AtomicBool::new(true));
     let mut port_reader = port.try_clone().context("failed to clone serial port")?;
     let running_reader = Arc::clone(&running);
@@ -1888,6 +1933,47 @@ fn run_serial_session(port: &mut Box<dyn serialport::SerialPort>) -> Result<()> 
     running.store(false, Ordering::Relaxed);
     let _ = reader.join();
     result
+}
+
+fn spawn_tty_initial_send(initial_send: String) {
+    thread::spawn(move || {
+        thread::sleep(INITIAL_SEND_DELAY);
+        match OpenOptions::new().write(true).open("/dev/tty") {
+            Ok(mut tty) => {
+                if let Err(err) = tty
+                    .write_all(initial_send.as_bytes())
+                    .and_then(|_| tty.flush())
+                {
+                    warn!(?err, "failed to write initial send to tty");
+                }
+            }
+            Err(err) => {
+                warn!(?err, "failed to open tty for initial send");
+            }
+        }
+    });
+}
+
+fn spawn_serial_initial_send(
+    port: &mut Box<dyn serialport::SerialPort>,
+    initial_send: String,
+) {
+    let mut port_writer = match port.try_clone() {
+        Ok(writer) => writer,
+        Err(err) => {
+            warn!(?err, "failed to clone serial port for initial send");
+            return;
+        }
+    };
+    thread::spawn(move || {
+        thread::sleep(INITIAL_SEND_DELAY);
+        if let Err(err) = port_writer
+            .write_all(initial_send.as_bytes())
+            .and_then(|_| port_writer.flush())
+        {
+            warn!(?err, "failed to write initial send to serial port");
+        }
+    });
 }
 
 fn handle_secret(cmd: SecretCommands) -> Result<()> {
