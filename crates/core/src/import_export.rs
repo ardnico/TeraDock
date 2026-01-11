@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::configset::ConfigFileWhen;
-use crate::crypto::{decrypt, encrypt, MasterKey};
+use crate::crypto::{decrypt, encrypt, random_bytes, MasterKey};
 use crate::error::{CoreError, Result};
 use crate::profile::{DangerLevel, Profile, ProfileType};
 
@@ -192,8 +192,7 @@ pub fn import_document(
         report.profiles += 1;
     }
 
-    let mut parsers = document.parsers;
-    for parser in &parsers {
+    for parser in &document.parsers {
         insert_parser(&tx, parser)?;
         report.parsers += 1;
     }
@@ -233,7 +232,7 @@ pub fn import_document(
     let mut secrets_skipped = 0usize;
     for secret in &document.secrets {
         match &secret.value {
-            Some(value) => {
+            Some(_value) => {
                 let master = master.ok_or_else(|| {
                     CoreError::Import("master key required to import secrets".into())
                 })?;
