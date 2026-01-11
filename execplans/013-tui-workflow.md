@@ -16,11 +16,12 @@ Deliver a full-screen terminal UI that lets a user browse profiles, choose an ac
 - [x] (2025-02-14 01:38Z) Built multi-pane UI (profiles list, action pane with preview, results pane with tabs).
 - [x] (2025-02-14 01:45Z) Wired input handling for navigation, confirmations, and executing runs.
 - [ ] Validate run flow with command preview masking and results view updates.
+- [ ] (2026-01-11 17:09Z) Attempted to run the TUI for validation, but `cargo build -p tui` failed (crates.io CONNECT 403), so the UI could not be launched.
 
 ## Surprises & Discoveries
 
-- Observation: (none yet)
-  Evidence: (none yet)
+- Observation: Validation is blocked because the TUI binary cannot be built in this environment.
+  Evidence: `cargo build -p tui` fails downloading config.json from crates.io.
 
 ## Decision Log
 
@@ -38,7 +39,7 @@ Deliver a full-screen terminal UI that lets a user browse profiles, choose an ac
 
 ## Outcomes & Retrospective
 
-- Outcome: (not complete yet)
+- Outcome: UI workflow is implemented, but validation is blocked because the TUI cannot be built in this environment (crates.io CONNECT 403).
 
 ## Context and Orientation
 
@@ -111,3 +112,4 @@ Example results tab header:
 - `tdcore::doctor::resolve_client_with_overrides` and `tdcore::settings::get_client_overrides` for SSH client resolution.
 
 Plan updated on 2025-02-14: recorded implementation progress and added the masking decision after completing core/TUI wiring.
+Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p tui`.

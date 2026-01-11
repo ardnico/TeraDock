@@ -72,19 +72,9 @@ pub fn run_profile_test(profile: &Profile, options: &TestOptions) -> TestReport 
     let (tcp_ok, tcp_detail, tcp_duration, connected_addr) = if dns_ok && !addresses.is_empty() {
         connect_tcp(&addresses, options.tcp_timeout)
     } else if dns_ok {
-        (
-            false,
-            Some("no addresses resolved".to_string()),
-            0,
-            None,
-        )
+        (false, Some("no addresses resolved".to_string()), 0, None)
     } else {
-        (
-            false,
-            Some("skipped (dns failed)".to_string()),
-            0,
-            None,
-        )
+        (false, Some("skipped (dns failed)".to_string()), 0, None)
     };
 
     checks.push(TestCheck {
@@ -108,21 +98,9 @@ pub fn run_profile_test(profile: &Profile, options: &TestOptions) -> TestReport 
         let (ssh_ok, ssh_detail, ssh_duration, exit_code, stderr) = if tcp_ok {
             run_ssh_batch(ssh)
         } else if dns_ok {
-            (
-                false,
-                "skipped (tcp failed)".to_string(),
-                0,
-                None,
-                None,
-            )
+            (false, "skipped (tcp failed)".to_string(), 0, None, None)
         } else {
-            (
-                false,
-                "skipped (dns failed)".to_string(),
-                0,
-                None,
-                None,
-            )
+            (false, "skipped (dns failed)".to_string(), 0, None, None)
         };
         checks.push(TestCheck {
             name: "ssh".into(),
@@ -161,12 +139,18 @@ fn resolve_dns(host: &str, port: u16) -> (bool, Vec<SocketAddr>, Option<String>,
         Ok(iter) => {
             let addresses: Vec<SocketAddr> = iter.collect();
             if addresses.is_empty() {
-                (false, addresses, Some("no addresses resolved".to_string()), duration_ms)
+                (
+                    false,
+                    addresses,
+                    Some("no addresses resolved".to_string()),
+                    duration_ms,
+                )
             } else {
+                let count = addresses.len();
                 (
                     true,
                     addresses,
-                    Some(format!("{} address(es) resolved", addresses.len())),
+                    Some(format!("{count} address(es) resolved")),
                     duration_ms,
                 )
             }
@@ -206,9 +190,7 @@ fn connect_tcp(
     )
 }
 
-fn run_ssh_batch(
-    ssh: &SshBatchCommand,
-) -> (bool, String, i64, Option<i32>, Option<String>) {
+fn run_ssh_batch(ssh: &SshBatchCommand) -> (bool, String, i64, Option<i32>, Option<String>) {
     let started = Instant::now();
     let timeout_secs = ssh.connect_timeout.as_secs().max(1);
     let mut command = Command::new(&ssh.path);
@@ -244,20 +226,20 @@ fn run_ssh_batch(
     let exit_code = output.status.code();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status.success() {
-        (true, "batch mode auth ok".to_string(), duration_ms, exit_code, None)
+        (
+            true,
+            "batch mode auth ok".to_string(),
+            duration_ms,
+            exit_code,
+            None,
+        )
     } else {
         let detail = if stderr.is_empty() {
             "ssh batch mode failed".to_string()
         } else {
             stderr.clone()
         };
-        (
-            false,
-            detail,
-            duration_ms,
-            exit_code,
-            Some(stderr),
-        )
+        (false, detail, duration_ms, exit_code, Some(stderr))
     }
 }
 

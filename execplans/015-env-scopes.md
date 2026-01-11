@@ -14,11 +14,13 @@ Users need to define environment presets (like work/home) and switch between the
 - [x] (2025-02-16 01:35Z) Add env-aware scopes and current env helpers in `crates/core/src/settings.rs`, plus new helpers for listing envs and scoped settings.
 - [x] (2025-02-16 01:50Z) Extend CLI with `td env list/use/show/set`, update config scope parsing to accept env scopes, and wire resolved lookups to include the current env.
 - [ ] (2025-02-16 02:00Z) Validate behavior by demonstrating that switching env changes the resolved config for a profile.
+- [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so CLI verification could not be run.
 - [x] (2025-02-16 01:55Z) Update this ExecPlan with outcomes, surprises, and decisions.
 
 ## Surprises & Discoveries
 
 - None.
+- Validation is blocked because the `td` binary cannot be built in this environment (crates.io CONNECT 403).
 
 ## Decision Log
 
@@ -28,7 +30,7 @@ Users need to define environment presets (like work/home) and switch between the
 
 ## Outcomes & Retrospective
 
-Implemented env scopes, current env tracking, and env-aware resolution in settings, plus CLI support for managing env presets. Manual validation is still outstanding. The change aligns with the documented precedence model and is ready for follow-up verification in a real profile environment.
+Implemented env scopes, current env tracking, and env-aware resolution in settings, plus CLI support for managing env presets. Manual validation is still outstanding because the CLI cannot be built in this environment (crates.io CONNECT 403). The change aligns with the documented precedence model and is ready for follow-up verification in a real profile environment.
 
 ## Context and Orientation
 
@@ -92,3 +94,4 @@ Add/extend the following in `crates/core/src/settings.rs`:
 The CLI should introduce a new `Commands::Env` variant with `EnvCommands::{List, Use, Show, Set}` and invoke these helpers.
 
 Plan updates: Marked completed implementation steps and added an outcomes note to reflect the current state; left validation unchecked because it has not been run in this environment.
+Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
