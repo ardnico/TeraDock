@@ -19,6 +19,12 @@ pub enum CoreError {
     Crypto(String),
     #[error("invalid id: {0:?}")]
     InvalidId(IdError),
+    #[error("invalid command spec: {0}")]
+    InvalidCommandSpec(String),
+    #[error("parser not found: {0}")]
+    ParserNotFound(String),
+    #[error("regex error: {0}")]
+    Regex(String),
     #[error("unknown profile: {0}")]
     NotFound(String),
     #[error("master password not set")]

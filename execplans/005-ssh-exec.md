@@ -12,7 +12,7 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - [x] (2026-01-06 23:50Z) Wired op_logs insertion, last-used tracking, and critical danger confirmation for exec.
 - [x] (2026-01-08 14:46Z) Fixed SSH invocation to avoid sending a stray `--` as the remote command and aligned client resolution with profile/global overrides.
 - [x] (2026-01-06 23:51Z) Run `cargo test` (blocked by crates.io access / read-only sandbox; retry when registry reachable).
-- [ ] (2026-01-06 23:51Z) Extend parsing/structured `parsed` field and timeout policy once broader CommandSet/run implementation lands (completed: basic JSON stdout parsing; remaining: CommandSet/parser-backed `parsed` and timeout policy integration).
+- [x] (2026-01-11 16:17Z) Extend parsing/structured `parsed` field with parser specs for `td exec --json` now that CommandSet/parser support exists.
 - [x] (2026-01-11 03:39Z) Added basic JSON stdout parsing for `td exec --json`, populating `parsed` when stdout is valid JSON.
 - [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 
@@ -34,10 +34,13 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - Decision: Populate `parsed` with stdout JSON when available for `td exec --json`, leaving it empty otherwise.
   Rationale: Provides immediate structured output for JSON-producing commands without waiting on full CommandSet/parser plumbing.
   Date/Author: 2026-01-11 / assistant
+- Decision: Add optional parser specs (`raw/json/regex:<id>`) to `td exec --json`.
+  Rationale: Aligns exec parsing with CommandSet parser support and closes the remaining parsing integration item in this plan.
+  Date/Author: 2026-01-11 / assistant
 
 ## Outcomes & Retrospective
 
-`td exec` is now available for SSH profiles with JSON output and logging. Execution semantics can be tightened (e.g., parser support, richer metadata) when CommandSet/run are implemented.
+`td exec` is now available for SSH profiles with JSON output, logging, and parser-spec support. Execution semantics can be tightened further (e.g., richer metadata) if needed.
 
 ## Context and Orientation
 
@@ -59,6 +62,7 @@ Connect and doctor are already present. This plan adds the first non-interactive
 ## Validation and Acceptance
 
 - `td exec --json <ssh_profile> -- echo hi` outputs the expected JSON schema.
+- `td exec --json --parser regex:<id> <ssh_profile> -- <cmd>` applies the referenced parser definition.
 - Critical profiles prompt for confirmation before executing.
 - op_logs receives an `exec` entry with exit code/duration.
 - Tests pass when running `cargo test` at the workspace root.
@@ -73,8 +77,9 @@ Exec is stateless aside from logging and last_used updates; reruns are safe. On 
 
 ## Interfaces and Dependencies
 
-- CLI: `td exec <profile_id> [--timeout-ms N] [--json] -- <cmd...>`
+- CLI: `td exec <profile_id> [--timeout-ms N] [--json] [--parser <spec>] -- <cmd...>`
 - Core helpers reused: `doctor::resolve_client`, `profile::touch_last_used`, `oplog::log_operation`.
 - New dependency: `wait-timeout` for child process timeout handling.
 
 Update 2026-01-09 15:49Z: Recorded successful workspace tests now that registry access is available and updated progress/validation notes.
+Update 2026-01-11 16:17Z: Added parser-spec support for `td exec --json` and marked the parsing integration item complete.
