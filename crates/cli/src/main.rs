@@ -28,6 +28,7 @@ use tdcore::profile::{
 };
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::settings;
+use tdcore::tester::{self, SshBatchCommand, TestOptions};
 use tdcore::transfer::{
     build_scp_args, build_sftp_args, build_sftp_batch, TransferDirection, TransferTempDir,
     TransferVia,
@@ -97,6 +98,17 @@ enum Commands {
     Connect {
         /// Profile ID to connect to
         profile_id: String,
+    },
+    /// Test connectivity to a profile
+    Test {
+        /// Profile ID to test
+        profile_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include SSH BatchMode auth probe (SSH profiles only)
+        #[arg(long)]
+        ssh: bool,
     },
     /// Upload a local file to a profile over SCP/SFTP
     Push(TransferArgs),
@@ -409,6 +421,11 @@ fn main() -> Result<()> {
             json,
         }) => handle_run(profile_id, cmdset_id, json),
         Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
+        Some(Commands::Test {
+            profile_id,
+            json,
+            ssh,
+        }) => handle_test(profile_id, json, ssh),
         Some(Commands::Push(args)) => handle_push(args),
         Some(Commands::Pull(args)) => handle_pull(args),
         Some(Commands::Xfer(args)) => handle_xfer(args),
@@ -1507,6 +1524,90 @@ fn handle_connect(profile_id: String) -> Result<()> {
     }
 }
 
+fn handle_test(profile_id: String, json: bool, ssh: bool) -> Result<()> {
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
+    if !tester::is_network_profile(&profile) {
+        return Err(anyhow!(
+            "test only supports ssh/telnet profiles for now"
+        ));
+    }
+    if ssh && profile.profile_type != ProfileType::Ssh {
+        return Err(anyhow!("--ssh is only supported for SSH profiles"));
+    }
+
+    let mut options = TestOptions::default();
+    let mut client_used = None;
+    if ssh {
+        let ssh_path = resolve_client_for(
+            ClientKind::Ssh,
+            profile.client_overrides.as_ref(),
+            &store,
+        )?;
+        let auth = ssh_auth_context(store.conn())?;
+        emit_ssh_auth_messages(&auth);
+        client_used = Some(ssh_path.to_string_lossy().into_owned());
+        options = options.with_ssh(SshBatchCommand::new(
+            ssh_path,
+            profile.user.clone(),
+            profile.host.clone(),
+            profile.port,
+            auth.args,
+            Duration::from_secs(5),
+        ));
+    }
+
+    let report = tester::run_profile_test(&profile, &options);
+    store.touch_last_used(&profile.profile_id)?;
+    let meta_json = serde_json::to_value(&report)?;
+    let entry = oplog::OpLogEntry {
+        op: "test".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used,
+        ok: report.ok,
+        exit_code: report.ssh_exit_code(),
+        duration_ms: Some(report.duration_ms),
+        meta_json: Some(meta_json),
+    };
+    oplog::log_operation(store.conn(), entry)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Test results for {} ({}): {}:{}",
+        report.profile_id, report.profile_type, report.host, report.port
+    );
+    for check in &report.checks {
+        let status = if check.skipped {
+            "SKIPPED"
+        } else if check.ok {
+            "OK"
+        } else {
+            "FAIL"
+        };
+        let duration = check
+            .duration_ms
+            .map(|ms| format!("{ms}ms"))
+            .unwrap_or_else(|| "-".to_string());
+        let detail = check.detail.as_deref().unwrap_or("");
+        if detail.is_empty() {
+            println!("{:<8} {:<7} ({duration})", check.name, status);
+        } else {
+            println!("{:<8} {:<7} ({duration}) {}", check.name, status, detail);
+        }
+    }
+    if report.ok {
+        Ok(())
+    } else {
+        Err(anyhow!("test failed"))
+    }
+}
+
 fn handle_push(args: TransferArgs) -> Result<()> {
     let store = ProfileStore::new(db::init_connection()?);
     let profile = store
@@ -2272,6 +2373,25 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_test_command() {
+        let cli =
+            Cli::try_parse_from(["td", "test", "p1", "--json", "--ssh"]).expect("parses test");
+
+        match cli.command {
+            Some(Commands::Test {
+                profile_id,
+                json,
+                ssh,
+            }) => {
+                assert_eq!(profile_id, "p1");
+                assert!(json);
+                assert!(ssh);
+            }
+            _ => panic!("expected test command"),
         }
     }
 
