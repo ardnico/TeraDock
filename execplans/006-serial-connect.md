@@ -13,6 +13,7 @@ Enable PROJECT_PLAN.md Phase 15’s serial connect path so users can select a se
 - [ ] (2026-01-10 01:58Z) Run `cargo test` (blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
 - [ ] (2026-01-10 15:56Z) Retried `cargo test`; crates.io CONNECT 403 persists, so workspace validation remains blocked.
 - [ ] (2026-01-11 04:22Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download data-encoding), so workspace validation remains blocked.
+- [ ] (2026-01-11 16:55Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 
 ## Surprises & Discoveries
 
@@ -20,6 +21,7 @@ Enable PROJECT_PLAN.md Phase 15’s serial connect path so users can select a se
 - Serialport IO requires a short timeout to keep the read thread responsive so it can observe the shutdown flag.
 - Reattempted `cargo test` on 2026-01-10 still failed with CONNECT 403 while fetching the crates.io index.
 - Retried `cargo test` on 2026-01-11 and still hit CONNECT 403 while downloading the crates.io index (data-encoding).
+- Retried `cargo test` on 2026-01-11 and still hit CONNECT 403 while downloading config.json from crates.io.
 
 ## Decision Log
 

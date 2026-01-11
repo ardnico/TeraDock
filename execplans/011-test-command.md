@@ -12,12 +12,15 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
 - [x] (2026-01-12 12:34Z) Implemented core tester module for DNS/TCP/optional SSH BatchMode probes and structured report output.
 - [x] (2026-01-12 12:40Z) Wired CLI `td test` command with JSON/text output and op_logs logging.
 - [x] (2026-01-12 12:44Z) Updated CLI parsing tests for the new command and documented outcomes.
+- [x] (2026-01-11 16:55Z) Restored CLI handler wiring for `td test` and op_logs reporting after detecting a missing dispatch path.
 - [ ] (2026-01-12 12:50Z) Validate behavior against a reachable host (blocked: no known reachable host in this environment).
 
 ## Surprises & Discoveries
 
 - Observation: No obvious reachable SSH host is configured in this sandbox, so manual connectivity validation is blocked.
   Evidence: Not attempted; would require a known reachable profile in the local database.
+- Observation: The CLI dispatch for `td test` was missing despite the handler implementation, requiring a wiring fix.
+  Evidence: `main` did not route `Commands::Test` before the fix.
 
 ## Decision Log
 
@@ -30,7 +33,7 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
 
 ## Outcomes & Retrospective
 
-The `td test` implementation is complete with DNS/TCP probes, optional SSH BatchMode checking, JSON/text output, and op_logs recording. Manual connectivity validation is still pending due to the lack of a known reachable host in this environment.
+The `td test` implementation is complete with DNS/TCP probes, optional SSH BatchMode checking, JSON/text output, and op_logs recording. Manual connectivity validation is still pending due to the lack of a known reachable host in this environment, but the CLI dispatch is now correctly wired.
 
 ## Context and Orientation
 
