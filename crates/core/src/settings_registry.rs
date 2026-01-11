@@ -46,6 +46,7 @@ const SSH_AUTH_ALLOWED: [&str; 3] = ["agent", "keys", "password"];
 const ALLOW_INSECURE_EXAMPLES: [&str; 2] = ["true", "false"];
 const SSH_AUTH_EXAMPLES: [&str; 2] = ["agent,keys,password", "keys,password"];
 const CLIENT_OVERRIDE_EXAMPLES: [&str; 1] = [r#"{"ssh":"/usr/bin/ssh","scp":"/usr/bin/scp"}"#];
+const SSH_USE_AGENT_EXAMPLES: [&str; 2] = ["true", "false"];
 
 static SETTINGS: &[SettingDefinition] = &[
     SettingDefinition {
@@ -79,6 +80,22 @@ static SETTINGS: &[SettingDefinition] = &[
             ],
         },
         validator: validate_ssh_auth_order,
+    },
+    SettingDefinition {
+        schema: SettingSchema {
+            key: "ssh.use_agent",
+            description: "Enable SSH agent usage for authentication.",
+            value_type: SettingValueType::Boolean,
+            allowed_values: &SSH_USE_AGENT_EXAMPLES,
+            examples: &SSH_USE_AGENT_EXAMPLES,
+            dangerous: false,
+            scopes: &[
+                SettingScopeKind::Global,
+                SettingScopeKind::Env,
+                SettingScopeKind::Profile,
+            ],
+        },
+        validator: validate_bool,
     },
     SettingDefinition {
         schema: SettingSchema {

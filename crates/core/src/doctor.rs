@@ -4,6 +4,8 @@ use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use crate::agent::{self, AgentStatus};
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum ClientSource {
     ProfileOverride,
@@ -33,6 +35,7 @@ pub struct ClientStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub clients: Vec<ClientStatus>,
+    pub agent: AgentStatus,
     pub warnings: Vec<DoctorMessage>,
     pub errors: Vec<DoctorMessage>,
 }
@@ -123,11 +126,20 @@ pub fn check_clients_with_overrides(
     }
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
-    if !ssh_agent_available() {
+    let agent_status = agent::status();
+    if agent_status.auth_sock.is_none() {
         warnings.push(DoctorMessage {
             code: "ssh_agent_missing".to_string(),
             message: "SSH_AUTH_SOCK is not set; ssh-agent may be unavailable.".to_string(),
         });
+    }
+    if agent_status.auth_sock.is_some() {
+        if let Some(error) = &agent_status.error {
+            warnings.push(DoctorMessage {
+                code: "ssh_agent_list_failed".to_string(),
+                message: format!("ssh-agent keys could not be listed: {error}"),
+            });
+        }
     }
     let base_dirs = BaseDirs::new();
     let home = base_dirs.as_ref().map(|dirs| dirs.home_dir());
@@ -136,6 +148,7 @@ pub fn check_clients_with_overrides(
     }
     DoctorReport {
         clients,
+        agent: agent_status,
         warnings,
         errors,
     }
@@ -227,12 +240,6 @@ fn valid_override(path: &str) -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-fn ssh_agent_available() -> bool {
-    env::var_os("SSH_AUTH_SOCK")
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
 }
 
 fn ssh_config_paths(home: Option<&Path>) -> Vec<PathBuf> {
