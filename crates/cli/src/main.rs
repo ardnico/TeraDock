@@ -11,6 +11,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use tdcore::cmdset::{CmdSetStore, StepOnError};
+use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
 use tdcore::oplog;
@@ -25,6 +26,7 @@ use tdcore::transfer::{
     build_scp_args, build_sftp_args, build_sftp_batch, TransferDirection, TransferTempDir,
     TransferVia,
 };
+use tdcore::util::now_ms;
 use wait_timeout::ChildExt;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
@@ -43,6 +45,12 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         command: ProfileCommands,
+    },
+    /// Manage config sets
+    #[command(name = "configset")]
+    ConfigSet {
+        #[command(subcommand)]
+        command: ConfigSetCommands,
     },
     /// Manage global configuration (client overrides)
     Config {
@@ -250,6 +258,8 @@ enum ConfigCommands {
     ShowClient,
     /// Clear all global client overrides
     ClearClient,
+    /// Apply a config set to a profile
+    Apply(ConfigApplyArgs),
 }
 
 #[derive(Debug, Args, Default)]
@@ -271,11 +281,55 @@ struct ClientOverrideArgs {
     clear_all: bool,
 }
 
+#[derive(Debug, Subcommand)]
+enum ConfigSetCommands {
+    /// Add a config set
+    Add(ConfigSetAddArgs),
+    /// List config sets
+    List,
+    /// Show a config set in JSON
+    Show { config_id: String },
+    /// Remove a config set
+    Rm { config_id: String },
+}
+
+#[derive(Debug, Args)]
+struct ConfigSetAddArgs {
+    /// Explicit config ID (auto-generated if omitted)
+    #[arg(long)]
+    config_id: Option<String>,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    hooks_cmdset_id: Option<String>,
+    /// Config file spec: src=PATH,dest=PATH[,mode=MODE][,when=always|missing|changed]
+    #[arg(long, action = ArgAction::Append)]
+    file: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ConfigApplyArgs {
+    /// Profile ID to apply the config set to
+    profile_id: String,
+    /// Config set ID to apply
+    config_id: String,
+    /// Show planned changes without modifying files
+    #[arg(long)]
+    plan: bool,
+    /// Backup existing remote files before applying
+    #[arg(long)]
+    backup: bool,
+    /// Transfer client (scp or sftp)
+    #[arg(long, default_value = "scp")]
+    via: String,
+}
+
 fn main() -> Result<()> {
     let _guard = init_logging()?;
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Profile { command }) => handle_profile(command),
+        Some(Commands::ConfigSet { command }) => handle_configset(command),
         Some(Commands::Config { command }) => handle_config(command),
         Some(Commands::Doctor { json }) => handle_doctor(json),
         Some(Commands::Exec {
@@ -462,7 +516,399 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
             println!("client overrides cleared");
             Ok(())
         }
+        ConfigCommands::Apply(args) => handle_config_apply(args),
     }
+}
+
+fn handle_configset(cmd: ConfigSetCommands) -> Result<()> {
+    let mut store = ConfigSetStore::new(db::init_connection()?);
+    match cmd {
+        ConfigSetCommands::Add(args) => {
+            let files = parse_config_file_specs(&args.file)?;
+            if files.is_empty() {
+                return Err(anyhow!("config set must include at least one --file entry"));
+            }
+            let created = store.insert(NewConfigSet {
+                config_id: args.config_id,
+                name: args.name,
+                hooks_cmdset_id: args.hooks_cmdset_id,
+                files,
+            })?;
+            info!("config set created: {}", created.config.config_id);
+            println!("{}", created.config.config_id);
+            Ok(())
+        }
+        ConfigSetCommands::List => {
+            let sets = store.list()?;
+            if sets.is_empty() {
+                println!("(no config sets)");
+                return Ok(());
+            }
+            for set in sets {
+                let hooks = set.hooks_cmdset_id.as_deref().unwrap_or("-");
+                println!("{:<16} {:<20} {}", set.config_id, set.name, hooks);
+            }
+            Ok(())
+        }
+        ConfigSetCommands::Show { config_id } => {
+            match store.get(&config_id)? {
+                Some(details) => {
+                    let serialized = serde_json::to_string_pretty(&details)?;
+                    println!("{serialized}");
+                }
+                None => return Err(anyhow!("config set not found: {config_id}")),
+            }
+            Ok(())
+        }
+        ConfigSetCommands::Rm { config_id } => {
+            if store.delete(&config_id)? {
+                info!("removed config set {}", config_id);
+            } else {
+                warn!("config set not found: {}", config_id);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
+    let profile_store = ProfileStore::new(db::init_connection()?);
+    let config_store = ConfigSetStore::new(db::init_connection()?);
+    let profile = profile_store
+        .get(&args.profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {}", args.profile_id))?;
+    ensure_ssh_profile(&profile, "config apply")?;
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+    let config = config_store
+        .get(&args.config_id)?
+        .ok_or_else(|| anyhow!("config set not found: {}", args.config_id))?;
+
+    let started = Instant::now();
+    let via = TransferVia::from_str(&args.via)?;
+    let ssh = resolve_client_for(
+        ClientKind::Ssh,
+        profile.client_overrides.as_ref(),
+        &profile_store,
+    )?;
+
+    let needs_home = config
+        .files
+        .iter()
+        .any(|file| file.dest.starts_with("~/"));
+    let remote_home = if needs_home {
+        Some(fetch_remote_home(&ssh, &profile)?)
+    } else {
+        None
+    };
+
+    let mut applied = 0usize;
+    let mut skipped = 0usize;
+    for file in &config.files {
+        let local_path = PathBuf::from(&file.src);
+        if !local_path.exists() {
+            return Err(anyhow!("local file not found: {}", local_path.display()));
+        }
+        let dest = resolve_remote_dest(&file.dest, remote_home.as_deref())?;
+        let status = remote_file_status(&ssh, &profile, &dest, file.when)?;
+        let local_hash = if file.when == ConfigFileWhen::Changed {
+            Some(sha256_file(&local_path)?)
+        } else {
+            None
+        };
+        let (should_apply, reason) = should_apply_config(file.when, status.exists, status.sha256.as_deref(), local_hash.as_deref());
+
+        if args.plan {
+            if should_apply {
+                println!(
+                    "PLAN apply: {} -> {} ({reason})",
+                    local_path.display(),
+                    dest
+                );
+                applied += 1;
+            } else {
+                println!(
+                    "PLAN skip: {} -> {} ({reason})",
+                    local_path.display(),
+                    dest
+                );
+                skipped += 1;
+            }
+            continue;
+        }
+
+        if !should_apply {
+            println!(
+                "skip: {} -> {} ({reason})",
+                local_path.display(),
+                dest
+            );
+            skipped += 1;
+            continue;
+        }
+
+        if args.backup && status.exists {
+            let backup_path = format!("{dest}.bak.{}", now_ms());
+            run_remote_command(
+                &ssh,
+                &profile,
+                &format!(
+                    "cp {} {}",
+                    shell_quote(&dest),
+                    shell_quote(&backup_path)
+                ),
+            )?;
+        }
+
+        let temp_path = format!("{dest}.tmp.{}", now_ms());
+        let transfer = execute_transfer(
+            &profile_store,
+            &profile,
+            TransferDirection::Push,
+            &local_path,
+            &temp_path,
+            via,
+        )?;
+        if !transfer.ok {
+            return Err(anyhow!(
+                "config apply transfer failed with exit code {}",
+                transfer.exit_code
+            ));
+        }
+        run_remote_command(
+            &ssh,
+            &profile,
+            &format!(
+                "mv {} {}",
+                shell_quote(&temp_path),
+                shell_quote(&dest)
+            ),
+        )?;
+        if let Some(mode) = &file.mode {
+            run_remote_command(
+                &ssh,
+                &profile,
+                &format!("chmod {} {}", mode, shell_quote(&dest)),
+            )?;
+        }
+        println!("applied: {} -> {}", local_path.display(), dest);
+        applied += 1;
+    }
+
+    profile_store.touch_last_used(&profile.profile_id)?;
+    let meta_json = serde_json::json!({
+        "config_id": config.config.config_id,
+        "plan": args.plan,
+        "backup": args.backup,
+        "via": via.as_str(),
+        "applied": applied,
+        "skipped": skipped,
+        "total": config.files.len(),
+    });
+    let entry = oplog::OpLogEntry {
+        op: "config_apply".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(ssh.to_string_lossy().into_owned()),
+        ok: true,
+        exit_code: Some(0),
+        duration_ms: Some(started.elapsed().as_millis() as i64),
+        meta_json: Some(meta_json),
+    };
+    oplog::log_operation(profile_store.conn(), entry)?;
+    Ok(())
+}
+
+fn parse_config_file_specs(specs: &[String]) -> Result<Vec<NewConfigFile>> {
+    let mut files = Vec::new();
+    for spec in specs {
+        files.push(parse_config_file_spec(spec)?);
+    }
+    Ok(files)
+}
+
+fn parse_config_file_spec(spec: &str) -> Result<NewConfigFile> {
+    let mut src = None;
+    let mut dest = None;
+    let mut mode = None;
+    let mut when = ConfigFileWhen::Always;
+
+    for pair in spec.split(',') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts
+            .next()
+            .ok_or_else(|| anyhow!("invalid file spec (missing '='): {spec}"))?
+            .trim();
+        match key {
+            "src" => src = Some(value.to_string()),
+            "dest" => dest = Some(value.to_string()),
+            "mode" => mode = Some(value.to_string()),
+            "when" => when = ConfigFileWhen::parse(value)?,
+            _ => return Err(anyhow!("unknown file spec key: {key}")),
+        }
+    }
+
+    let src = src.ok_or_else(|| anyhow!("file spec missing src: {spec}"))?;
+    let dest = dest.ok_or_else(|| anyhow!("file spec missing dest: {spec}"))?;
+    Ok(NewConfigFile {
+        src,
+        dest,
+        mode,
+        when,
+    })
+}
+
+fn resolve_remote_dest(dest: &str, remote_home: Option<&str>) -> Result<String> {
+    if dest.starts_with("~/") {
+        let home = remote_home.ok_or_else(|| anyhow!("remote home not resolved"))?;
+        let suffix = dest.trim_start_matches("~/");
+        Ok(format!("{home}/{suffix}"))
+    } else {
+        Ok(dest.to_string())
+    }
+}
+
+struct RemoteFileStatus {
+    exists: bool,
+    sha256: Option<String>,
+}
+
+fn remote_file_status(
+    ssh: &Path,
+    profile: &Profile,
+    dest: &str,
+    when: ConfigFileWhen,
+) -> Result<RemoteFileStatus> {
+    match when {
+        ConfigFileWhen::Always => Ok(RemoteFileStatus {
+            exists: remote_exists(ssh, profile, dest)?,
+            sha256: None,
+        }),
+        ConfigFileWhen::Missing => Ok(RemoteFileStatus {
+            exists: remote_exists(ssh, profile, dest)?,
+            sha256: None,
+        }),
+        ConfigFileWhen::Changed => {
+            let output = run_remote_command(
+                ssh,
+                profile,
+                &format!(
+                    "if test -f {path}; then sha256sum {path} | awk '{{print $1}}'; else echo MISSING; fi",
+                    path = shell_quote(dest)
+                ),
+            )?;
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout == "MISSING" || stdout.is_empty() {
+                Ok(RemoteFileStatus {
+                    exists: false,
+                    sha256: None,
+                })
+            } else {
+                Ok(RemoteFileStatus {
+                    exists: true,
+                    sha256: Some(stdout),
+                })
+            }
+        }
+    }
+}
+
+fn remote_exists(ssh: &Path, profile: &Profile, dest: &str) -> Result<bool> {
+    let output = run_remote_command(
+        ssh,
+        profile,
+        &format!(
+            "if test -f {path}; then echo EXISTS; else echo MISSING; fi",
+            path = shell_quote(dest)
+        ),
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match stdout.as_str() {
+        "EXISTS" => Ok(true),
+        "MISSING" => Ok(false),
+        _ => Err(anyhow!("unexpected exists response: {stdout}")),
+    }
+}
+
+fn should_apply_config(
+    when: ConfigFileWhen,
+    exists: bool,
+    remote_hash: Option<&str>,
+    local_hash: Option<&str>,
+) -> (bool, &'static str) {
+    match when {
+        ConfigFileWhen::Always => (true, "always"),
+        ConfigFileWhen::Missing => {
+            if exists {
+                (false, "exists")
+            } else {
+                (true, "missing")
+            }
+        }
+        ConfigFileWhen::Changed => {
+            if !exists {
+                return (true, "missing");
+            }
+            match (remote_hash, local_hash) {
+                (Some(remote), Some(local)) if remote != local => (true, "changed"),
+                (Some(_), Some(_)) => (false, "unchanged"),
+                _ => (true, "unknown"),
+            }
+        }
+    }
+}
+
+fn fetch_remote_home(ssh: &Path, profile: &Profile) -> Result<String> {
+    let output = run_remote_command(ssh, profile, "printf %s \"$HOME\"")?;
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if home.is_empty() {
+        return Err(anyhow!("failed to resolve remote home"));
+    }
+    Ok(home)
+}
+
+fn run_remote_command(ssh: &Path, profile: &Profile, cmd: &str) -> Result<std::process::Output> {
+    let output = Command::new(ssh)
+        .arg("-p")
+        .arg(profile.port.to_string())
+        .arg(format!("{}@{}", profile.user, profile.host))
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed to execute ssh")?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow!("remote command failed: {stderr}"))
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed to execute sha256sum")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("sha256sum failed: {stderr}"));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let hash = stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("sha256sum output missing hash"))?;
+    Ok(hash.to_string())
 }
 
 fn handle_exec(
@@ -1397,6 +1843,59 @@ mod tests {
                 assert!(args.clear_all);
             }
             _ => panic!("expected config set-client command"),
+        }
+    }
+
+    #[test]
+    fn parses_configset_add_with_file() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "configset",
+            "add",
+            "--name",
+            "dotfiles",
+            "--file",
+            "src=./.bashrc,dest=~/.bashrc,mode=644,when=changed",
+        ])
+        .expect("parses configset add");
+
+        match cli.command {
+            Some(Commands::ConfigSet {
+                command: ConfigSetCommands::Add(args),
+            }) => {
+                assert_eq!(args.name, "dotfiles");
+                assert_eq!(args.file.len(), 1);
+            }
+            _ => panic!("expected configset add command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_apply() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "config",
+            "apply",
+            "p1",
+            "cfg_main",
+            "--plan",
+            "--backup",
+            "--via",
+            "sftp",
+        ])
+        .expect("parses config apply");
+
+        match cli.command {
+            Some(Commands::Config {
+                command: ConfigCommands::Apply(args),
+            }) => {
+                assert_eq!(args.profile_id, "p1");
+                assert_eq!(args.config_id, "cfg_main");
+                assert!(args.plan);
+                assert!(args.backup);
+                assert_eq!(args.via, "sftp");
+            }
+            _ => panic!("expected config apply command"),
         }
     }
 
