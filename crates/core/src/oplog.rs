@@ -43,21 +43,39 @@ pub fn log_operation(conn: &Connection, entry: OpLogEntry) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::init_in_memory;
+    use crate::profile::{DangerLevel, NewProfile, ProfileStore, ProfileType};
 
     #[test]
     fn logs_operation_row() {
         let conn = init_in_memory().unwrap();
+        let store = ProfileStore::new(conn);
+        let profile = store
+            .insert(NewProfile {
+                profile_id: Some("p_abc".into()),
+                name: "sample".into(),
+                profile_type: ProfileType::Ssh,
+                host: "localhost".into(),
+                port: 22,
+                user: "root".into(),
+                danger_level: DangerLevel::Normal,
+                group: None,
+                tags: vec![],
+                note: None,
+                client_overrides: None,
+            })
+            .unwrap();
         let entry = OpLogEntry {
             op: "connect".into(),
-            profile_id: Some("p1".into()),
+            profile_id: Some(profile.profile_id),
             client_used: Some("ssh".into()),
             ok: true,
             exit_code: Some(0),
             duration_ms: Some(100),
             meta_json: None,
         };
-        log_operation(&conn, entry).unwrap();
-        let count: i64 = conn
+        log_operation(store.conn(), entry).unwrap();
+        let count: i64 = store
+            .conn()
             .query_row("SELECT COUNT(*) FROM op_logs", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
