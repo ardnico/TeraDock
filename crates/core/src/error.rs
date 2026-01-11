@@ -27,6 +27,10 @@ pub enum CoreError {
     Regex(String),
     #[error("unknown profile: {0}")]
     NotFound(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("import error: {0}")]
+    Import(String),
     #[error("master password not set")]
     MasterNotSet,
     #[error("master password already set")]
