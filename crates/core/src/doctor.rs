@@ -39,6 +39,7 @@ pub enum ClientKind {
     Ssh,
     Scp,
     Sftp,
+    Ftp,
     Telnet,
 }
 
@@ -48,6 +49,7 @@ impl ClientKind {
             ClientKind::Ssh => "ssh",
             ClientKind::Scp => "scp",
             ClientKind::Sftp => "sftp",
+            ClientKind::Ftp => "ftp",
             ClientKind::Telnet => "telnet",
         }
     }
@@ -57,6 +59,7 @@ impl ClientKind {
             ClientKind::Ssh => &["ssh", "ssh.exe"],
             ClientKind::Scp => &["scp", "scp.exe"],
             ClientKind::Sftp => &["sftp", "sftp.exe"],
+            ClientKind::Ftp => &["ftp", "ftp.exe"],
             ClientKind::Telnet => &["telnet", "telnet.exe"],
         }
     }
@@ -67,6 +70,7 @@ pub struct ClientOverrides {
     pub ssh: Option<String>,
     pub scp: Option<String>,
     pub sftp: Option<String>,
+    pub ftp: Option<String>,
     pub telnet: Option<String>,
 }
 
@@ -76,12 +80,13 @@ impl ClientOverrides {
             ClientKind::Ssh => self.ssh.as_deref(),
             ClientKind::Scp => self.scp.as_deref(),
             ClientKind::Sftp => self.sftp.as_deref(),
+            ClientKind::Ftp => self.ftp.as_deref(),
             ClientKind::Telnet => self.telnet.as_deref(),
         }
     }
 }
 
-/// Check for required external clients (ssh/scp/sftp/telnet) in PATH.
+/// Check for required external clients (ssh/scp/sftp/ftp/telnet) in PATH.
 pub fn check_clients() -> DoctorReport {
     check_clients_with_overrides(None, None)
 }
@@ -96,6 +101,7 @@ pub fn check_clients_with_overrides(
         ClientKind::Ssh,
         ClientKind::Scp,
         ClientKind::Sftp,
+        ClientKind::Ftp,
         ClientKind::Telnet,
     ] {
         let resolved =
