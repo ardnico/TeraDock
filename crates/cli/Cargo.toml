@@ -15,3 +15,5 @@ tdcore = { path = "../core" }
 rpassword = { workspace = true }
 zeroize = { workspace = true }
 wait-timeout = { workspace = true }
+serialport = { workspace = true }
+crossterm = { workspace = true }
