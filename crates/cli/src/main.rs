@@ -1,8 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
-use std::io::{self, Write};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
@@ -57,7 +63,7 @@ enum Commands {
         #[arg(last = true)]
         cmd: Vec<String>,
     },
-    /// Connect to a profile (SSH/Telnet)
+    /// Connect to a profile (SSH/Telnet/Serial)
     Connect {
         /// Profile ID to connect to
         profile_id: String,
@@ -459,13 +465,15 @@ fn handle_exec(
     oplog::log_operation(store.conn(), entry)?;
 
     if json_output {
+        let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .unwrap_or_else(|_| serde_json::json!({}));
         let json = serde_json::json!({
             "ok": ok,
             "exit_code": exit_code,
             "stdout": String::from_utf8_lossy(&output.stdout),
             "stderr": String::from_utf8_lossy(&output.stderr),
             "duration_ms": duration_ms,
-            "parsed": serde_json::json!({}),
+            "parsed": parsed,
         });
         println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
@@ -542,7 +550,7 @@ fn handle_connect(profile_id: String) -> Result<()> {
             let telnet = resolve_client_for(ClientKind::Telnet, overrides.as_ref(), &store)?;
             connect_telnet(&store, profile, telnet)
         }
-        ProfileType::Serial => Err(anyhow!("serial connect not yet implemented")),
+        ProfileType::Serial => connect_serial(&store, profile),
     }
 }
 
@@ -598,6 +606,90 @@ fn connect_telnet(store: &ProfileStore, profile: Profile, telnet: PathBuf) -> Re
     } else {
         Err(anyhow!("telnet exited with code {}", exit_code))
     }
+}
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("failed to enable raw mode")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
+fn connect_serial(store: &ProfileStore, profile: Profile) -> Result<()> {
+    let port_name = profile.host.clone();
+    let baud_rate = profile.port as u32;
+    let mut port = serialport::new(&port_name, baud_rate)
+        .timeout(Duration::from_millis(20))
+        .open()
+        .with_context(|| format!("failed to open serial port {port_name} at {baud_rate}"))?;
+    let started = Instant::now();
+    let result = run_serial_session(&mut port);
+    let duration_ms = started.elapsed().as_millis() as i64;
+    store.touch_last_used(&profile.profile_id)?;
+    let entry = oplog::OpLogEntry {
+        op: "connect".into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(format!("serialport:{port_name}")),
+        ok: result.is_ok(),
+        exit_code: None,
+        duration_ms: Some(duration_ms),
+        meta_json: None,
+    };
+    oplog::log_operation(store.conn(), entry)?;
+    result
+}
+
+fn run_serial_session(port: &mut Box<dyn serialport::SerialPort>) -> Result<()> {
+    let _raw = RawModeGuard::enter()?;
+    let running = Arc::new(AtomicBool::new(true));
+    let mut port_reader = port.try_clone().context("failed to clone serial port")?;
+    let running_reader = Arc::clone(&running);
+    let reader = thread::spawn(move || {
+        let mut stdout = io::stdout();
+        let mut buffer = [0u8; 1024];
+        while running_reader.load(Ordering::Relaxed) {
+            match port_reader.read(&mut buffer) {
+                Ok(0) => {}
+                Ok(n) => {
+                    if stdout.write_all(&buffer[..n]).is_err() {
+                        break;
+                    }
+                    let _ = stdout.flush();
+                }
+                Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
+                Err(_) => break,
+            }
+        }
+    });
+    let mut stdin = io::stdin();
+    let mut buffer = [0u8; 1024];
+    let mut result = Ok(());
+    loop {
+        match stdin.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Err(err) = port.write_all(&buffer[..n]).and_then(|_| port.flush()) {
+                    result = Err(err.into());
+                    break;
+                }
+            }
+            Err(err) => {
+                result = Err(err.into());
+                break;
+            }
+        }
+    }
+    running.store(false, Ordering::Relaxed);
+    let _ = reader.join();
+    result
 }
 
 fn handle_secret(cmd: SecretCommands) -> Result<()> {

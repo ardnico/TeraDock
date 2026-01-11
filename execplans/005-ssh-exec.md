@@ -11,14 +11,17 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - [x] (2026-01-06 23:50Z) Added CLI `td exec` for SSH profiles with optional `--timeout-ms` and `--json` output.
 - [x] (2026-01-06 23:50Z) Wired op_logs insertion, last-used tracking, and critical danger confirmation for exec.
 - [x] (2026-01-08 14:46Z) Fixed SSH invocation to avoid sending a stray `--` as the remote command and aligned client resolution with profile/global overrides.
-- [ ] (2026-01-06 23:51Z) Run `cargo test` (blocked by crates.io access / read-only sandbox; retry when registry reachable).
+- [x] (2026-01-06 23:51Z) Run `cargo test` (blocked by crates.io access / read-only sandbox; retry when registry reachable).
 - [ ] (2026-01-06 23:51Z) Extend parsing/structured `parsed` field and timeout policy once broader CommandSet/run implementation lands.
+- [x] (2026-01-11 03:39Z) Added basic JSON stdout parsing for `td exec --json`, populating `parsed` when stdout is valid JSON.
+- [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 
 ## Surprises & Discoveries
 
 - Timeout support required an extra crate (`wait-timeout`) since std lacks a portable timeout on child processes.
 - Sandbox remains read-only with restricted network; no test execution possible yet.
 - SSH treats `--` after the host as part of the remote command, so passing it by default caused an unexpected `--` command on the remote side; removed to keep commands intact.
+- Registry access was restored by 2026-01-09, allowing `cargo test` to pass successfully.
 
 ## Decision Log
 
@@ -28,6 +31,9 @@ Deliver PROJECT_PLAN.md Phase 7’s first slice: a non-interactive `exec` comman
 - Decision: Keep SSH exec invocation free of an extra `--` delimiter and honor profile/global client overrides before falling back to PATH.
   Rationale: Prevents an unintended `--` remote command and matches the client resolution order defined in PROJECT_PLAN.md.
   Date/Author: 2026-01-08 / assistant
+- Decision: Populate `parsed` with stdout JSON when available for `td exec --json`, leaving it empty otherwise.
+  Rationale: Provides immediate structured output for JSON-producing commands without waiting on full CommandSet/parser plumbing.
+  Date/Author: 2026-01-11 / assistant
 
 ## Outcomes & Retrospective
 
@@ -55,7 +61,7 @@ Connect and doctor are already present. This plan adds the first non-interactive
 - `td exec --json <ssh_profile> -- echo hi` outputs the expected JSON schema.
 - Critical profiles prompt for confirmation before executing.
 - op_logs receives an `exec` entry with exit code/duration.
-- Tests pass once registry access permits running them.
+- Tests pass when running `cargo test` at the workspace root.
 
 ## Idempotence and Recovery
 
@@ -70,3 +76,5 @@ Exec is stateless aside from logging and last_used updates; reruns are safe. On 
 - CLI: `td exec <profile_id> [--timeout-ms N] [--json] -- <cmd...>`
 - Core helpers reused: `doctor::resolve_client`, `profile::touch_last_used`, `oplog::log_operation`.
 - New dependency: `wait-timeout` for child process timeout handling.
+
+Update 2026-01-09 15:49Z: Recorded successful workspace tests now that registry access is available and updated progress/validation notes.
