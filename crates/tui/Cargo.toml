@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 wait-timeout = { workspace = true }
 directories = { workspace = true }
 tdcore = { path = "../core" }
+rusqlite = { workspace = true }

@@ -324,6 +324,7 @@ fn pane_block(title: &str, active: bool) -> Block<'static> {
     } else {
         Style::default().fg(Color::Gray)
     };
+    let title = title.to_string();
     Block::default()
         .borders(Borders::ALL)
         .title(title)

@@ -64,6 +64,22 @@ impl CmdSetStore {
         Ok(Some(deserialize_cmdset(row)?))
     }
 
+    pub fn list(&self) -> Result<Vec<CmdSet>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT cmdset_id, name, vars_json
+            FROM cmdsets
+            ORDER BY cmdset_id ASC
+            "#,
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut sets = Vec::new();
+        while let Some(row) = rows.next()? {
+            sets.push(deserialize_cmdset(row)?);
+        }
+        Ok(sets)
+    }
+
     pub fn list_steps(&self, cmdset_id: &str) -> Result<Vec<CmdStep>> {
         let mut stmt = self.conn.prepare(
             r#"

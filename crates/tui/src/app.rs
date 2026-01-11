@@ -2,11 +2,13 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::{execute, terminal};
+use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tdcore::cmdset::CmdSetStore;
@@ -24,7 +26,7 @@ pub fn run() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, terminal::EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -34,7 +36,7 @@ pub fn run() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        terminal::DisableMouseCapture
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
