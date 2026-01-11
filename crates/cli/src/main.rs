@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,6 +21,10 @@ use tdcore::profile::{
 };
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::settings;
+use tdcore::transfer::{
+    build_scp_args, build_sftp_args, build_sftp_batch, TransferDirection, TransferTempDir,
+    TransferVia,
+};
 use wait_timeout::ChildExt;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
@@ -80,6 +84,12 @@ enum Commands {
         /// Profile ID to connect to
         profile_id: String,
     },
+    /// Upload a local file to a profile over SCP/SFTP
+    Push(TransferArgs),
+    /// Download a remote file from a profile over SCP/SFTP
+    Pull(TransferArgs),
+    /// Transfer a file between two profiles (pull -> local temp -> push)
+    Xfer(XferArgs),
     /// Manage secrets (master password required for reveal)
     Secret {
         #[command(subcommand)]
@@ -179,6 +189,34 @@ struct ProfileListArgs {
     query: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct TransferArgs {
+    /// Profile ID to transfer to/from
+    profile_id: String,
+    /// Local path (source for push, destination for pull)
+    local_path: PathBuf,
+    /// Remote path (destination for push, source for pull)
+    remote_path: String,
+    /// Transfer client (scp or sftp)
+    #[arg(long, default_value = "scp")]
+    via: String,
+}
+
+#[derive(Debug, Args)]
+struct XferArgs {
+    /// Source profile ID
+    src_profile_id: String,
+    /// Source remote path
+    src_path: String,
+    /// Destination profile ID
+    dst_profile_id: String,
+    /// Destination remote path
+    dst_path: String,
+    /// Transfer client (scp or sftp)
+    #[arg(long, default_value = "scp")]
+    via: String,
+}
+
 #[derive(Debug, Subcommand)]
 enum SecretCommands {
     /// Set the master password (one-time)
@@ -252,6 +290,9 @@ fn main() -> Result<()> {
             json,
         }) => handle_run(profile_id, cmdset_id, json),
         Some(Commands::Connect { profile_id }) => handle_connect(profile_id),
+        Some(Commands::Push(args)) => handle_push(args),
+        Some(Commands::Pull(args)) => handle_pull(args),
+        Some(Commands::Xfer(args)) => handle_xfer(args),
         Some(Commands::Secret { command }) => handle_secret(command),
         None => {
             Cli::command().print_help()?;
@@ -698,6 +739,136 @@ fn handle_connect(profile_id: String) -> Result<()> {
     }
 }
 
+fn handle_push(args: TransferArgs) -> Result<()> {
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&args.profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {}", args.profile_id))?;
+    ensure_ssh_profile(&profile, "push")?;
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+    let via = TransferVia::from_str(&args.via)?;
+    run_transfer_with_log(
+        &store,
+        &profile,
+        TransferDirection::Push,
+        &args.local_path,
+        &args.remote_path,
+        via,
+        "push",
+    )
+}
+
+fn handle_pull(args: TransferArgs) -> Result<()> {
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&args.profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {}", args.profile_id))?;
+    ensure_ssh_profile(&profile, "pull")?;
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+    let via = TransferVia::from_str(&args.via)?;
+    run_transfer_with_log(
+        &store,
+        &profile,
+        TransferDirection::Pull,
+        &args.local_path,
+        &args.remote_path,
+        via,
+        "pull",
+    )
+}
+
+fn handle_xfer(args: XferArgs) -> Result<()> {
+    let store = ProfileStore::new(db::init_connection()?);
+    let src_profile = store
+        .get(&args.src_profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {}", args.src_profile_id))?;
+    let dst_profile = store
+        .get(&args.dst_profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {}", args.dst_profile_id))?;
+    ensure_ssh_profile(&src_profile, "xfer")?;
+    ensure_ssh_profile(&dst_profile, "xfer")?;
+    if src_profile.danger_level == DangerLevel::Critical && !confirm_danger(&src_profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+    if dst_profile.danger_level == DangerLevel::Critical && !confirm_danger(&dst_profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+
+    let via = TransferVia::from_str(&args.via)?;
+    let temp_dir = TransferTempDir::new("xfer")?;
+    let temp_file = temp_dir
+        .path()
+        .join(filename_from_remote(&args.src_path));
+
+    let started = Instant::now();
+    let pull = execute_transfer(
+        &store,
+        &src_profile,
+        TransferDirection::Pull,
+        &temp_file,
+        &args.src_path,
+        via,
+    )?;
+    let mut push = None;
+    let mut ok = pull.ok;
+    let mut exit_code = pull.exit_code;
+
+    if pull.ok {
+        let push_outcome = execute_transfer(
+            &store,
+            &dst_profile,
+            TransferDirection::Push,
+            &temp_file,
+            &args.dst_path,
+            via,
+        )?;
+        ok = push_outcome.ok;
+        exit_code = push_outcome.exit_code;
+        push = Some(push_outcome);
+    }
+
+    store.touch_last_used(&src_profile.profile_id)?;
+    store.touch_last_used(&dst_profile.profile_id)?;
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let meta_json = serde_json::json!({
+        "via": via.as_str(),
+        "src_profile_id": src_profile.profile_id,
+        "dst_profile_id": dst_profile.profile_id,
+        "src_path": args.src_path,
+        "dst_path": args.dst_path,
+        "pull_exit_code": pull.exit_code,
+        "push_exit_code": push.as_ref().map(|outcome| outcome.exit_code),
+        "pull_client": pull.client_used.to_string_lossy().to_string(),
+        "push_client": push
+            .as_ref()
+            .map(|outcome| outcome.client_used.to_string_lossy().to_string()),
+    });
+    let entry = oplog::OpLogEntry {
+        op: "xfer".into(),
+        profile_id: None,
+        client_used: None,
+        ok,
+        exit_code: Some(exit_code),
+        duration_ms: Some(duration_ms),
+        meta_json: Some(meta_json),
+    };
+    oplog::log_operation(store.conn(), entry)?;
+
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!("xfer failed with exit code {exit_code}"))
+    }
+}
+
 fn connect_ssh(store: &ProfileStore, profile: Profile, ssh: PathBuf) -> Result<()> {
     let mut cmd = Command::new(&ssh);
     cmd.arg("-p")
@@ -932,6 +1103,111 @@ fn resolve_client_for(
     let global_overrides = settings::get_client_overrides(store.conn())?;
     doctor::resolve_client_with_overrides(kind, profile_overrides, global_overrides.as_ref())
         .ok_or_else(|| anyhow!("{} client not found via overrides or PATH", kind.as_str()))
+}
+
+fn ensure_ssh_profile(profile: &Profile, op: &str) -> Result<()> {
+    if profile.profile_type != ProfileType::Ssh {
+        Err(anyhow!("{op} only supports SSH profiles for now"))
+    } else {
+        Ok(())
+    }
+}
+
+struct TransferOutcome {
+    ok: bool,
+    exit_code: i32,
+    duration_ms: i64,
+    client_used: PathBuf,
+}
+
+fn run_transfer_with_log(
+    store: &ProfileStore,
+    profile: &Profile,
+    direction: TransferDirection,
+    local_path: &Path,
+    remote_path: &str,
+    via: TransferVia,
+    op: &str,
+) -> Result<()> {
+    let outcome = execute_transfer(store, profile, direction, local_path, remote_path, via)?;
+    store.touch_last_used(&profile.profile_id)?;
+    let meta_json = serde_json::json!({
+        "via": via.as_str(),
+        "direction": match direction {
+            TransferDirection::Push => "push",
+            TransferDirection::Pull => "pull",
+        },
+        "local_path": local_path.display().to_string(),
+        "remote_path": remote_path,
+    });
+    let entry = oplog::OpLogEntry {
+        op: op.into(),
+        profile_id: Some(profile.profile_id.clone()),
+        client_used: Some(outcome.client_used.to_string_lossy().into_owned()),
+        ok: outcome.ok,
+        exit_code: Some(outcome.exit_code),
+        duration_ms: Some(outcome.duration_ms),
+        meta_json: Some(meta_json),
+    };
+    oplog::log_operation(store.conn(), entry)?;
+    if outcome.ok {
+        Ok(())
+    } else {
+        Err(anyhow!("{op} failed with exit code {}", outcome.exit_code))
+    }
+}
+
+fn execute_transfer(
+    store: &ProfileStore,
+    profile: &Profile,
+    direction: TransferDirection,
+    local_path: &Path,
+    remote_path: &str,
+    via: TransferVia,
+) -> Result<TransferOutcome> {
+    let client = resolve_client_for(
+        via.client_kind(),
+        profile.client_overrides.as_ref(),
+        store,
+    )?;
+    let mut cmd = Command::new(&client);
+    let _batch_guard: Option<TransferTempDir>;
+    let args = match via {
+        TransferVia::Scp => {
+            _batch_guard = None;
+            build_scp_args(profile, direction, local_path, remote_path)
+        }
+        TransferVia::Sftp => {
+            let batch_dir = TransferTempDir::new("sftp-batch")?;
+            let batch_path = batch_dir.path().join("batch.txt");
+            let batch_contents = build_sftp_batch(direction, local_path, remote_path);
+            std::fs::write(&batch_path, batch_contents)?;
+            _batch_guard = Some(batch_dir);
+            build_sftp_args(profile, &batch_path)
+        }
+    };
+    cmd.args(args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let started = Instant::now();
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to execute {}", via.as_str()))?;
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let exit_code = status.code().unwrap_or_default();
+    Ok(TransferOutcome {
+        ok: status.success(),
+        exit_code,
+        duration_ms,
+        client_used: client,
+    })
+}
+
+fn filename_from_remote(remote_path: &str) -> PathBuf {
+    Path::new(remote_path)
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("transfer.bin"))
 }
 
 fn confirm_danger(profile: &Profile) -> Result<bool> {
