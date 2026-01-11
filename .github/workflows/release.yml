@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Build release binary
+        run: cargo build -p td --release
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --locked
+      - name: Build deb package
+        if: runner.os == 'Linux'
+        run: cargo deb -p td --no-build
+      - name: Build tar.gz archive
+        if: runner.os == 'Linux'
+        run: packaging/linux/package-tar.sh "${{ steps.version.outputs.version }}"
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          /c/Program\ Files\ \(x86\)/Inno\ Setup\ 6/ISCC.exe \
+            /DMyAppVersion="${{ steps.version.outputs.version }}" \
+            packaging/windows/td.iss
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/td-*-windows-x86_64-setup.exe
+            dist/td-*-linux-x86_64.tar.gz
+            target/debian/*.deb
