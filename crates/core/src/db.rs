@@ -175,5 +175,26 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
         current = 3;
     }
+    if current < 4 {
+        info!("applying schema v4");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                profile_id TEXT NOT NULL,
+                pid INTEGER,
+                started_at INTEGER NOT NULL,
+                forwards_json TEXT NOT NULL,
+                FOREIGN KEY(profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+            );
+
+            PRAGMA user_version = 4;
+            "#,
+        )?;
+        tx.commit()?;
+        current = 4;
+    }
     Ok(())
 }

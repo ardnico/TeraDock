@@ -32,6 +32,7 @@ use tdcore::settings;
 use tdcore::settings::SettingScope;
 use tdcore::settings_registry;
 use tdcore::tester::{self, SshBatchCommand, TestOptions};
+use tdcore::tunnel::{Forward, ForwardKind, ForwardStore, NewSession, SessionKind, SessionStore};
 use tdcore::transfer::{TransferDirection, TransferTempDir, TransferVia};
 use tdcore::util::now_ms;
 use tracing::{info, warn};
@@ -112,6 +113,11 @@ enum Commands {
         /// One-time string to send right after connect (overrides profile)
         #[arg(long)]
         initial_send: Option<String>,
+    },
+    /// Manage SSH tunnels
+    Tunnel {
+        #[command(subcommand)]
+        command: TunnelCommands,
     },
     /// Test connectivity to a profile
     Test {
@@ -271,6 +277,35 @@ struct XferArgs {
     /// Acknowledge FTP is insecure when using --via ftp
     #[arg(long)]
     i_know_its_insecure: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum TunnelCommands {
+    /// Start a tunnel for a profile
+    Start(TunnelStartArgs),
+    /// Stop a tunnel session
+    Stop {
+        /// Session ID to stop
+        session_id: String,
+    },
+    /// Show tunnel session status
+    Status(TunnelStatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct TunnelStartArgs {
+    /// Profile ID to use
+    profile_id: String,
+    /// Forward name to apply (repeatable)
+    #[arg(long = "forward")]
+    forward: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct TunnelStatusArgs {
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -521,6 +556,7 @@ fn main() -> Result<()> {
             profile_id,
             initial_send,
         }) => handle_connect(profile_id, initial_send),
+        Some(Commands::Tunnel { command }) => handle_tunnel(command),
         Some(Commands::Test {
             profile_id,
             json,
@@ -1859,6 +1895,187 @@ fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()
         }
         ProfileType::Serial => connect_serial(&store, profile, initial_send),
     }
+}
+
+fn handle_tunnel(command: TunnelCommands) -> Result<()> {
+    match command {
+        TunnelCommands::Start(args) => handle_tunnel_start(args),
+        TunnelCommands::Stop { session_id } => handle_tunnel_stop(session_id),
+        TunnelCommands::Status(args) => handle_tunnel_status(args),
+    }
+}
+
+fn handle_tunnel_start(args: TunnelStartArgs) -> Result<()> {
+    let store = ProfileStore::new(db::init_connection()?);
+    let profile = store
+        .get(&args.profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {}", args.profile_id))?;
+    ensure_ssh_profile(&profile, "tunnel start")?;
+
+    let forward_store = ForwardStore::new(store.conn().try_clone()?);
+    let forwards = if args.forward.is_empty() {
+        forward_store.list_for_profile(&profile.profile_id)?
+    } else {
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for name in args.forward {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let forward = forward_store
+                .get_by_name(&profile.profile_id, &name)?
+                .ok_or_else(|| anyhow!("forward not found: {name}"))?;
+            selected.push(forward);
+        }
+        selected
+    };
+    if forwards.is_empty() {
+        return Err(anyhow!(
+            "no forwards defined for profile {}",
+            profile.profile_id
+        ));
+    }
+
+    let ssh = resolve_client_for(
+        ClientKind::Ssh,
+        profile.client_overrides.as_ref(),
+        &store,
+    )?;
+    let auth = ssh_auth_context(store.conn())?;
+    emit_ssh_auth_messages(&auth);
+
+    let mut command = Command::new(&ssh);
+    command
+        .arg("-N")
+        .arg("-p")
+        .arg(profile.port.to_string())
+        .args(&auth.args);
+    for forward in &forwards {
+        append_forward(&mut command, forward)?;
+    }
+    command
+        .arg(format!("{}@{}", profile.user, profile.host))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = command.spawn().context("failed to start ssh tunnel")?;
+    let pid = child.id();
+    drop(child);
+
+    store.touch_last_used(&profile.profile_id)?;
+    let session_store = SessionStore::new(store.conn().try_clone()?);
+    let session = session_store.insert(NewSession {
+        kind: SessionKind::Tunnel,
+        profile_id: profile.profile_id.clone(),
+        pid: Some(pid),
+        forwards: forwards.iter().map(|forward| forward.name.clone()).collect(),
+    })?;
+    println!("tunnel started: {} (pid {})", session.session_id, pid);
+    Ok(())
+}
+
+fn handle_tunnel_stop(session_id: String) -> Result<()> {
+    let store = SessionStore::new(db::init_connection()?);
+    let session = store
+        .get(&session_id)?
+        .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+    if let Some(pid) = session.pid {
+        terminate_pid(pid).with_context(|| format!("failed to stop pid {pid}"))?;
+    }
+    store.remove(&session_id)?;
+    println!("tunnel stopped: {session_id}");
+    Ok(())
+}
+
+fn handle_tunnel_status(args: TunnelStatusArgs) -> Result<()> {
+    let store = SessionStore::new(db::init_connection()?);
+    let cleaned = store.cleanup_dead()?;
+    let sessions = store.list()?;
+
+    if args.json {
+        let json = serde_json::json!({
+            "sessions": sessions.iter().map(session_json).collect::<Vec<_>>(),
+            "cleaned": cleaned.iter().map(session_json).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    if !cleaned.is_empty() {
+        println!("cleaned {} dead sessions", cleaned.len());
+    }
+    if sessions.is_empty() {
+        println!("no active tunnel sessions");
+        return Ok(());
+    }
+    for session in sessions {
+        let pid = session
+            .pid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{}\tprofile={}\tpid={}\tforwards={}",
+            session.session_id,
+            session.profile_id,
+            pid,
+            session.forwards.join(",")
+        );
+    }
+    Ok(())
+}
+
+fn append_forward(command: &mut Command, forward: &Forward) -> Result<()> {
+    match forward.kind {
+        ForwardKind::Local | ForwardKind::Remote => {
+            let dest = forward
+                .dest
+                .as_ref()
+                .ok_or_else(|| anyhow!("forward {} is missing destination", forward.name))?;
+            command
+                .arg(forward.kind.as_flag())
+                .arg(format!("{}:{}", forward.listen, dest));
+        }
+        ForwardKind::Dynamic => {
+            command.arg(forward.kind.as_flag()).arg(&forward.listen);
+        }
+    }
+    Ok(())
+}
+
+fn terminate_pid(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .context("failed to execute kill")?;
+        if !status.success() {
+            return Err(anyhow!("kill failed for pid {pid}"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .status()
+            .context("failed to execute taskkill")?;
+        if !status.success() {
+            return Err(anyhow!("taskkill failed for pid {pid}"));
+        }
+    }
+    Ok(())
+}
+
+fn session_json(session: &tdcore::tunnel::Session) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session.session_id,
+        "kind": session.kind.to_string(),
+        "profile_id": session.profile_id,
+        "pid": session.pid,
+        "started_at": session.started_at,
+        "forwards": session.forwards,
+    })
 }
 
 fn handle_test(profile_id: String, json: bool, ssh: bool) -> Result<()> {
