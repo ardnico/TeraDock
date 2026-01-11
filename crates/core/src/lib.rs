@@ -11,6 +11,7 @@ pub mod paths;
 pub mod profile;
 pub mod secret;
 pub mod settings;
+pub mod settings_registry;
 pub mod tester;
 pub mod transfer;
 pub mod util;

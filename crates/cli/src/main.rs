@@ -29,6 +29,8 @@ use tdcore::profile::{
 };
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::settings;
+use tdcore::settings::SettingScope;
+use tdcore::settings_registry;
 use tdcore::tester::{self, SshBatchCommand, TestOptions};
 use tdcore::transfer::{TransferDirection, TransferTempDir, TransferVia};
 use tdcore::util::now_ms;
@@ -63,7 +65,7 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigSetCommands,
     },
-    /// Manage global configuration (client overrides, settings)
+    /// Manage configuration (client overrides, settings)
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
@@ -293,10 +295,16 @@ struct SecretAddArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
+    /// Show the configuration schema
+    Schema(ConfigSchemaArgs),
+    /// List available configuration keys
+    Keys,
+    /// Get a configuration value
+    Get(ConfigGetArgs),
+    /// Set a configuration value
+    Set(ConfigSetArgs),
     /// Set or clear global client overrides (ssh/scp/sftp/ftp/telnet)
     SetClient(ClientOverrideArgs),
-    /// Set a global config value (ex: allow_insecure_transfers=true)
-    Set(ConfigSetArgs),
     /// Show current global client overrides
     ShowClient,
     /// Clear all global client overrides
@@ -341,9 +349,39 @@ struct AuthOrderArgs {
 }
 
 #[derive(Debug, Args)]
+struct ConfigSchemaArgs {
+    /// Optional setting key to show schema for
+    key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ConfigGetArgs {
+    /// Setting key
+    key: String,
+    /// Setting scope (global or profile:ID)
+    #[arg(long, default_value = "global")]
+    scope: String,
+    /// Resolve the value from the scope and fall back to global if unset
+    #[arg(long)]
+    resolved: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(disable_help_flag = true)]
 struct ConfigSetArgs {
-    /// Setting in key=value format (example: allow_insecure_transfers=true)
-    setting: String,
+    /// Setting key
+    key: Option<String>,
+    /// Setting value
+    value: Option<String>,
+    /// Setting scope (global or profile:ID)
+    #[arg(long, default_value = "global")]
+    scope: String,
+    /// Resolve the value after setting (falls back to global if unset)
+    #[arg(long)]
+    resolved: bool,
+    /// Show schema for the provided key
+    #[arg(long)]
+    help: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -666,6 +704,10 @@ fn handle_profile(cmd: ProfileCommands) -> Result<()> {
 fn handle_config(cmd: ConfigCommands) -> Result<()> {
     let conn = db::init_connection()?;
     match cmd {
+        ConfigCommands::Schema(args) => handle_config_schema(args),
+        ConfigCommands::Keys => handle_config_keys(),
+        ConfigCommands::Get(args) => handle_config_get(&conn, args),
+        ConfigCommands::Set(args) => handle_config_set(&conn, args),
         ConfigCommands::SetClient(args) => {
             let mut overrides = if args.clear_all {
                 ClientOverrides::default()
@@ -709,19 +751,6 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
             println!("client overrides cleared");
             Ok(())
         }
-        ConfigCommands::Set(args) => {
-            let (key, value) = parse_config_setting(&args.setting)?;
-            match key.as_str() {
-                "allow_insecure_transfers" => {
-                    let allow = parse_bool_setting(&value)?;
-                    settings::set_allow_insecure_transfers(&conn, allow)?;
-                    info!("updated allow_insecure_transfers");
-                    println!("allow_insecure_transfers={allow}");
-                    Ok(())
-                }
-                _ => Err(anyhow!("unknown config key: {key}")),
-            }
-        }
         ConfigCommands::SetAuthOrder(args) => {
             let order = normalize_auth_order(args.order)?;
             let serialized = format_auth_order(&order);
@@ -743,6 +772,112 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
         }
         ConfigCommands::Apply(args) => handle_config_apply(args),
     }
+}
+
+fn handle_config_schema(args: ConfigSchemaArgs) -> Result<()> {
+    let output = if let Some(key) = args.key {
+        schema_output_for_key(&key)?
+    } else {
+        let schemas = settings_registry::list_schemas();
+        serde_json::to_string_pretty(&schemas)?
+    };
+    println!("{output}");
+    Ok(())
+}
+
+fn handle_config_keys() -> Result<()> {
+    for key in settings_registry::list_keys() {
+        println!("{key}");
+    }
+    Ok(())
+}
+
+fn handle_config_get(conn: &Connection, args: ConfigGetArgs) -> Result<()> {
+    ensure_known_setting(&args.key)?;
+    let scope = SettingScope::parse(&args.scope)
+        .map_err(|err| anyhow!("invalid scope '{}': {err}", args.scope))?;
+    ensure_scope_supported(&args.key, scope.kind())?;
+    let value = if args.resolved {
+        settings::get_setting_resolved(conn, &scope, &args.key)?
+    } else {
+        settings::get_setting_scoped(conn, &scope, &args.key)?
+    };
+    if let Some(value) = value {
+        println!("{}={}", args.key, value);
+    } else {
+        println!("{}=", args.key);
+    }
+    Ok(())
+}
+
+fn handle_config_set(conn: &Connection, args: ConfigSetArgs) -> Result<()> {
+    if args.help {
+        if let Some(key) = args.key.as_deref() {
+            println!("{}", schema_output_for_key(key)?);
+        } else {
+            let schemas = settings_registry::list_schemas();
+            println!("{}", serde_json::to_string_pretty(&schemas)?);
+        }
+        return Ok(());
+    }
+    let key = args
+        .key
+        .ok_or_else(|| anyhow!("missing config key (use --help for schema)"))?;
+    ensure_known_setting(&key)?;
+    let value = args
+        .value
+        .ok_or_else(|| anyhow!("missing value for config key '{key}'"))?;
+    let scope = SettingScope::parse(&args.scope)
+        .map_err(|err| anyhow!("invalid scope '{}': {err}", args.scope))?;
+    ensure_scope_supported(&key, scope.kind())?;
+    let normalized = match settings_registry::validate_setting_value(&key, &value) {
+        Ok(normalized) => normalized,
+        Err(err) => {
+            let schema = schema_output_for_key(&key)?;
+            return Err(anyhow!("invalid value for '{key}': {err}\n\n{schema}"));
+        }
+    };
+    settings::set_setting_scoped(conn, &scope, &key, &normalized)?;
+    let output_value = if args.resolved {
+        settings::get_setting_resolved(conn, &scope, &key)?.unwrap_or(normalized)
+    } else {
+        normalized
+    };
+    println!("{key}={output_value}");
+    Ok(())
+}
+
+fn ensure_known_setting(key: &str) -> Result<()> {
+    if settings_registry::schema_for_key(key).is_none() {
+        return Err(anyhow!(
+            "unknown config key: {key}\nknown keys: {}",
+            settings_registry::list_keys().join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_scope_supported(key: &str, scope: settings::SettingScopeKind) -> Result<()> {
+    if !settings_registry::scope_supported(key, scope)? {
+        return Err(anyhow!(
+            "config key '{key}' does not support {} scope",
+            format_scope_kind(scope)
+        ));
+    }
+    Ok(())
+}
+
+fn format_scope_kind(scope: settings::SettingScopeKind) -> &'static str {
+    match scope {
+        settings::SettingScopeKind::Global => "global",
+        settings::SettingScopeKind::Profile => "profile",
+    }
+}
+
+fn schema_output_for_key(key: &str) -> Result<String> {
+    let schema = settings_registry::schema_for_key(key)
+        .ok_or_else(|| anyhow!("unknown config key: {key}"))?;
+    Ok(serde_json::to_string_pretty(schema)?)
 }
 
 fn handle_configset(cmd: ConfigSetCommands) -> Result<()> {
@@ -820,8 +955,11 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         profile.client_overrides.as_ref(),
         &profile_store,
     )?;
-    let transfer_client =
-        resolve_client_for(via.client_kind(), profile.client_overrides.as_ref(), &profile_store)?;
+    let transfer_client = resolve_client_for(
+        via.client_kind(),
+        profile.client_overrides.as_ref(),
+        &profile_store,
+    )?;
     let auth = ssh_auth_context(profile_store.conn())?;
     emit_ssh_auth_messages(&auth);
 
@@ -1014,7 +1152,10 @@ fn normalize_auth_order(order: Vec<SshAuthMethod>) -> Result<Vec<SshAuthMethod>>
     let mut normalized = Vec::new();
     for method in order {
         if !seen.insert(method) {
-            return Err(anyhow!("auth order contains duplicate '{}'", method.as_str()));
+            return Err(anyhow!(
+                "auth order contains duplicate '{}'",
+                method.as_str()
+            ));
         }
         normalized.push(method);
     }
@@ -1058,7 +1199,11 @@ fn format_auth_order(order: &[SshAuthMethod]) -> String {
 }
 
 fn default_auth_order() -> Vec<SshAuthMethod> {
-    vec![SshAuthMethod::Agent, SshAuthMethod::Keys, SshAuthMethod::Password]
+    vec![
+        SshAuthMethod::Agent,
+        SshAuthMethod::Keys,
+        SshAuthMethod::Password,
+    ]
 }
 
 fn load_ssh_auth_order(conn: &Connection) -> Result<Vec<SshAuthMethod>> {
@@ -1092,7 +1237,10 @@ fn detect_ssh_auth_availability() -> SshAuthAvailability {
     SshAuthAvailability { agent, keys }
 }
 
-fn build_ssh_auth_args(order: &[SshAuthMethod], availability: &SshAuthAvailability) -> Vec<OsString> {
+fn build_ssh_auth_args(
+    order: &[SshAuthMethod],
+    availability: &SshAuthAvailability,
+) -> Vec<OsString> {
     let mut preferred = Vec::new();
     let mut publickey_added = false;
     for method in order {
@@ -1597,9 +1745,7 @@ fn handle_test(profile_id: String, json: bool, ssh: bool) -> Result<()> {
         .get(&profile_id)?
         .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
     if !tester::is_network_profile(&profile) {
-        return Err(anyhow!(
-            "test only supports ssh/telnet profiles for now"
-        ));
+        return Err(anyhow!("test only supports ssh/telnet profiles for now"));
     }
     if ssh && profile.profile_type != ProfileType::Ssh {
         return Err(anyhow!("--ssh is only supported for SSH profiles"));
@@ -1608,11 +1754,8 @@ fn handle_test(profile_id: String, json: bool, ssh: bool) -> Result<()> {
     let mut options = TestOptions::default();
     let mut client_used = None;
     if ssh {
-        let ssh_path = resolve_client_for(
-            ClientKind::Ssh,
-            profile.client_overrides.as_ref(),
-            &store,
-        )?;
+        let ssh_path =
+            resolve_client_for(ClientKind::Ssh, profile.client_overrides.as_ref(), &store)?;
         let auth = ssh_auth_context(store.conn())?;
         emit_ssh_auth_messages(&auth);
         client_used = Some(ssh_path.to_string_lossy().into_owned());
@@ -1758,10 +1901,16 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
-    let src_client =
-        resolve_client_for(via.client_kind(), src_profile.client_overrides.as_ref(), &store)?;
-    let dst_client =
-        resolve_client_for(via.client_kind(), dst_profile.client_overrides.as_ref(), &store)?;
+    let src_client = resolve_client_for(
+        via.client_kind(),
+        src_profile.client_overrides.as_ref(),
+        &store,
+    )?;
+    let dst_client = resolve_client_for(
+        via.client_kind(),
+        dst_profile.client_overrides.as_ref(),
+        &store,
+    )?;
     let temp_dir = TransferTempDir::new("xfer")?;
     let temp_file = temp_dir.path().join(filename_from_remote(&args.src_path));
 
@@ -2018,10 +2167,7 @@ fn spawn_tty_initial_send(initial_send: String) {
     });
 }
 
-fn spawn_serial_initial_send(
-    port: &mut Box<dyn serialport::SerialPort>,
-    initial_send: String,
-) {
+fn spawn_serial_initial_send(port: &mut Box<dyn serialport::SerialPort>, initial_send: String) {
     let mut port_writer = match port.try_clone() {
         Ok(writer) => writer,
         Err(err) => {
@@ -2125,29 +2271,6 @@ fn parse_client_overrides(raw: Option<String>) -> Result<Option<ClientOverrides>
     match raw {
         Some(json) => Ok(Some(serde_json::from_str(&json)?)),
         None => Ok(None),
-    }
-}
-
-fn parse_config_setting(raw: &str) -> Result<(String, String)> {
-    let mut parts = raw.splitn(2, '=');
-    let key = parts
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("invalid setting (missing key): {raw}"))?;
-    let value = parts
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("invalid setting (missing value): {raw}"))?;
-    Ok((key.to_string(), value.to_string()))
-}
-
-fn parse_bool_setting(raw: &str) -> Result<bool> {
-    match raw.trim().to_lowercase().as_str() {
-        "true" | "1" | "yes" | "y" => Ok(true),
-        "false" | "0" | "no" | "n" => Ok(false),
-        _ => Err(anyhow!("invalid boolean value: {raw}")),
     }
 }
 
@@ -2368,14 +2491,15 @@ mod tests {
 
     #[test]
     fn parses_config_set_allow_insecure_transfers() {
-        let cli = Cli::try_parse_from(["td", "config", "set", "allow_insecure_transfers=true"])
+        let cli = Cli::try_parse_from(["td", "config", "set", "allow_insecure_transfers", "true"])
             .expect("parses config set");
 
         match cli.command {
             Some(Commands::Config {
                 command: ConfigCommands::Set(args),
             }) => {
-                assert_eq!(args.setting, "allow_insecure_transfers=true");
+                assert_eq!(args.key.as_deref(), Some("allow_insecure_transfers"));
+                assert_eq!(args.value.as_deref(), Some("true"));
             }
             _ => panic!("expected config set command"),
         }
