@@ -18,6 +18,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - [x] (2026-01-10 01:58Z) Added serial connect passthrough using serialport + raw terminal mode and wired `td connect` to it.
 - [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 - [ ] (2026-01-10 01:58Z) Re-run `cargo test` after serial dependencies (blocked by crates.io CONNECT 403; retry when registry is reachable).
+- [ ] (2026-01-10 15:56Z) Retried `cargo test`; crates.io CONNECT 403 persists with new dependencies, so validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -26,6 +27,7 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - Cargo registry access is still blocked (CONNECT 403), so test runs cannot be validated locally yet.
 - Registry access was restored by 2026-01-09, allowing `cargo test` to pass successfully.
 - Registry access appears blocked again after adding serial dependencies, so the latest `cargo test` run failed while fetching crates.
+- Retried `cargo test` on 2026-01-10 and still hit CONNECT 403 fetching the crates.io index.
 
 ## Decision Log
 

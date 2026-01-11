@@ -11,11 +11,13 @@ Enable PROJECT_PLAN.md Phase 15’s serial connect path so users can select a se
 - [x] (2026-01-10 01:58Z) Added serial connect implementation in the CLI with raw-mode passthrough and op_log entries.
 - [x] (2026-01-10 01:58Z) Added `serialport` and `crossterm` workspace dependencies to support serial I/O and raw terminal mode.
 - [ ] (2026-01-10 01:58Z) Run `cargo test` (blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
+- [ ] (2026-01-10 15:56Z) Retried `cargo test`; crates.io CONNECT 403 persists, so workspace validation remains blocked.
 
 ## Surprises & Discoveries
 
 - Cargo registry access is currently blocked again (CONNECT tunnel 403), so new dependencies cannot be fetched and tests cannot be executed in this environment.
 - Serialport IO requires a short timeout to keep the read thread responsive so it can observe the shutdown flag.
+- Reattempted `cargo test` on 2026-01-10 still failed with CONNECT 403 while fetching the crates.io index.
 
 ## Decision Log
 
