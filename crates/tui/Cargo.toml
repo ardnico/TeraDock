@@ -7,4 +7,7 @@ edition = "2021"
 anyhow = { workspace = true }
 crossterm = { workspace = true }
 ratatui = "0.26.3"
+serde_json = { workspace = true }
+wait-timeout = { workspace = true }
+directories = { workspace = true }
 tdcore = { path = "../core" }

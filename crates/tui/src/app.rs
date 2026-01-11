@@ -9,16 +9,18 @@ use crossterm::terminal::{
 use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use tdcore::cmdset::CmdSetStore;
 use tdcore::db;
 use tdcore::profile::ProfileStore;
 
-use crate::state::{AppState, InputMode};
+use crate::state::{ActivePane, AppState, InputMode, ResultTab};
 use crate::ui;
 
 pub fn run() -> Result<()> {
     let conn = db::init_connection()?;
     let store = ProfileStore::new(conn);
-    let mut state = AppState::new(store)?;
+    let cmdset_store = CmdSetStore::new(db::init_connection()?);
+    let mut state = AppState::new(store, cmdset_store)?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -79,6 +81,9 @@ fn handle_search_key(state: &mut AppState, code: KeyCode) -> Result<()> {
 }
 
 fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
+    if state.confirm_state().is_some() {
+        return handle_confirm_key(state, code).map(|_| false);
+    }
     match code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('/') => state.enter_search(),
@@ -89,7 +94,41 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
         KeyCode::Char('[') => state.tag_cursor_prev(),
         KeyCode::Char(']') => state.tag_cursor_next(),
         KeyCode::Char(' ') => state.toggle_tag()?,
+        KeyCode::Tab => state.cycle_pane(),
+        KeyCode::Up | KeyCode::Char('k') => match state.active_pane() {
+            ActivePane::Profiles => state.prev_profile(),
+            ActivePane::Actions => state.prev_cmdset(),
+            ActivePane::Results => {}
+        },
+        KeyCode::Down | KeyCode::Char('j') => match state.active_pane() {
+            ActivePane::Profiles => state.next_profile(),
+            ActivePane::Actions => state.next_cmdset(),
+            ActivePane::Results => {}
+        },
+        KeyCode::Left | KeyCode::Char('h') => match state.active_pane() {
+            ActivePane::Results => state.prev_result_tab(),
+            ActivePane::Actions | ActivePane::Profiles => {}
+        },
+        KeyCode::Right | KeyCode::Char('l') => match state.active_pane() {
+            ActivePane::Results => state.next_result_tab(),
+            ActivePane::Actions | ActivePane::Profiles => {}
+        },
+        KeyCode::Char('1') => state.set_result_tab(ResultTab::Stdout),
+        KeyCode::Char('2') => state.set_result_tab(ResultTab::Stderr),
+        KeyCode::Char('3') => state.set_result_tab(ResultTab::Parsed),
+        KeyCode::Char('r') | KeyCode::Enter => state.request_run()?,
         _ => {}
     }
     Ok(false)
+}
+
+fn handle_confirm_key(state: &mut AppState, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => state.confirm_action(),
+        KeyCode::Char('n') | KeyCode::Esc => {
+            state.cancel_confirm();
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
