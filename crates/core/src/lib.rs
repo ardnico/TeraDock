@@ -1,14 +1,22 @@
+pub mod cmdset;
+pub mod configset;
 pub mod crypto;
 pub mod cmdset;
 pub mod db;
-pub mod error;
+pub mod agent;
 pub mod doctor;
+pub mod error;
+pub mod import_export;
 pub mod oplog;
 pub mod parser;
 pub mod paths;
 pub mod profile;
 pub mod secret;
 pub mod settings;
+pub mod settings_registry;
+pub mod tester;
+pub mod tunnel;
+pub mod transfer;
 pub mod util;
 
 pub use common::id;

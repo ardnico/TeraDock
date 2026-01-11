@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+ratatui = "0.26.3"
+serde_json = { workspace = true }
+wait-timeout = { workspace = true }
+directories = { workspace = true }
+tdcore = { path = "../core" }

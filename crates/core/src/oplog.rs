@@ -61,6 +61,7 @@ mod tests {
                 group: None,
                 tags: vec![],
                 note: None,
+                initial_send: None,
                 client_overrides: None,
             })
             .unwrap();

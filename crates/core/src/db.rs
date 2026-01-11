@@ -25,7 +25,7 @@ fn configure_connection(conn: &mut Connection) -> Result<()> {
 }
 
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
-    let current: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut current: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if current < 1 {
         info!("applying schema v1");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
@@ -137,6 +137,64 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
             "#,
         )?;
         tx.commit()?;
+        current = 1;
+    }
+    if current < 2 {
+        info!("applying schema v2");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            ALTER TABLE profiles ADD COLUMN initial_send TEXT;
+            PRAGMA user_version = 2;
+            "#,
+        )?;
+        tx.commit()?;
+        current = 2;
+    }
+    if current < 3 {
+        info!("applying schema v3");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS settings_new (
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(scope, key)
+            );
+
+            INSERT INTO settings_new (scope, key, value)
+            SELECT 'global', key, value FROM settings;
+
+            DROP TABLE settings;
+            ALTER TABLE settings_new RENAME TO settings;
+
+            PRAGMA user_version = 3;
+            "#,
+        )?;
+        tx.commit()?;
+        current = 3;
+    }
+    if current < 4 {
+        info!("applying schema v4");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                profile_id TEXT NOT NULL,
+                pid INTEGER,
+                started_at INTEGER NOT NULL,
+                forwards_json TEXT NOT NULL,
+                FOREIGN KEY(profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+            );
+
+            PRAGMA user_version = 4;
+            "#,
+        )?;
+        tx.commit()?;
+        current = 4;
     }
     Ok(())
 }

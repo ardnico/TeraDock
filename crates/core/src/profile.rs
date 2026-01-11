@@ -17,7 +17,7 @@ pub enum ProfileType {
 }
 
 impl ProfileType {
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "ssh" => Ok(Self::Ssh),
             "telnet" => Ok(Self::Telnet),
@@ -62,7 +62,7 @@ impl fmt::Display for DangerLevel {
 }
 
 impl DangerLevel {
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "normal" => Ok(DangerLevel::Normal),
             "high" => Ok(DangerLevel::High),
@@ -84,6 +84,7 @@ pub struct Profile {
     pub group: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
+    pub initial_send: Option<String>,
     pub client_overrides: Option<ClientOverrides>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -102,6 +103,7 @@ pub struct NewProfile {
     pub group: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
+    pub initial_send: Option<String>,
     pub client_overrides: Option<ClientOverrides>,
 }
 
@@ -136,6 +138,7 @@ pub struct UpdateProfile {
     pub group: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub note: Option<Option<String>>,
+    pub initial_send: Option<Option<String>>,
     pub client_overrides: Option<Option<ClientOverrides>>,
 }
 
@@ -166,8 +169,8 @@ impl ProfileStore {
             r#"
             INSERT INTO profiles (
                 profile_id, name, type, host, port, user, danger_level, "group",
-                tags_json, note, client_overrides_json, created_at, updated_at, last_used_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)
+                tags_json, note, initial_send, client_overrides_json, created_at, updated_at, last_used_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL)
             "#,
             params![
                 profile_id,
@@ -180,6 +183,7 @@ impl ProfileStore {
                 input.group,
                 tags_json,
                 input.note,
+                input.initial_send,
                 overrides_json,
                 now,
                 now
@@ -194,7 +198,7 @@ impl ProfileStore {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT profile_id, name, type, host, port, user, danger_level, "group",
-                   tags_json, note, client_overrides_json, created_at, updated_at, last_used_at
+                   tags_json, note, initial_send, client_overrides_json, created_at, updated_at, last_used_at
             FROM profiles
             WHERE profile_id = ?1
             "#,
@@ -211,7 +215,7 @@ impl ProfileStore {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT profile_id, name, type, host, port, user, danger_level, "group",
-                   tags_json, note, client_overrides_json, created_at, updated_at, last_used_at
+                   tags_json, note, initial_send, client_overrides_json, created_at, updated_at, last_used_at
             FROM profiles
             ORDER BY name ASC
             "#,
@@ -240,11 +244,10 @@ impl ProfileStore {
         }
         if !filters.tags.is_empty() {
             profiles.retain(|p| {
-                filters.tags.iter().all(|tag| {
-                    p.tags
-                        .iter()
-                        .any(|t| t.eq_ignore_ascii_case(tag.as_str()))
-                })
+                filters
+                    .tags
+                    .iter()
+                    .all(|tag| p.tags.iter().any(|t| t.eq_ignore_ascii_case(tag.as_str())))
             });
         }
         if let Some(query) = &filters.query {
@@ -291,6 +294,9 @@ impl ProfileStore {
         if let Some(note) = changes.note {
             profile.note = note;
         }
+        if let Some(initial_send) = changes.initial_send {
+            profile.initial_send = initial_send;
+        }
         if let Some(overrides) = changes.client_overrides {
             profile.client_overrides = overrides;
         }
@@ -315,9 +321,10 @@ impl ProfileStore {
                 "group" = ?7,
                 tags_json = ?8,
                 note = ?9,
-                client_overrides_json = ?10,
-                updated_at = ?11
-            WHERE profile_id = ?12
+                initial_send = ?10,
+                client_overrides_json = ?11,
+                updated_at = ?12
+            WHERE profile_id = ?13
             "#,
             params![
                 profile.name,
@@ -329,6 +336,7 @@ impl ProfileStore {
                 profile.group,
                 tags_json,
                 profile.note,
+                profile.initial_send,
                 overrides_json,
                 profile.updated_at,
                 profile.profile_id,
@@ -373,6 +381,7 @@ fn deserialize_profile(row: &Row<'_>) -> Result<Profile> {
         group: row.get("group")?,
         tags: serde_json::from_str(&tags_json)?,
         note: row.get("note")?,
+        initial_send: row.get("initial_send")?,
         client_overrides: match overrides {
             Some(raw) => Some(serde_json::from_str(&raw)?),
             None => None,
@@ -400,6 +409,7 @@ mod tests {
             group: None,
             tags: vec!["default".into()],
             note: Some("note".into()),
+            initial_send: Some("init".into()),
             client_overrides: None,
         }
     }

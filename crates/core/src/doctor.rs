@@ -1,7 +1,10 @@
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+
+use crate::agent::{self, AgentStatus};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum ClientSource {
@@ -32,6 +35,15 @@ pub struct ClientStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub clients: Vec<ClientStatus>,
+    pub agent: AgentStatus,
+    pub warnings: Vec<DoctorMessage>,
+    pub errors: Vec<DoctorMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorMessage {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +51,7 @@ pub enum ClientKind {
     Ssh,
     Scp,
     Sftp,
+    Ftp,
     Telnet,
 }
 
@@ -48,6 +61,7 @@ impl ClientKind {
             ClientKind::Ssh => "ssh",
             ClientKind::Scp => "scp",
             ClientKind::Sftp => "sftp",
+            ClientKind::Ftp => "ftp",
             ClientKind::Telnet => "telnet",
         }
     }
@@ -57,6 +71,7 @@ impl ClientKind {
             ClientKind::Ssh => &["ssh", "ssh.exe"],
             ClientKind::Scp => &["scp", "scp.exe"],
             ClientKind::Sftp => &["sftp", "sftp.exe"],
+            ClientKind::Ftp => &["ftp", "ftp.exe"],
             ClientKind::Telnet => &["telnet", "telnet.exe"],
         }
     }
@@ -67,6 +82,7 @@ pub struct ClientOverrides {
     pub ssh: Option<String>,
     pub scp: Option<String>,
     pub sftp: Option<String>,
+    pub ftp: Option<String>,
     pub telnet: Option<String>,
 }
 
@@ -76,12 +92,13 @@ impl ClientOverrides {
             ClientKind::Ssh => self.ssh.as_deref(),
             ClientKind::Scp => self.scp.as_deref(),
             ClientKind::Sftp => self.sftp.as_deref(),
+            ClientKind::Ftp => self.ftp.as_deref(),
             ClientKind::Telnet => self.telnet.as_deref(),
         }
     }
 }
 
-/// Check for required external clients (ssh/scp/sftp/telnet) in PATH.
+/// Check for required external clients (ssh/scp/sftp/ftp/telnet) in PATH.
 pub fn check_clients() -> DoctorReport {
     check_clients_with_overrides(None, None)
 }
@@ -96,6 +113,7 @@ pub fn check_clients_with_overrides(
         ClientKind::Ssh,
         ClientKind::Scp,
         ClientKind::Sftp,
+        ClientKind::Ftp,
         ClientKind::Telnet,
     ] {
         let resolved =
@@ -106,7 +124,34 @@ pub fn check_clients_with_overrides(
             source: resolved.source,
         });
     }
-    DoctorReport { clients }
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let agent_status = agent::status();
+    if agent_status.auth_sock.is_none() {
+        warnings.push(DoctorMessage {
+            code: "ssh_agent_missing".to_string(),
+            message: "SSH_AUTH_SOCK is not set; ssh-agent may be unavailable.".to_string(),
+        });
+    }
+    if agent_status.auth_sock.is_some() {
+        if let Some(error) = &agent_status.error {
+            warnings.push(DoctorMessage {
+                code: "ssh_agent_list_failed".to_string(),
+                message: format!("ssh-agent keys could not be listed: {error}"),
+            });
+        }
+    }
+    let base_dirs = BaseDirs::new();
+    let home = base_dirs.as_ref().map(|dirs| dirs.home_dir());
+    for path in ssh_config_paths(home) {
+        scan_ssh_config(&path, home, &mut warnings, &mut errors);
+    }
+    DoctorReport {
+        clients,
+        agent: agent_status,
+        warnings,
+        errors,
+    }
 }
 
 /// Resolve the first matching client executable from PATH using common extensions.
@@ -195,6 +240,109 @@ fn valid_override(path: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn ssh_config_paths(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = home {
+        paths.push(home.join(".ssh").join("config"));
+    }
+    if cfg!(unix) {
+        paths.push(PathBuf::from("/etc/ssh/ssh_config"));
+    } else if cfg!(windows) {
+        if let Some(program_data) = env::var_os("PROGRAMDATA") {
+            paths.push(PathBuf::from(program_data).join("ssh").join("ssh_config"));
+        }
+    }
+    paths
+}
+
+fn scan_ssh_config(
+    path: &Path,
+    home: Option<&Path>,
+    warnings: &mut Vec<DoctorMessage>,
+    errors: &mut Vec<DoctorMessage>,
+) {
+    if !path.is_file() {
+        return;
+    }
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        warnings.push(DoctorMessage {
+            code: "ssh_config_unreadable".to_string(),
+            message: format!(
+                "SSH config at {} could not be read; skipping checks.",
+                path.display()
+            ),
+        });
+        return;
+    };
+    for raw in contents.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        let key_lower = key.to_ascii_lowercase();
+        let Some(value) = parts.next() else {
+            continue;
+        };
+        if key_lower == "stricthostkeychecking" {
+            let value_lower = value.to_ascii_lowercase();
+            if matches!(value_lower.as_str(), "no" | "off" | "accept-new") {
+                warnings.push(DoctorMessage {
+                    code: "ssh_strict_host_key_unsafe".to_string(),
+                    message: format!(
+                        "SSH config {} sets StrictHostKeyChecking={} (unsafe).",
+                        path.display(),
+                        value
+                    ),
+                });
+            }
+        } else if key_lower == "userknownhostsfile" {
+            let value_lower = value.to_ascii_lowercase();
+            if matches!(value_lower.as_str(), "/dev/null" | "none" | "nul") {
+                warnings.push(DoctorMessage {
+                    code: "ssh_known_hosts_disabled".to_string(),
+                    message: format!(
+                        "SSH config {} disables known_hosts with UserKnownHostsFile={}.",
+                        path.display(),
+                        value
+                    ),
+                });
+            }
+        } else if key_lower == "identityfile" {
+            if let Some(identity_path) = normalize_identity_path(value, home) {
+                if !identity_path.is_file() {
+                    errors.push(DoctorMessage {
+                        code: "ssh_identity_missing".to_string(),
+                        message: format!(
+                            "SSH config {} references missing IdentityFile {}.",
+                            path.display(),
+                            identity_path.display()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn normalize_identity_path(raw: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let trimmed = raw.trim_matches(|c| c == '"' || c == '\'');
+    if trimmed.contains('%') {
+        return None;
+    }
+    if trimmed.starts_with("~/") {
+        return home.map(|home| home.join(trimmed.trim_start_matches("~/")));
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        return Some(path);
+    }
+    home.map(|home| home.join(path))
 }
 
 fn pathext() -> Vec<String> {
