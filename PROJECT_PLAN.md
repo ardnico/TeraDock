@@ -598,3 +598,282 @@ CI（GitHub Actions）：
 * Export/Import（refs）でバックアップ可能
 
 ---
+# PROJECT_PLAN.md 追記 - 設定強化 / TUI操作強化 / SSH転送・SSH-Agentサポート（v0.1追補）
+
+本追記は「PROJECT_PLAN.md - TeraDock（内部設計 + 実装計画）v0.1」に、追加要件（設定機能・TUI・SSH転送設定・SSH-Agentサポート）を **追記統合**するための差分仕様である。  
+このファイル単体でも読めるよう、追加分の要件・内部設計・タスク・Done条件をまとめる。
+
+---
+
+## A. 追加ゴール（この追記で増える価値）
+
+- 設定が増えても「何が効いてるか」迷子にならない（Resolved View）。
+- `td config set` 実行時に **設定可能な値（許容値）をヘルプ等で表示**できる（型付き設定 + スキーマ）。
+- TUIは「速さ」と「事故防止」を最優先にし、普段の5手がキーボードのみで完結する。
+- SSH転送（forward）の定義ルールを固定し、必要に応じて「トンネル専用」も扱える（セッション管理）。
+- SSH-Agent利用は “動いてるか/鍵が入ってるか” を可視化し、必要な範囲で支援コマンドを用意する。
+- 既存の危険設定（FTP等）に加え、known_hosts/StrictHostKeyChecking等も安全側で扱う。
+
+---
+
+## B. 外部I/F 追加・更新（コマンド仕様の追記）
+
+### B-1. 設定（型付き・許容値ヘルプ）
+- `td config get <key> [--resolved] [--format text|json]`
+- `td config set <key> <value> [--scope global|env:<name>|profile:<id>]`
+- `td config keys [--query <q>]`  
+  設定キー一覧（説明付き）
+- `td config schema [<key>] [--format text|json]`  
+  設定スキーマ（型・許容値・デフォルト・例）を表示
+- `td config set <key> --help`  
+  **そのキーで設定可能な値（許容値）を表示**（本要件の主対象）
+
+> 要件：`set` でエラーになった場合も、許容値と例を必ず提示する。
+
+### B-2. 環境プリセット（設定プロファイル）
+- `td env list`
+- `td env use <name>`
+- `td env show <name>`
+- `td env set <name>.<key> <value>`（内部的には scope=env）
+
+### B-3. Resolved View（最終適用値）
+- CLI: `td show <profile_id> --resolved`
+- TUI: 詳細ペインで「生値 + グローバル + env + profile override + コマンド一時指定」を合成した **最終適用値**を表示
+
+### B-4. SSH-Agent支援
+- `td agent status [--format text|json]`
+- `td agent list`（可能なら `ssh-add -l` を要約）
+- `td agent add <key_path>`（勝手にやらない／必ずユーザ操作）
+- `td agent clear`（危険操作：二段階確認）
+
+### B-5. Forward / tunnel / sessions
+- `td tunnel start <profile_id> [--forward <name>...]`
+- `td tunnel status [--format text|json]`
+- `td tunnel stop <session_id>`
+- `td sessions list`
+- `td sessions stop <session_id>`
+
+---
+
+## C. 内部設計 追加（重要部分のみ）
+
+### C-1. 設定システム（Settings Registry + 型 + スキーマ）
+
+#### C-1-1. 設定のスコープと優先順位
+- スコープ：
+  - `global`
+  - `env:<name>`
+  - `profile:<id>`
+  - `command`（一時オプション：CLI引数/TUI実行時）
+- 優先順位：
+  - `command` > `profile` > `env` > `global`
+
+#### C-1-2. 設定レジストリ（コンパイル時定義）
+- `SettingKey` を列挙し、各キーに以下を持たせる：
+  - `key`（例：`ssh.use_agent`）
+  - `type`（bool/int/enum/duration/path/string）
+  - `default`
+  - `description`
+  - `allowed_values`（enumの場合は必須、範囲制約もここで）
+  - `examples`（1〜3個）
+  - `dangerous` フラグ（trueの場合は二重ロック対象）
+
+> ここが「`td config set --help` で許容値を表示する」ための根幹。
+
+#### C-1-3. 設定保存
+- DBテーブル（既存 `settings`）を拡張してスコープを持つ：
+  - `settings(scope TEXT, key TEXT, value TEXT, PRIMARY KEY(scope,key))`
+- `env` 管理：
+  - `current_env` を `settings(global, "env.current", "<name>")` で保持
+  - `env` 自体は scope=`env:<name>` に格納
+
+#### C-1-4. バリデーション・エラーUX
+- `set` は必ず型変換と制約チェックを行う。
+- 失敗時は以下を出す（text/json両対応）：
+  - エラー理由（例：enumに存在しない）
+  - 許容値一覧（allowed_values）
+  - 例（examples）
+  - 参照：`td config schema <key>`
+
+#### C-1-5. Resolved View 実装
+- `ResolvedConfig` を生成する関数を core に置く：
+  - inputs: global/env/profile/command overrides
+  - outputs: 最終適用値（どのスコープが勝ったかの由来も保持）
+
+---
+
+### C-2. SSH forward（仕様固定 + 健全性チェック）
+
+#### C-2-1. forward のルール
+- forward は `name` 必須かつ profile内でユニーク
+- `listen` が portのみなら `127.0.0.1:<port>` に解釈（安全側）
+- `dest` の host省略は禁止（明示必須）
+- `D` は `dest` なし
+
+#### C-2-2. forward の既定有効
+- `enabled_by_default` を持たせる（connect時に自動適用できる）
+
+#### C-2-3. 健全性チェック（doctor/test連携）
+- listenポート使用中（ローカル側）を検知して警告
+- Linuxの低番ポート権限警告
+- jump経由の場合の到達性ヒント（可能な範囲）
+
+---
+
+### C-3. セッション管理（tunnel/sessions）
+- `sessions` テーブル（または `op_logs` 拡張）に以下を保持：
+  - `session_id`（自動生成）
+  - `kind`（connect/tunnel）
+  - `profile_id`
+  - `pid`（可能なら）
+  - `started_at`
+  - `forwards_applied[]`
+- stop は pid kill を基本（OS差分注意）
+- status は “生存確認” を行い、死んでるセッションは掃除する
+
+---
+
+### C-4. SSH-Agentサポート
+
+#### C-4-1. 対象を明確化
+- v0.1は OpenSSH の `ssh-agent` を対象
+- 将来：
+  - Pageant / 1Password / Bitwarden などは “対象外” と明記し、後で拡張
+
+#### C-4-2. `agent status` の中身
+- `SSH_AUTH_SOCK` の有無（Linux）
+- Windowsの場合は `ssh-agent` サービス/プロセスの検知（可能な範囲）
+- `ssh-add -l` を実行できれば鍵本数等を要約
+
+#### C-4-3. known_hosts / StrictHostKeyChecking
+- デフォルトは安全側（OpenSSHの通常挙動に準拠）
+- これを緩める設定は “危険設定” として二重ロック対象にする
+  - 設定で許可
+  - 実行時フラグで許可
+  - ログに insecure を明記
+
+---
+
+### C-5. TUI操作強化（速度 + 事故防止）
+
+#### C-5-1. キーバインド（案）
+- `/` 検索
+- `Enter` connect（デフォ）
+- `e` exec
+- `r` run（cmdset選択）
+- `t` transfer（push/pull/xfer選択）
+- `c` config apply
+- `d` details（Resolved View）
+- `?` help
+- `Space` マーク（複数選択）
+- `R` 一括 run（マーク対象にcmdset実行）
+
+#### C-5-2. 二段階確認（critical）
+- TUIは “Enter連打事故” が起きるため、criticalは文字入力確認を採用（例：profile_idをタイプ）
+- “一定時間の緩和” は設定で可能（例：10分）だがデフォはOFF推奨
+
+#### C-5-3. 実行キュー（複数対象）
+- マークした複数プロファイルに `run` を実行
+- 結果サマリ（成功/失敗/失敗理由）を一覧化
+- execは将来（v0.1はrun優先）
+
+---
+
+## D. 既存実装計画への追記（フェーズ追加・修正）
+
+既存の Phase 0〜18 に以下を追記する（順序は外部設計の優先順位に合わせる）。
+
+### 追加 Phase S1: Settings Registry + `config set` 許容値ヘルプ（最優先の土台）
+- SettingKeyレジストリ（型、default、allowed_values、examples、dangerous）
+- `td config schema`, `td config keys`
+- `td config set <key> --help` で許容値表示
+- バリデーションとエラー時の許容値提示
+- scope（global/env/profile）保存と解決（ResolvedConfig）
+
+完了条件：
+- 代表キーで `set --help` が許容値/例を表示できる
+- 不正値入力時に許容値が必ず提示される
+- `--resolved` で最終値が出る
+
+### 追加 Phase S2: envプリセット（work/home等）
+- `env list/use/show/set`
+- current_envの切替
+- ResolvedConfigへ統合
+
+完了条件：
+- env切替でsshクライアント等が変わる
+
+### Phase 4（doctor）を拡張
+- 依存コマンド検出に加え
+  - 設定矛盾検出（use_agent=true だがagent不在、鍵パス不存在等）
+  - known_hosts/StrictHostKeyCheckingの危険設定警告
+- json出力対応
+
+完了条件：
+- “動かない理由” が doctor で分かる
+
+### Phase 6（SSH connect）を拡張：forwardルール固定 + forward健全性
+- forward name必須/ユニークチェック
+- listen portのみの解釈固定
+- port競合警告（可能なら）
+
+### 追加 Phase S3: tunnel/sessions（必要性が出る前に最小実装）
+- `tunnel start/stop/status`
+- `sessions list/stop`
+- PID管理（可能な範囲）
+- ログにsession_idを残す
+
+完了条件：
+- トンネルを張って状況が追える
+
+### 追加 Phase S4: SSH-Agent支援
+- `agent status/list/add/clear`
+- doctor連携
+- プロファイル単位 `use_agent=true/false/auto` を ResolvedConfigで決定
+
+完了条件：
+- agentが“動いてるか/鍵があるか”が可視化される
+
+### Phase 17（TUI）を拡張：操作系・Resolved View・キュー実行
+- キーバインド採用
+- Resolved View表示
+- critical文字入力確認
+- 複数選択→runの一括実行と結果サマリ
+
+完了条件：
+- 普段の運用がTUIで完結し、事故が減る
+
+---
+
+## E. 追加設定キー（例：スキーマに載せる候補）
+
+以下は Settings Registry に登録する候補（例）。許容値表示の対象にもなる。
+
+- `ssh.client`（path|string）
+- `scp.client`（path|string）
+- `sftp.client`（path|string）
+- `telnet.client`（path|string）
+- `ssh.use_agent`（bool）
+- `ssh.agent.mode`（enum: `openssh`, `custom`）
+- `ssh.strict_host_key_checking`（enum: `default`, `yes`, `no`） ※危険設定（二重ロック対象）
+- `transfer.default_via`（enum: `scp`, `sftp`）
+- `transfer.allow_insecure_transfers`（bool） ※危険設定（二重ロック対象）
+- `danger.confirm_mode`（enum: `double_enter`, `type_profile_id`）
+- `danger.relax_window_minutes`（int, default 0）
+- `ui.default_action`（enum: `connect`, `details`）
+- `ui.search_mode`（enum: `contains`, `prefix`, `fuzzy`）
+
+---
+
+## F. Done条件（追記分）
+
+- `td config set <key> --help` が **許容値・デフォルト・例** を表示できる
+- 不正値指定時は必ず許容値を提示する
+- `td show <profile> --resolved` と TUI details で最終適用値が確認できる
+- `td doctor` が依存不足 + 設定矛盾（agent等）を検知できる
+- forwardの解釈ルールが固定され、衝突や危険を警告できる
+- `td agent status` で “agentと鍵” の状態が見える
+- TUIで検索→connect/exec/run/transfer/config apply が高速に行え、criticalは文字入力確認で事故が減る
+- ftp等の危険設定は設定＋実行フラグの二重ロックで防げる
+
+---
