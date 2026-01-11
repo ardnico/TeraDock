@@ -151,5 +151,29 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
         current = 2;
     }
+    if current < 3 {
+        info!("applying schema v3");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS settings_new (
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(scope, key)
+            );
+
+            INSERT INTO settings_new (scope, key, value)
+            SELECT 'global', key, value FROM settings;
+
+            DROP TABLE settings;
+            ALTER TABLE settings_new RENAME TO settings;
+
+            PRAGMA user_version = 3;
+            "#,
+        )?;
+        tx.commit()?;
+        current = 3;
+    }
     Ok(())
 }
