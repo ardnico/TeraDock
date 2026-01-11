@@ -16,6 +16,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use tdcore::agent;
 use tdcore::cmdset::{CmdSetStore, StepOnError};
 use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
 use tdcore::db;
@@ -75,6 +76,11 @@ enum Commands {
     Env {
         #[command(subcommand)]
         command: EnvCommands,
+    },
+    /// Inspect and manage SSH agent keys
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
     },
     /// Check environment and required clients
     Doctor {
@@ -371,6 +377,26 @@ enum EnvCommands {
     Set(EnvSetArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum AgentCommands {
+    /// Show SSH agent status
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List keys loaded in ssh-agent
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a key to ssh-agent
+    Add { key_path: PathBuf },
+    /// Remove all keys from ssh-agent
+    Clear,
+}
+
 #[derive(Debug, Args)]
 struct EnvSetArgs {
     /// Env setting key in the form NAME.KEY
@@ -540,6 +566,7 @@ fn main() -> Result<()> {
         Some(Commands::ConfigSet { command }) => handle_configset(command),
         Some(Commands::Config { command }) => handle_config(command),
         Some(Commands::Env { command }) => handle_env(command),
+        Some(Commands::Agent { command }) => handle_agent(command),
         Some(Commands::Doctor { json }) => handle_doctor(json),
         Some(Commands::Exec {
             profile_id,
@@ -894,6 +921,73 @@ fn handle_env(cmd: EnvCommands) -> Result<()> {
             let scope = SettingScope::Env(env_name.clone());
             settings::set_setting_scoped(&conn, &scope, &key, &normalized)?;
             println!("{env_name}.{key}={normalized}");
+            Ok(())
+        }
+    }
+}
+
+fn handle_agent(cmd: AgentCommands) -> Result<()> {
+    match cmd {
+        AgentCommands::Status { json } => {
+            let status = agent::status();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                return Ok(());
+            }
+            if let Some(sock) = &status.auth_sock {
+                println!("SSH_AUTH_SOCK: {sock}");
+            } else {
+                println!("SSH_AUTH_SOCK: (not set)");
+            }
+            if let Some(count) = status.key_count {
+                println!("keys: {count}");
+            } else {
+                println!("keys: (unknown)");
+            }
+            if let Some(error) = &status.error {
+                println!("ssh-add: {error}");
+            }
+            Ok(())
+        }
+        AgentCommands::List { json } => {
+            let list = agent::list();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+            if let Some(error) = list.error {
+                println!("{error}");
+                return Ok(());
+            }
+            if list.keys.is_empty() {
+                println!("(no keys loaded)");
+                return Ok(());
+            }
+            for key in list.keys {
+                println!("{key}");
+            }
+            Ok(())
+        }
+        AgentCommands::Add { key_path } => {
+            ensure_agent_socket_available()?;
+            if !confirm_agent_add(&key_path)? {
+                println!("aborted");
+                return Ok(());
+            }
+            let output = agent::run_add(&key_path)?;
+            handle_ssh_add_output(output, "ssh-add add")?;
+            println!("ssh-add: key added");
+            Ok(())
+        }
+        AgentCommands::Clear => {
+            ensure_agent_socket_available()?;
+            if !confirm_agent_clear()? {
+                println!("aborted");
+                return Ok(());
+            }
+            let output = agent::run_clear()?;
+            handle_ssh_add_output(output, "ssh-add clear")?;
+            println!("ssh-add: keys cleared");
             Ok(())
         }
     }
@@ -1841,6 +1935,19 @@ fn handle_doctor(json: bool) -> Result<()> {
         println!("{serialized}");
         return Ok(());
     }
+    if let Some(sock) = &report.agent.auth_sock {
+        println!("SSH agent: {sock}");
+    } else {
+        println!("SSH agent: (not set)");
+    }
+    if let Some(count) = report.agent.key_count {
+        println!("SSH agent keys: {count}");
+    } else {
+        println!("SSH agent keys: (unknown)");
+    }
+    if let Some(error) = &report.agent.error {
+        println!("SSH agent error: {error}");
+    }
     let note = if global_overrides.is_some() {
         " (global overrides applied)"
     } else {
@@ -2636,6 +2743,64 @@ fn filename_from_remote(remote_path: &str) -> PathBuf {
         .file_name()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("transfer.bin"))
+}
+
+fn ensure_agent_socket_available() -> Result<()> {
+    let status = agent::status();
+    if status.auth_sock.is_some() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "SSH_AUTH_SOCK is not set; start ssh-agent before using td agent"
+        ))
+    }
+}
+
+fn confirm_agent_add(key_path: &Path) -> Result<bool> {
+    println!("About to add key to ssh-agent: {}", key_path.display());
+    print!("Type 'yes' to continue: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("yes"))
+}
+
+fn confirm_agent_clear() -> Result<bool> {
+    println!("About to remove all keys from ssh-agent.");
+    print!("Type 'yes' to continue: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if !input.trim().eq_ignore_ascii_case("yes") {
+        return Ok(false);
+    }
+    print!("Type 'clear' to confirm: ");
+    io::stdout().flush()?;
+    input.clear();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("clear"))
+}
+
+fn handle_ssh_add_output(output: std::process::Output, label: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut detail = String::new();
+    if !stderr.is_empty() {
+        detail.push_str(&format!("stderr: {stderr}"));
+    }
+    if !stdout.is_empty() {
+        if !detail.is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str(&format!("stdout: {stdout}"));
+    }
+    if detail.is_empty() {
+        detail = format!("exit status: {}", output.status);
+    }
+    Err(anyhow!("{label} failed: {detail}"))
 }
 
 fn confirm_danger(profile: &Profile) -> Result<bool> {

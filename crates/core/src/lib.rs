@@ -2,6 +2,7 @@ pub mod cmdset;
 pub mod configset;
 pub mod crypto;
 pub mod db;
+pub mod agent;
 pub mod doctor;
 pub mod error;
 pub mod import_export;

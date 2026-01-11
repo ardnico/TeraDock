@@ -23,7 +23,7 @@ static ID_REGEX: Lazy<Regex> =
 static RESERVED: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         "list", "add", "rm", "connect", "exec", "run", "doctor", "secret", "config", "push",
-        "pull", "xfer", "test", "ui",
+        "pull", "xfer", "test", "ui", "agent",
     ]
     .into_iter()
     .collect()
