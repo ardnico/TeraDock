@@ -16,7 +16,9 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use tdcore::agent;
 use tdcore::cmdset::{CmdSetStore, StepOnError};
+use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
 use tdcore::import_export::{self, ConflictStrategy, ExportDocument, ImportReport};
@@ -865,29 +867,6 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
     }
 }
 
-fn handle_exec(
-    profile_id: String,
-    timeout_ms: Option<u64>,
-    json_output: bool,
-    parser: Option<String>,
-    cmd: Vec<String>,
-) -> Result<()> {
-    if cmd.is_empty() {
-        return Err(anyhow!("no command provided; pass after --"));
-    }
-    let store = ProfileStore::new(db::init_connection()?);
-    let profile = store
-        .get(&profile_id)?
-        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
-    if profile.profile_type != ProfileType::Ssh {
-        return Err(anyhow!("exec only supports SSH profiles for now"));
-    }
-    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
-        println!("Aborted by user.");
-        return Ok(());
-    }
-}
-
 fn handle_agent(cmd: AgentCommands) -> Result<()> {
     match cmd {
         AgentCommands::Status { json } => {
@@ -950,6 +929,68 @@ fn handle_agent(cmd: AgentCommands) -> Result<()> {
             let output = agent::run_clear()?;
             handle_ssh_add_output(output, "ssh-add clear")?;
             println!("ssh-add: keys cleared");
+            Ok(())
+        }
+    }
+}
+
+fn handle_env(cmd: EnvCommands) -> Result<()> {
+    let conn = db::init_connection()?;
+    match cmd {
+        EnvCommands::List => {
+            let current = settings::get_current_env(&conn)?;
+            let envs = settings::list_env_names(&conn)?;
+            if envs.is_empty() {
+                if let Some(current) = current {
+                    println!("{current} *");
+                } else {
+                    println!("(no env presets)");
+                }
+                return Ok(());
+            }
+            for env in envs {
+                if current.as_deref() == Some(env.as_str()) {
+                    println!("{env} *");
+                } else {
+                    println!("{env}");
+                }
+            }
+            Ok(())
+        }
+        EnvCommands::Use { name } => {
+            let name = normalize_env_name(&name)?;
+            settings::set_current_env(&conn, &name)?;
+            println!("{name}");
+            Ok(())
+        }
+        EnvCommands::Show { name } => {
+            let name = normalize_env_name(&name)?;
+            let scope = SettingScope::Env(name);
+            let settings = settings::list_settings_scoped(&conn, &scope)?;
+            if settings.is_empty() {
+                println!("(no settings)");
+                return Ok(());
+            }
+            for (key, value) in settings {
+                println!("{key}={value}");
+            }
+            Ok(())
+        }
+        EnvCommands::Set(args) => {
+            let (name, key) = parse_env_key(&args.name_key)?;
+            let name = normalize_env_name(&name)?;
+            ensure_known_setting(&key)?;
+            ensure_scope_supported(&key, settings::SettingScopeKind::Env)?;
+            let normalized = match settings_registry::validate_setting_value(&key, &args.value) {
+                Ok(normalized) => normalized,
+                Err(err) => {
+                    let schema = schema_output_for_key(&key)?;
+                    return Err(anyhow!("invalid value for '{key}': {err}\n\n{schema}"));
+                }
+            };
+            let scope = SettingScope::Env(name);
+            settings::set_setting_scoped(&conn, &scope, &key, &normalized)?;
+            println!("{key}={normalized}");
             Ok(())
         }
     }
@@ -1673,6 +1714,7 @@ fn handle_exec(
     profile_id: String,
     timeout_ms: Option<u64>,
     json_output: bool,
+    parser: Option<String>,
     cmd: Vec<String>,
 ) -> Result<()> {
     if cmd.is_empty() {
