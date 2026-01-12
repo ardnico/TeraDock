@@ -55,7 +55,6 @@ pub struct RunResult {
     pub stdout: String,
     pub stderr: String,
     pub parsed_pretty: String,
-    pub steps: Vec<StepResult>,
     pub error: Option<String>,
 }
 
@@ -68,7 +67,6 @@ impl RunResult {
             stdout: String::new(),
             stderr: String::new(),
             parsed_pretty: "{}".to_string(),
-            steps: Vec::new(),
             error: Some(err.to_string()),
         }
     }
@@ -155,10 +153,6 @@ impl AppState {
 
     pub fn filtered(&self) -> &[Profile] {
         &self.filtered
-    }
-
-    pub fn groups(&self) -> &[String] {
-        &self.groups
     }
 
     pub fn tags(&self) -> &[String] {
@@ -563,7 +557,6 @@ impl AppState {
             stdout: stdout_all,
             stderr: stderr_all,
             parsed_pretty,
-            steps: step_results,
             error: None,
         })
     }
@@ -763,7 +756,12 @@ fn build_ssh_auth_args(
     for method in order {
         match method {
             SshAuthMethod::Agent | SshAuthMethod::Keys => {
-                if !publickey_added {
+                let available = match method {
+                    SshAuthMethod::Agent => availability.agent,
+                    SshAuthMethod::Keys => availability.keys,
+                    _ => false,
+                };
+                if !publickey_added && available {
                     preferred.push("publickey");
                     publickey_added = true;
                 }

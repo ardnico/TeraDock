@@ -16,6 +16,7 @@ Users need a way to persist SSH forward definitions, start long-running SSH tunn
 - [x] (2026-01-11 16:55Z) Restored CLI dispatch for `td tunnel` commands and added process termination handling for tunnel stop.
 - [ ] (2026-01-11 16:01Z) Validate tunnel lifecycle manually and record any observed output in this plan.
 - [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
+- [ ] (2026-01-12 08:54Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 - [x] (2026-01-11 16:01Z) Updated the ExecPlan with implementation outcomes and decisions.
 
 ## Surprises & Discoveries
