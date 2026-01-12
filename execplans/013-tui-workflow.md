@@ -17,6 +17,8 @@ Deliver a full-screen terminal UI that lets a user browse profiles, choose an ac
 - [x] (2025-02-14 01:45Z) Wired input handling for navigation, confirmations, and executing runs.
 - [ ] Validate run flow with command preview masking and results view updates.
 - [ ] (2026-01-11 17:09Z) Attempted to run the TUI for validation, but `cargo build -p tui` failed (crates.io CONNECT 403), so the UI could not be launched.
+- [ ] (2026-01-12 08:54Z) Attempted to run the TUI for validation, but `cargo build -p tui` failed (crates.io CONNECT 403), so the UI could not be launched.
+- [ ] (2026-01-12 13:49Z) Attempted to run the TUI for validation, but `cargo build -p tui` failed (crates.io CONNECT 403), so the UI could not be launched.
 
 ## Surprises & Discoveries
 

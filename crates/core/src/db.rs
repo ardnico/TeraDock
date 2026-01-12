@@ -194,7 +194,6 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
             "#,
         )?;
         tx.commit()?;
-        current = 4;
     }
     Ok(())
 }

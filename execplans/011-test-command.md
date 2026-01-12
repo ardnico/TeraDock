@@ -15,6 +15,8 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
 - [x] (2026-01-11 16:55Z) Restored CLI handler wiring for `td test` and op_logs reporting after detecting a missing dispatch path.
 - [ ] (2026-01-12 12:50Z) Validate behavior against a reachable host (blocked: no known reachable host in this environment).
 - [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
+- [ ] (2026-01-12 08:54Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
+- [ ] (2026-01-12 13:49Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 
 ## Surprises & Discoveries
 
