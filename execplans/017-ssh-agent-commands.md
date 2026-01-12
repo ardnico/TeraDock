@@ -13,8 +13,6 @@ Users need to see and manage their SSH agent state directly from TeraDock, inclu
 - [x] (2025-02-15 01:35Z) Wired `td agent status/list/add/clear` CLI commands with confirmation prompts and output formatting.
 - [x] (2025-02-15 01:40Z) Registered SSH agent config key in settings registry so resolved config commands recognize it.
 - [ ] (2025-02-15 01:45Z) Validate behavior with manual CLI invocations and update progress logs.
-- [ ] (2026-01-11 17:09Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
-- [ ] (2026-01-12 08:54Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 
 ## Surprises & Discoveries
 

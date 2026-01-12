@@ -10,10 +10,6 @@ Users can execute a stored CommandSet against an SSH profile using `td run <prof
 
 - [x] (2026-01-11 05:58Z) Drafted and implemented CommandSet storage types, parser handling, and CLI `td run` execution path.
 - [x] (2026-01-11 06:51Z) Added unit tests for CommandSet loading and parser behavior.
-- [ ] (2026-01-11 05:58Z) Run `cargo test` (blocked by crates.io CONNECT 403 in this environment; retry when registry is reachable).
-- [ ] (2026-01-11 06:00Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download data-encoding), so workspace validation remains blocked.
-- [ ] (2026-01-11 16:55Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
-- [ ] (2026-01-11 17:09Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 - [ ] (2026-01-12 08:54Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 
 ## Surprises & Discoveries

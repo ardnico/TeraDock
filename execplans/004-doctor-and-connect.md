@@ -18,9 +18,6 @@ Advance PROJECT_PLAN.md Phase 4-6 by adding `td doctor` to detect external clien
 - [x] (2026-01-10 01:58Z) Added serial connect passthrough using serialport + raw terminal mode and wired `td connect` to it.
 - [x] (2026-01-09 15:49Z) Ran `cargo test`; all workspace tests passed once registry access was available.
 - [x] (2026-01-11 16:55Z) Restored CLI wiring for `td doctor` and `td connect`, ensuring initial_send handling and op_log entry creation behave as intended.
-- [ ] (2026-01-10 01:58Z) Re-run `cargo test` after serial dependencies (blocked by crates.io CONNECT 403; retry when registry is reachable).
-- [ ] (2026-01-10 15:56Z) Retried `cargo test`; crates.io CONNECT 403 persists with new dependencies, so validation remains blocked.
-- [ ] (2026-01-11 16:55Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 - [ ] (2026-01-11 17:09Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 
 ## Surprises & Discoveries
