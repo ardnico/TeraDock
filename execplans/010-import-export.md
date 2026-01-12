@@ -15,6 +15,7 @@ Users need a reliable way to export their profiles, command sets, configs, and r
 - [x] (2025-09-27 01:10Z) Wired `td export` and `td import` CLI commands in `crates/cli/src/main.rs` to call the new module, parse flags, and implement conflict strategy (reject or rename) on import.
 - [ ] (2025-09-27 01:15Z) Validate end-to-end: export JSON, wipe DB, re-import, verify preserved IDs and conflict behavior; document commands and results here.
 - [ ] (2026-01-11 17:09Z) Attempted validation, but could not run `td` because `cargo build -p td` fails with crates.io CONNECT 403 in this environment.
+- [ ] (2026-01-12 08:54Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
 
 ## Surprises & Discoveries
 
