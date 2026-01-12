@@ -14,6 +14,8 @@ Users can execute a stored CommandSet against an SSH profile using `td run <prof
 - [ ] (2026-01-11 06:00Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download data-encoding), so workspace validation remains blocked.
 - [ ] (2026-01-11 16:55Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 - [ ] (2026-01-11 17:09Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
+- [ ] (2026-01-12 08:54Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
+- [ ] (2026-01-12 13:49Z) Retried `cargo test`; crates.io CONNECT 403 persists (failed to download config.json).
 
 ## Surprises & Discoveries
 
