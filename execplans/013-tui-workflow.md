@@ -16,6 +16,7 @@ Deliver a full-screen terminal UI that lets a user browse profiles, choose an ac
 - [x] (2025-02-14 01:38Z) Built multi-pane UI (profiles list, action pane with preview, results pane with tabs).
 - [x] (2025-02-14 01:45Z) Wired input handling for navigation, confirmations, and executing runs.
 - [ ] Validate run flow with command preview masking and results view updates.
+- [x] (2026-01-12 22:59Z) Retried `cargo build -p tui` to validate the run flow; build still fails with crates.io CONNECT 403, so validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -112,3 +113,4 @@ Example results tab header:
 
 Plan updated on 2025-02-14: recorded implementation progress and added the masking decision after completing core/TUI wiring.
 Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p tui`.
+Update 2026-01-12 22:59Z: Retried `cargo build -p tui`; validation remains blocked by crates.io CONNECT 403.
