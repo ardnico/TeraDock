@@ -15,6 +15,7 @@ Users need to define environment presets (like work/home) and switch between the
 - [x] (2025-02-16 01:50Z) Extend CLI with `td env list/use/show/set`, update config scope parsing to accept env scopes, and wire resolved lookups to include the current env.
 - [ ] (2025-02-16 02:00Z) Validate behavior by demonstrating that switching env changes the resolved config for a profile.
 - [x] (2025-02-16 01:55Z) Update this ExecPlan with outcomes, surprises, and decisions.
+- [x] (2026-01-12 22:59Z) Retried `cargo build -p td` to validate env switching; build still fails with crates.io CONNECT 403, so manual validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -94,3 +95,4 @@ The CLI should introduce a new `Commands::Env` variant with `EnvCommands::{List,
 
 Plan updates: Marked completed implementation steps and added an outcomes note to reflect the current state; left validation unchecked because it has not been run in this environment.
 Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
+Update 2026-01-12 22:59Z: Retried `cargo build -p td`; validation remains blocked by crates.io CONNECT 403.

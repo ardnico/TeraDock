@@ -14,6 +14,7 @@ Introduce `td test <profile_id>` so operators can quickly validate DNS resolutio
 - [x] (2026-01-12 12:44Z) Updated CLI parsing tests for the new command and documented outcomes.
 - [x] (2026-01-11 16:55Z) Restored CLI handler wiring for `td test` and op_logs reporting after detecting a missing dispatch path.
 - [ ] (2026-01-12 12:50Z) Validate behavior against a reachable host (blocked: no known reachable host in this environment).
+- [x] (2026-01-12 22:59Z) Retried `cargo build -p td` to run `td test`; build still fails with crates.io CONNECT 403, so manual validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -82,3 +83,4 @@ The test command is read-only. Re-running it is safe; failures produce structure
 
 Update 2026-01-12 12:50Z: Marked implementation tasks complete, logged the decision to store reports in op_logs and update last_used_at, and noted the remaining manual validation gap.
 Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
+Update 2026-01-12 22:59Z: Retried `cargo build -p td`; validation remains blocked by crates.io CONNECT 403.

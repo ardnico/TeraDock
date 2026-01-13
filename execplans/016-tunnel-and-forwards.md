@@ -16,6 +16,7 @@ Users need a way to persist SSH forward definitions, start long-running SSH tunn
 - [x] (2026-01-11 16:55Z) Restored CLI dispatch for `td tunnel` commands and added process termination handling for tunnel stop.
 - [ ] (2026-01-11 16:01Z) Validate tunnel lifecycle manually and record any observed output in this plan.
 - [x] (2026-01-11 16:01Z) Updated the ExecPlan with implementation outcomes and decisions.
+- [x] (2026-01-12 22:59Z) Retried `cargo build -p td` to validate tunnel lifecycle; build still fails with crates.io CONNECT 403, so manual validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -104,3 +105,4 @@ The CLI should use `SessionStore` and `ForwardStore` and rely on existing SSH cl
 Change note: Initial ExecPlan created from repo research and project plan requirements.
 Change note: Updated progress, decisions, and outcomes after implementing tunnel/forward/session support.
 Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
+Update 2026-01-12 22:59Z: Retried `cargo build -p td`; validation remains blocked by crates.io CONNECT 403.
