@@ -13,6 +13,7 @@ Users need to see and manage their SSH agent state directly from TeraDock, inclu
 - [x] (2025-02-15 01:35Z) Wired `td agent status/list/add/clear` CLI commands with confirmation prompts and output formatting.
 - [x] (2025-02-15 01:40Z) Registered SSH agent config key in settings registry so resolved config commands recognize it.
 - [ ] (2025-02-15 01:45Z) Validate behavior with manual CLI invocations and update progress logs.
+- [x] (2026-01-12 22:59Z) Retried `cargo build -p td` to validate agent commands; build still fails with crates.io CONNECT 403, so manual validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -108,3 +109,4 @@ These helpers should invoke the `ssh-add` binary in `PATH`.
 
 Plan update note: marked implementation steps complete, added decision log, and noted pending manual validation.
 Update 2026-01-11 17:09Z: Logged validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
+Update 2026-01-12 22:59Z: Retried `cargo build -p td`; validation remains blocked by crates.io CONNECT 403.

@@ -16,6 +16,7 @@ Users need a reliable way to export their profiles, command sets, configs, and r
 - [ ] (2025-09-27 01:15Z) Validate end-to-end: export JSON, wipe DB, re-import, verify preserved IDs and conflict behavior; document commands and results here.
 - [ ] (2026-01-11 17:09Z) Attempted validation, but could not run `td` because `cargo build -p td` fails with crates.io CONNECT 403 in this environment.
 - [ ] (2026-01-12 08:54Z) Attempted validation, but `cargo build -p td` failed (crates.io CONNECT 403), so the CLI could not be run.
+- [x] (2026-01-12 22:59Z) Retried `cargo build -p td` to validate import/export; build still fails with crates.io CONNECT 403, so CLI validation remains blocked.
 
 ## Surprises & Discoveries
 
@@ -117,3 +118,4 @@ Note: exact types and paths must be confirmed during discovery and recorded here
 
 Change Log: 2025-09-27 - Initial ExecPlan created for import/export CLI feature.
 Update 2026-01-11 17:09Z: Recorded validation attempt blocked by crates.io CONNECT 403 during `cargo build -p td`.
+Update 2026-01-12 22:59Z: Retried `cargo build -p td`; validation remains blocked by crates.io CONNECT 403.
