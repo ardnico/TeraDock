@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::doctor::ClientOverrides;
 use crate::error::{CoreError, Result};
+use crate::settings_registry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,6 +161,84 @@ pub fn get_setting_resolved_with_override(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedSettingSource {
+    Command,
+    Profile,
+    Env,
+    Global,
+}
+
+impl ResolvedSettingSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Profile => "profile",
+            Self::Env => "env",
+            Self::Global => "global",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedSettingDetail {
+    pub key: String,
+    pub command_value: Option<String>,
+    pub profile_value: Option<String>,
+    pub env_value: Option<String>,
+    pub global_value: Option<String>,
+    pub resolved_value: Option<String>,
+    pub resolved_source: Option<ResolvedSettingSource>,
+}
+
+pub fn resolve_settings_for_profile(
+    conn: &Connection,
+    profile_id: &str,
+    command_overrides: Option<&HashMap<String, String>>,
+) -> Result<Vec<ResolvedSettingDetail>> {
+    let env_name = get_current_env(conn)?;
+    let profile_scope = SettingScope::Profile(profile_id.to_string());
+    let env_scope = env_name
+        .as_ref()
+        .map(|name| SettingScope::Env(name.to_string()));
+    let mut resolved = Vec::new();
+
+    for key in settings_registry::list_keys() {
+        let command_value = command_overrides.and_then(|map| map.get(key)).cloned();
+        let profile_value = get_setting_scoped(conn, &profile_scope, key)?;
+        let env_value = match &env_scope {
+            Some(scope) => get_setting_scoped(conn, scope, key)?,
+            None => None,
+        };
+        let global_value = get_setting_scoped(conn, &SettingScope::Global, key)?;
+
+        let (resolved_value, resolved_source) = if let Some(value) = &command_value {
+            (Some(value.clone()), Some(ResolvedSettingSource::Command))
+        } else if let Some(value) = &profile_value {
+            (Some(value.clone()), Some(ResolvedSettingSource::Profile))
+        } else if let Some(value) = &env_value {
+            (Some(value.clone()), Some(ResolvedSettingSource::Env))
+        } else if let Some(value) = &global_value {
+            (Some(value.clone()), Some(ResolvedSettingSource::Global))
+        } else {
+            (None, None)
+        };
+
+        resolved.push(ResolvedSettingDetail {
+            key: key.to_string(),
+            command_value,
+            profile_value,
+            env_value,
+            global_value,
+            resolved_value,
+            resolved_source,
+        });
+    }
+
+    Ok(resolved)
+}
+
 pub fn get_current_env(conn: &Connection) -> Result<Option<String>> {
     get_setting_scoped(conn, &SettingScope::Global, "env.current")
 }
@@ -172,9 +252,8 @@ pub fn clear_current_env(conn: &Connection) -> Result<()> {
 }
 
 pub fn list_env_names(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT scope FROM settings WHERE scope LIKE 'env:%' ORDER BY scope",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT scope FROM settings WHERE scope LIKE 'env:%' ORDER BY scope")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut envs = Vec::new();
     for row in rows {
@@ -190,8 +269,7 @@ pub fn list_settings_scoped(
     conn: &Connection,
     scope: &SettingScope,
 ) -> Result<Vec<(String, String)>> {
-    let mut stmt =
-        conn.prepare("SELECT key, value FROM settings WHERE scope = ?1 ORDER BY key")?;
+    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE scope = ?1 ORDER BY key")?;
     let rows = stmt.query_map(params![scope.as_db()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;

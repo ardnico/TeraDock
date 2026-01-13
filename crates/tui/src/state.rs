@@ -13,7 +13,7 @@ use tdcore::doctor::{self, ClientKind};
 use tdcore::oplog;
 use tdcore::parser::{parse_output, ParserSpec};
 use tdcore::profile::{DangerLevel, Profile, ProfileFilters, ProfileStore, ProfileType};
-use tdcore::settings;
+use tdcore::settings::{self, ResolvedSettingDetail, ResolvedSettingSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -33,6 +33,7 @@ pub enum ResultTab {
     Stdout,
     Stderr,
     Parsed,
+    Summary,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,23 @@ pub struct StepResult {
     pub stdout: String,
     pub stderr: String,
     pub parsed: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunSummaryItem {
+    pub profile_id: String,
+    pub profile_name: String,
+    pub ok: bool,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    pub total: usize,
+    pub ok_count: usize,
+    pub fail_count: usize,
+    pub items: Vec<RunSummaryItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,11 +96,17 @@ pub enum PendingAction {
         profile_id: String,
         cmdset_id: String,
     },
+    RunCmdSetBulk {
+        profile_ids: Vec<String>,
+        cmdset_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct ConfirmState {
     pub message: String,
+    pub required_input: String,
+    pub input: String,
     pub action: PendingAction,
 }
 
@@ -103,6 +127,12 @@ pub struct AppState {
     result_tab: ResultTab,
     confirm: Option<ConfirmState>,
     last_result: Option<RunResult>,
+    last_summary: Option<RunSummary>,
+    marked_profiles: BTreeSet<String>,
+    details_open: bool,
+    details_lines: Vec<String>,
+    details_scroll: usize,
+    help_open: bool,
     status_message: Option<String>,
 }
 
@@ -131,6 +161,12 @@ impl AppState {
             result_tab: ResultTab::Stdout,
             confirm: None,
             last_result: None,
+            last_summary: None,
+            marked_profiles: BTreeSet::new(),
+            details_open: false,
+            details_lines: Vec::new(),
+            details_scroll: 0,
+            help_open: false,
             status_message: None,
         })
     }
@@ -145,6 +181,26 @@ impl AppState {
 
     pub fn result_tab(&self) -> ResultTab {
         self.result_tab
+    }
+
+    pub fn last_summary(&self) -> Option<&RunSummary> {
+        self.last_summary.as_ref()
+    }
+
+    pub fn details_open(&self) -> bool {
+        self.details_open
+    }
+
+    pub fn details_lines(&self) -> &[String] {
+        &self.details_lines
+    }
+
+    pub fn details_scroll(&self) -> usize {
+        self.details_scroll
+    }
+
+    pub fn help_open(&self) -> bool {
+        self.help_open
     }
 
     pub fn filters(&self) -> &ProfileFilters {
@@ -205,6 +261,10 @@ impl AppState {
 
     pub fn cmdsets(&self) -> &[CmdSet] {
         &self.cmdsets
+    }
+
+    pub fn marked_profiles(&self) -> &BTreeSet<String> {
+        &self.marked_profiles
     }
 
     pub fn enter_search(&mut self) {
@@ -317,21 +377,29 @@ impl AppState {
         };
     }
 
-    pub fn next_profile(&mut self) {
+    pub fn next_profile(&mut self) -> Result<()> {
         if !self.filtered.is_empty() {
             self.profile_cursor = (self.profile_cursor + 1) % self.filtered.len();
         }
+        if self.details_open {
+            self.refresh_details()?;
+        }
+        Ok(())
     }
 
-    pub fn prev_profile(&mut self) {
+    pub fn prev_profile(&mut self) -> Result<()> {
         if self.filtered.is_empty() {
-            return;
+            return Ok(());
         }
         if self.profile_cursor == 0 {
             self.profile_cursor = self.filtered.len() - 1;
         } else {
             self.profile_cursor -= 1;
         }
+        if self.details_open {
+            self.refresh_details()?;
+        }
+        Ok(())
     }
 
     pub fn next_cmdset(&mut self) {
@@ -355,15 +423,17 @@ impl AppState {
         self.result_tab = match self.result_tab {
             ResultTab::Stdout => ResultTab::Stderr,
             ResultTab::Stderr => ResultTab::Parsed,
-            ResultTab::Parsed => ResultTab::Stdout,
+            ResultTab::Parsed => ResultTab::Summary,
+            ResultTab::Summary => ResultTab::Stdout,
         };
     }
 
     pub fn prev_result_tab(&mut self) {
         self.result_tab = match self.result_tab {
-            ResultTab::Stdout => ResultTab::Parsed,
+            ResultTab::Stdout => ResultTab::Summary,
             ResultTab::Stderr => ResultTab::Stdout,
             ResultTab::Parsed => ResultTab::Stderr,
+            ResultTab::Summary => ResultTab::Parsed,
         };
     }
 
@@ -376,14 +446,35 @@ impl AppState {
     }
 
     pub fn confirm_action(&mut self) -> Result<()> {
-        let Some(confirm) = self.confirm.take() else {
+        let Some(confirm) = self.confirm.as_ref() else {
             return Ok(());
         };
+        if confirm.input != confirm.required_input {
+            self.status_message = Some(format!("Type '{}' to confirm.", confirm.required_input));
+            return Ok(());
+        }
+        let confirm = self.confirm.take().expect("confirm state should exist");
         match confirm.action {
             PendingAction::RunCmdSet {
                 profile_id,
                 cmdset_id,
             } => self.execute_cmdset_run(&profile_id, &cmdset_id),
+            PendingAction::RunCmdSetBulk {
+                profile_ids,
+                cmdset_id,
+            } => self.execute_cmdset_run_bulk(&profile_ids, &cmdset_id),
+        }
+    }
+
+    pub fn push_confirm_char(&mut self, ch: char) {
+        if let Some(confirm) = &mut self.confirm {
+            confirm.input.push(ch);
+        }
+    }
+
+    pub fn pop_confirm_char(&mut self) {
+        if let Some(confirm) = &mut self.confirm {
+            confirm.input.pop();
         }
     }
 
@@ -410,6 +501,8 @@ impl AppState {
                     "Profile '{}' is critical. Run CommandSet '{}' on {} ?",
                     profile_id, cmdset_id, profile_label
                 ),
+                required_input: profile_id.clone(),
+                input: String::new(),
                 action: PendingAction::RunCmdSet {
                     profile_id,
                     cmdset_id,
@@ -418,6 +511,44 @@ impl AppState {
             return Ok(());
         }
         self.execute_cmdset_run(&profile_id, &cmdset_id)
+    }
+
+    pub fn request_bulk_run(&mut self) -> Result<()> {
+        if self.marked_profiles.is_empty() {
+            self.status_message = Some("No profiles marked for bulk run.".to_string());
+            return Ok(());
+        }
+        let Some(cmdset) = self.selected_cmdset() else {
+            self.status_message = Some("No CommandSet selected.".to_string());
+            return Ok(());
+        };
+        let mut profile_ids: Vec<String> = self.marked_profiles.iter().cloned().collect();
+        profile_ids.sort();
+        let mut critical_ids = Vec::new();
+        for profile_id in &profile_ids {
+            if let Some(profile) = self.store.get(profile_id)? {
+                if profile.danger_level == DangerLevel::Critical {
+                    critical_ids.push(profile.profile_id);
+                }
+            }
+        }
+        if !critical_ids.is_empty() {
+            let required = critical_ids.join(",");
+            self.confirm = Some(ConfirmState {
+                message: format!(
+                    "Critical profiles selected. Type '{}' to confirm bulk run.",
+                    required
+                ),
+                required_input: required,
+                input: String::new(),
+                action: PendingAction::RunCmdSetBulk {
+                    profile_ids,
+                    cmdset_id: cmdset.cmdset_id.clone(),
+                },
+            });
+            return Ok(());
+        }
+        self.execute_cmdset_run_bulk(&profile_ids, &cmdset.cmdset_id)
     }
 
     fn execute_cmdset_run(&mut self, profile_id: &str, cmdset_id: &str) -> Result<()> {
@@ -431,12 +562,67 @@ impl AppState {
                     run.exit_code
                 ));
                 self.last_result = Some(run);
+                self.last_summary = None;
             }
             Err(err) => {
                 self.status_message = Some(format!("Run failed: {err}"));
                 self.last_result = Some(RunResult::from_error(err));
+                self.last_summary = None;
             }
         }
+        Ok(())
+    }
+
+    fn execute_cmdset_run_bulk(&mut self, profile_ids: &[String], cmdset_id: &str) -> Result<()> {
+        let mut items = Vec::new();
+        for profile_id in profile_ids {
+            let profile = self.store.get(profile_id)?;
+            let Some(profile) = profile else {
+                items.push(RunSummaryItem {
+                    profile_id: profile_id.clone(),
+                    profile_name: "(missing)".to_string(),
+                    ok: false,
+                    exit_code: None,
+                    error: Some("profile not found".to_string()),
+                });
+                continue;
+            };
+            let result = self.try_execute_cmdset_run(&profile.profile_id, cmdset_id);
+            match result {
+                Ok(run) => {
+                    items.push(RunSummaryItem {
+                        profile_id: profile.profile_id.clone(),
+                        profile_name: profile.name.clone(),
+                        ok: run.ok,
+                        exit_code: Some(run.exit_code),
+                        error: run.error.clone(),
+                    });
+                    self.last_result = Some(run);
+                }
+                Err(err) => {
+                    items.push(RunSummaryItem {
+                        profile_id: profile.profile_id.clone(),
+                        profile_name: profile.name.clone(),
+                        ok: false,
+                        exit_code: None,
+                        error: Some(err.to_string()),
+                    });
+                }
+            }
+        }
+        let ok_count = items.iter().filter(|item| item.ok).count();
+        let total = items.len();
+        let fail_count = total - ok_count;
+        self.last_summary = Some(RunSummary {
+            total,
+            ok_count,
+            fail_count,
+            items,
+        });
+        self.result_tab = ResultTab::Summary;
+        self.status_message = Some(format!(
+            "Bulk run finished: {ok_count} ok, {fail_count} failed."
+        ));
         Ok(())
     }
 
@@ -615,8 +801,103 @@ impl AppState {
         } else if self.profile_cursor >= self.filtered.len() {
             self.profile_cursor = self.filtered.len() - 1;
         }
+        if self.details_open {
+            self.refresh_details()?;
+        }
         Ok(())
     }
+
+    pub fn toggle_mark(&mut self) {
+        let Some(profile) = self.selected_profile() else {
+            return;
+        };
+        if self.marked_profiles.contains(&profile.profile_id) {
+            self.marked_profiles.remove(&profile.profile_id);
+        } else {
+            self.marked_profiles.insert(profile.profile_id.clone());
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marked_profiles.clear();
+    }
+
+    pub fn toggle_details(&mut self) -> Result<()> {
+        self.details_open = !self.details_open;
+        if self.details_open {
+            self.refresh_details()?;
+        }
+        Ok(())
+    }
+
+    pub fn toggle_help(&mut self) {
+        self.help_open = !self.help_open;
+    }
+
+    pub fn scroll_details_up(&mut self) {
+        if self.details_scroll > 0 {
+            self.details_scroll -= 1;
+        }
+    }
+
+    pub fn scroll_details_down(&mut self) {
+        if self.details_scroll + 1 < self.details_lines.len() {
+            self.details_scroll += 1;
+        }
+    }
+
+    fn refresh_details(&mut self) -> Result<()> {
+        let Some(profile) = self.selected_profile() else {
+            self.details_lines = vec!["No profile selected.".to_string()];
+            self.details_scroll = 0;
+            return Ok(());
+        };
+        let env_name =
+            settings::get_current_env(self.store.conn())?.unwrap_or_else(|| "none".to_string());
+        let details =
+            settings::resolve_settings_for_profile(self.store.conn(), &profile.profile_id, None)?;
+        self.details_lines = format_resolved_details(
+            profile.profile_id.as_str(),
+            profile.name.as_str(),
+            &env_name,
+            &details,
+        );
+        self.details_scroll = 0;
+        Ok(())
+    }
+}
+
+fn format_resolved_details(
+    profile_id: &str,
+    profile_name: &str,
+    env_name: &str,
+    details: &[ResolvedSettingDetail],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("Profile: {profile_name} ({profile_id})"));
+    lines.push(format!("Current env: {env_name}"));
+    lines.push(String::new());
+    for detail in details {
+        let resolved = detail.resolved_value.as_deref().unwrap_or("(unset)");
+        let source = detail
+            .resolved_source
+            .map(ResolvedSettingSource::as_str)
+            .unwrap_or("none");
+        lines.push(format!("{} = {} ({})", detail.key, resolved, source));
+        lines.push(format!(
+            "  command={} profile={} env={} global={}",
+            display_opt(detail.command_value.as_deref()),
+            display_opt(detail.profile_value.as_deref()),
+            display_opt(detail.env_value.as_deref()),
+            display_opt(detail.global_value.as_deref())
+        ));
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn display_opt(value: Option<&str>) -> &str {
+    value.unwrap_or("(unset)")
 }
 
 fn collect_groups(profiles: &[Profile]) -> Vec<String> {

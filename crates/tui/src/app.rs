@@ -5,10 +5,10 @@ use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
 };
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tdcore::cmdset::CmdSetStore;
@@ -89,22 +89,37 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
     match code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('/') => state.enter_search(),
-        KeyCode::Char('t') => state.cycle_profile_type()?,
+        KeyCode::Char('T') => state.cycle_profile_type()?,
         KeyCode::Char('g') => state.cycle_group()?,
-        KeyCode::Char('d') => state.cycle_danger()?,
+        KeyCode::Char('D') => state.cycle_danger()?,
         KeyCode::Char('c') => state.clear_filters()?,
         KeyCode::Char('[') => state.tag_cursor_prev(),
         KeyCode::Char(']') => state.tag_cursor_next(),
-        KeyCode::Char(' ') => state.toggle_tag()?,
+        KeyCode::Char('x') => state.toggle_tag()?,
+        KeyCode::Char(' ') => state.toggle_mark(),
         KeyCode::Tab => state.cycle_pane(),
+        KeyCode::Char('d') => state.toggle_details()?,
+        KeyCode::Char('?') => state.toggle_help(),
         KeyCode::Up | KeyCode::Char('k') => match state.active_pane() {
-            ActivePane::Profiles => state.prev_profile(),
-            ActivePane::Actions => state.prev_cmdset(),
+            ActivePane::Profiles => state.prev_profile()?,
+            ActivePane::Actions => {
+                if state.details_open() {
+                    state.scroll_details_up();
+                } else {
+                    state.prev_cmdset();
+                }
+            }
             ActivePane::Results => {}
         },
         KeyCode::Down | KeyCode::Char('j') => match state.active_pane() {
-            ActivePane::Profiles => state.next_profile(),
-            ActivePane::Actions => state.next_cmdset(),
+            ActivePane::Profiles => state.next_profile()?,
+            ActivePane::Actions => {
+                if state.details_open() {
+                    state.scroll_details_down();
+                } else {
+                    state.next_cmdset();
+                }
+            }
             ActivePane::Results => {}
         },
         KeyCode::Left | KeyCode::Char('h') => match state.active_pane() {
@@ -118,7 +133,9 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
         KeyCode::Char('1') => state.set_result_tab(ResultTab::Stdout),
         KeyCode::Char('2') => state.set_result_tab(ResultTab::Stderr),
         KeyCode::Char('3') => state.set_result_tab(ResultTab::Parsed),
+        KeyCode::Char('4') => state.set_result_tab(ResultTab::Summary),
         KeyCode::Char('r') | KeyCode::Enter => state.request_run()?,
+        KeyCode::Char('R') => state.request_bulk_run()?,
         _ => {}
     }
     Ok(false)
@@ -126,8 +143,16 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
 
 fn handle_confirm_key(state: &mut AppState, code: KeyCode) -> Result<()> {
     match code {
-        KeyCode::Char('y') | KeyCode::Enter => state.confirm_action(),
-        KeyCode::Char('n') | KeyCode::Esc => {
+        KeyCode::Enter => state.confirm_action(),
+        KeyCode::Backspace => {
+            state.pop_confirm_char();
+            Ok(())
+        }
+        KeyCode::Char(ch) => {
+            state.push_confirm_char(ch);
+            Ok(())
+        }
+        KeyCode::Esc => {
             state.cancel_confirm();
             Ok(())
         }
