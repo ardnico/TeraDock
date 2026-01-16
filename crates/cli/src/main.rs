@@ -38,6 +38,7 @@ use tdcore::tunnel::{ForwardKind, ForwardStore, NewSession, SessionKind, Session
 use tdcore::util::now_ms;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
+use tui as tdtui;
 use wait_timeout::ChildExt;
 use zeroize::Zeroizing;
 
@@ -154,6 +155,8 @@ enum Commands {
     Export(ExportArgs),
     /// Import profiles, command sets, configs, and secrets metadata from JSON
     Import(ImportArgs),
+    /// Launch the terminal UI
+    Ui,
 }
 
 #[derive(Debug, Subcommand)]
@@ -599,6 +602,7 @@ fn main() -> Result<()> {
         Some(Commands::Secret { command }) => handle_secret(command),
         Some(Commands::Export(args)) => handle_export(args),
         Some(Commands::Import(args)) => handle_import(args),
+        Some(Commands::Ui) => handle_ui(),
         None => {
             Cli::command().print_help()?;
             println!();
@@ -647,6 +651,10 @@ fn handle_import(args: ImportArgs) -> Result<()> {
     )?;
     print_import_report(&report);
     Ok(())
+}
+
+fn handle_ui() -> Result<()> {
+    tdtui::run()
 }
 
 fn read_import_payload(path: Option<&Path>) -> Result<String> {
