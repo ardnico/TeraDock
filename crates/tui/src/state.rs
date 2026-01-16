@@ -518,7 +518,7 @@ impl AppState {
             self.status_message = Some("No profiles marked for bulk run.".to_string());
             return Ok(());
         }
-        let Some(cmdset) = self.selected_cmdset() else {
+        let Some(cmdset_id) = self.selected_cmdset().map(|cmdset| cmdset.cmdset_id.clone()) else {
             self.status_message = Some("No CommandSet selected.".to_string());
             return Ok(());
         };
@@ -543,12 +543,12 @@ impl AppState {
                 input: String::new(),
                 action: PendingAction::RunCmdSetBulk {
                     profile_ids,
-                    cmdset_id: cmdset.cmdset_id.clone(),
+                    cmdset_id: cmdset_id.clone(),
                 },
             });
             return Ok(());
         }
-        self.execute_cmdset_run_bulk(&profile_ids, &cmdset.cmdset_id)
+        self.execute_cmdset_run_bulk(&profile_ids, &cmdset_id)
     }
 
     fn execute_cmdset_run(&mut self, profile_id: &str, cmdset_id: &str) -> Result<()> {
@@ -808,13 +808,13 @@ impl AppState {
     }
 
     pub fn toggle_mark(&mut self) {
-        let Some(profile) = self.selected_profile() else {
+        let Some(profile_id) = self.selected_profile().map(|profile| profile.profile_id.clone()) else {
             return;
         };
-        if self.marked_profiles.contains(&profile.profile_id) {
-            self.marked_profiles.remove(&profile.profile_id);
+        if self.marked_profiles.contains(&profile_id) {
+            self.marked_profiles.remove(&profile_id);
         } else {
-            self.marked_profiles.insert(profile.profile_id.clone());
+            self.marked_profiles.insert(profile_id);
         }
     }
 
@@ -881,6 +881,7 @@ fn format_resolved_details(
         let resolved = detail.resolved_value.as_deref().unwrap_or("(unset)");
         let source = detail
             .resolved_source
+            .as_ref()
             .map(ResolvedSettingSource::as_str)
             .unwrap_or("none");
         lines.push(format!("{} = {} ({})", detail.key, resolved, source));
