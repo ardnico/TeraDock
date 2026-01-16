@@ -14,6 +14,14 @@ assets = [
     ["target/release/td", "usr/bin/td", "755"],
 ]
 
+[package.metadata.rpm]
+package = "td"
+license = "MIT OR Apache-2.0"
+summary = "TeraDock command-line interface"
+assets = [
+    ["target/release/td", "/usr/bin/td", "755"],
+]
+
 [dependencies]
 clap = { workspace = true }
 anyhow = { workspace = true }
