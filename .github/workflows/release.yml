@@ -30,9 +30,9 @@ jobs:
       - name: Install cargo-rpm
         if: runner.os == 'Linux'
         run: cargo install cargo-rpm --locked
-      - name: Install rpm tooling
+      - name: Install rpm tooling and libudev
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm
+        run: sudo apt-get update && sudo apt-get install -y rpm libudev-dev pkg-config
       - name: Build deb package
         if: runner.os == 'Linux'
         run: cargo deb -p td --no-build
