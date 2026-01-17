@@ -49,6 +49,19 @@ cargo build -p tui
 - Debian パッケージ（.deb）
 - RPM パッケージ（.rpm）
 
+### リリース手順
+
+1. `Cargo.toml` と `crates/cli/Cargo.toml` の version を更新します。
+2. 変更をコミットして main ブランチにマージします。
+3. `vX.Y.Z` 形式でタグを作成し push します。
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+タグ push 後、GitHub Actions の Release ワークフローがビルドを実行し、成果物を自動でリリースに付与します。
+
 ## 開発メモ
 
 - 仕様・設計は `PROJECT_PLAN.md` と `EXTERNAL_DESIGN.md` を参照してください。
