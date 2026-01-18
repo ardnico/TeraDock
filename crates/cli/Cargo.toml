@@ -1,7 +1,7 @@
 [package]
 name = "td"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 license = "Apache-2.0"
 description = "TeraDock command-line interface"
 
@@ -12,16 +12,16 @@ priority = "optional"
 depends = "$auto"
 assets = [
   ["target/release/td", "usr/bin/td", "755"],
-  ["README.md", "usr/share/README.md", "644"],
-  ["LICENSE", "usr/share/LICENSE", "644"],
+  ["../../README.md", "usr/share/README.md", "644"],
+  ["../../LICENSE", "usr/share/LICENSE", "644"],
 ]
 
 [package.metadata.generate-rpm]
 release = "1"
 assets = [
   { source = "target/release/td", dest = "/usr/bin/td", mode = "755" },
-  { source = "README.md", dest = "/usr/share/README.md", mode = "644", doc = true },
-  { source = "LICENSE",   dest = "/usr/share/LICENSE", mode = "644", doc = true },
+  { source = "../../README.md", dest = "/usr/share/README.md", mode = "644", doc = true },
+  { source = "../../LICENSE",   dest = "/usr/share/LICENSE", mode = "644", doc = true },
 ]
 
 [dependencies]
