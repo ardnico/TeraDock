@@ -38,7 +38,8 @@ jobs:
         run: cargo deb -p td --no-build
       - name: Build rpm package
         if: runner.os == 'Linux'
-        run: cargo rpm -p td --no-build
+        working-directory: crates/cli
+        run: cargo rpm --no-build
       - name: Build tar.gz archive
         if: runner.os == 'Linux'
         run: packaging/linux/package-tar.sh "${{ steps.version.outputs.version }}"
