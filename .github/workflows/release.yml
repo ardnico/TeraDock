@@ -47,11 +47,11 @@ jobs:
         run: choco install innosetup --no-progress
       - name: Build Windows installer
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          /c/Program\ Files\ \(x86\)/Inno\ Setup\ 6/ISCC.exe \
-            /DMyAppVersion="${{ steps.version.outputs.version }}" \
-            packaging/windows/td.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion="${{ steps.version.outputs.version }}" `
+            "packaging\windows\td.iss"
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
