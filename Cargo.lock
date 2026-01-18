@@ -1240,6 +1240,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tui",
  "wait-timeout",
  "zeroize",
 ]

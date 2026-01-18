@@ -22,14 +22,23 @@ jobs:
         id: version
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Install rpm tooling and libudev
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm libudev-dev pkg-config
       - name: Build release binary
         run: cargo build -p td --release
       - name: Install cargo-deb
         if: runner.os == 'Linux'
         run: cargo install cargo-deb --locked
+      - name: Install cargo-rpm
+        if: runner.os == 'Linux'
+        run: cargo install cargo-rpm --locked
       - name: Build deb package
         if: runner.os == 'Linux'
         run: cargo deb -p td --no-build
+      - name: Build rpm package
+        if: runner.os == 'Linux'
+        run: cargo rpm -p td --no-build
       - name: Build tar.gz archive
         if: runner.os == 'Linux'
         run: packaging/linux/package-tar.sh "${{ steps.version.outputs.version }}"
@@ -38,11 +47,11 @@ jobs:
         run: choco install innosetup --no-progress
       - name: Build Windows installer
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          /c/Program\ Files\ \(x86\)/Inno\ Setup\ 6/ISCC.exe \
-            /DMyAppVersion="${{ steps.version.outputs.version }}" \
-            packaging/windows/td.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion="${{ steps.version.outputs.version }}" `
+            "packaging\windows\td.iss"
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
@@ -50,3 +59,4 @@ jobs:
             dist/td-*-windows-x86_64-setup.exe
             dist/td-*-linux-x86_64.tar.gz
             target/debian/*.deb
+            target/rpm/*.rpm
