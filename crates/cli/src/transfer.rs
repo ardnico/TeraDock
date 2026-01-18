@@ -116,7 +116,8 @@ pub fn execute_transfer(
             if password.is_empty() {
                 warn!("TD_FTP_PASSWORD is not set; FTP login may fail unless anonymous access is enabled.");
             }
-            let batch_contents = build_ftp_batch(profile, &password, direction, local_path, remote_path);
+            let batch_contents =
+                build_ftp_batch(profile, &password, direction, local_path, remote_path);
             std::fs::write(&batch_path, batch_contents)?;
             stdin_file = Some(File::open(&batch_path)?);
             _batch_guard = Some(batch_dir);
@@ -187,9 +188,7 @@ fn build_ftp_batch(
         TransferDirection::Push => format!("put {local} {remote}"),
         TransferDirection::Pull => format!("get {remote} {local}"),
     };
-    format!(
-        "user {user} {pass}\nbinary\n{transfer}\nquit\n",
-    )
+    format!("user {user} {pass}\nbinary\n{transfer}\nquit\n",)
 }
 
 fn quote_ftp_arg(value: &str) -> String {

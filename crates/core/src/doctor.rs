@@ -116,8 +116,7 @@ pub fn check_clients_with_overrides(
         ClientKind::Ftp,
         ClientKind::Telnet,
     ] {
-        let resolved =
-            resolve_client_with_source(kind, profile_overrides, global_overrides);
+        let resolved = resolve_client_with_source(kind, profile_overrides, global_overrides);
         clients.push(ClientStatus {
             name: kind.as_str().to_string(),
             path: resolved.path,
@@ -413,7 +412,11 @@ mod tests {
     fn override_precedence() {
         let temp = env::temp_dir().join("teradock-doctor-override");
         let _ = fs::create_dir_all(&temp);
-        let override_path = temp.join(if cfg!(windows) { "ssh-custom.exe" } else { "ssh-custom" });
+        let override_path = temp.join(if cfg!(windows) {
+            "ssh-custom.exe"
+        } else {
+            "ssh-custom"
+        });
         File::create(&override_path).expect("create override binary");
 
         let profile_overrides = ClientOverrides {
@@ -421,8 +424,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved =
-            resolve_client_with_source(ClientKind::Ssh, Some(&profile_overrides), None);
+        let resolved = resolve_client_with_source(ClientKind::Ssh, Some(&profile_overrides), None);
 
         assert_eq!(resolved.path, Some(override_path.clone()));
         assert_eq!(resolved.source, ClientSource::ProfileOverride);
@@ -435,7 +437,11 @@ mod tests {
     fn global_override_is_used_and_reported() {
         let temp = env::temp_dir().join("teradock-doctor-global");
         let _ = fs::create_dir_all(&temp);
-        let override_path = temp.join(if cfg!(windows) { "ssh-global.exe" } else { "ssh-global" });
+        let override_path = temp.join(if cfg!(windows) {
+            "ssh-global.exe"
+        } else {
+            "ssh-global"
+        });
         File::create(&override_path).expect("create override binary");
 
         let global = ClientOverrides {

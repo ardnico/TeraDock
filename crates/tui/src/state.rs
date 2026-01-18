@@ -518,7 +518,10 @@ impl AppState {
             self.status_message = Some("No profiles marked for bulk run.".to_string());
             return Ok(());
         }
-        let Some(cmdset_id) = self.selected_cmdset().map(|cmdset| cmdset.cmdset_id.clone()) else {
+        let Some(cmdset_id) = self
+            .selected_cmdset()
+            .map(|cmdset| cmdset.cmdset_id.clone())
+        else {
             self.status_message = Some("No CommandSet selected.".to_string());
             return Ok(());
         };
@@ -808,7 +811,10 @@ impl AppState {
     }
 
     pub fn toggle_mark(&mut self) {
-        let Some(profile_id) = self.selected_profile().map(|profile| profile.profile_id.clone()) else {
+        let Some(profile_id) = self
+            .selected_profile()
+            .map(|profile| profile.profile_id.clone())
+        else {
             return;
         };
         if self.marked_profiles.contains(&profile_id) {
