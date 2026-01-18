@@ -19,15 +19,14 @@ pub struct AgentList {
 }
 
 pub fn status() -> AgentStatus {
-    let auth_sock = env::var_os("SSH_AUTH_SOCK")
-        .and_then(|value| {
-            let trimmed = value.to_string_lossy();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
+    let auth_sock = env::var_os("SSH_AUTH_SOCK").and_then(|value| {
+        let trimmed = value.to_string_lossy();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
     if auth_sock.is_none() {
         return AgentStatus {
             auth_sock: None,
@@ -51,15 +50,14 @@ pub fn status() -> AgentStatus {
 }
 
 pub fn list() -> AgentList {
-    let auth_sock = env::var_os("SSH_AUTH_SOCK")
-        .and_then(|value| {
-            let trimmed = value.to_string_lossy();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
+    let auth_sock = env::var_os("SSH_AUTH_SOCK").and_then(|value| {
+        let trimmed = value.to_string_lossy();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
     if auth_sock.is_none() {
         return AgentList {
             keys: Vec::new(),
@@ -105,7 +103,10 @@ fn parse_list_output(output: &Output) -> AgentList {
     } else if !stdout.is_empty() {
         Some(stdout.clone())
     } else {
-        Some(format!("ssh-add -l failed with status {status}", status = output.status))
+        Some(format!(
+            "ssh-add -l failed with status {status}",
+            status = output.status
+        ))
     };
     AgentList { keys, raw, error }
 }

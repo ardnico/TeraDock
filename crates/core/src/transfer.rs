@@ -62,10 +62,7 @@ pub fn build_scp_args(
     let mut args = Vec::new();
     args.push(OsString::from("-P"));
     args.push(OsString::from(profile.port.to_string()));
-    let remote = OsString::from(format!(
-        "{}@{}:{}",
-        profile.user, profile.host, remote_path
-    ));
+    let remote = OsString::from(format!("{}@{}:{}", profile.user, profile.host, remote_path));
     match direction {
         TransferDirection::Push => {
             args.push(local_path.as_os_str().to_owned());

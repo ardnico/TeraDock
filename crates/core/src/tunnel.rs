@@ -77,10 +77,7 @@ impl ForwardStore {
         if input.name.trim().is_empty() {
             return Err(CoreError::InvalidSetting("forward name is required".into()));
         }
-        if self
-            .get_by_name(&input.profile_id, &input.name)?
-            .is_some()
-        {
+        if self.get_by_name(&input.profile_id, &input.name)?.is_some() {
             return Err(CoreError::Conflict(format!(
                 "forward name already exists: {}",
                 input.name
@@ -146,9 +143,7 @@ impl ForwardStore {
             params![profile_id, name],
         )?;
         if affected == 0 {
-            return Err(CoreError::NotFound(format!(
-                "forward not found: {name}"
-            )));
+            return Err(CoreError::NotFound(format!("forward not found: {name}")));
         }
         Ok(())
     }

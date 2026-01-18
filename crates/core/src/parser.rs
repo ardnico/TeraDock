@@ -120,9 +120,12 @@ mod tests {
             parser_type: ParserType::Regex,
             definition: r"status=(?P<code>\d+)".into(),
         };
-        let parsed =
-            parse_output(&ParserSpec::Regex("r_status".into()), "status=200", Some(&parser))
-                .unwrap();
+        let parsed = parse_output(
+            &ParserSpec::Regex("r_status".into()),
+            "status=200",
+            Some(&parser),
+        )
+        .unwrap();
         assert_eq!(parsed, serde_json::json!([{"code":"200"}]));
     }
 }
