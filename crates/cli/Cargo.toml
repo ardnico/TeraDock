@@ -11,15 +11,18 @@ section = "utility"
 priority = "optional"
 depends = "$auto"
 assets = [
-    ["target/release/td", "usr/bin/td", "755"],
+  ["target/release/td", "usr/bin/td", "755"],
+  # ↓ README / LICENSE がリポジトリ直下にある前提なら追加
+  ["README.md", "usr/share/doc/td/README.md", "644"],
+  ["LICENSE", "usr/share/licenses/td/LICENSE", "644"],
 ]
 
-[package.metadata.rpm]
-package = "td"
-license = "MIT OR Apache-2.0"
-summary = "TeraDock command-line interface"
+[package.metadata.generate-rpm]
+release = "1"
 assets = [
-    ["target/release/td", "/usr/bin/td", "755"],
+  { source = "target/release/td", dest = "/usr/bin/td", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/td/README.md", mode = "644", doc = true },
+  { source = "LICENSE",   dest = "/usr/share/licenses/td/LICENSE", mode = "644", doc = true },
 ]
 
 [dependencies]
