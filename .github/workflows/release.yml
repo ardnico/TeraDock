@@ -62,7 +62,7 @@ jobs:
       - name: Build rpm package
         if: runner.os == 'Linux'
         working-directory: crates/cli
-        run: cargo rpm
+        run: cargo rpm build
 
       - name: Build tar.gz archive
         if: runner.os == 'Linux'
