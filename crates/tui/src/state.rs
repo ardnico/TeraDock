@@ -824,10 +824,6 @@ impl AppState {
         }
     }
 
-    pub fn clear_marks(&mut self) {
-        self.marked_profiles.clear();
-    }
-
     pub fn toggle_details(&mut self) -> Result<()> {
         self.details_open = !self.details_open;
         if self.details_open {

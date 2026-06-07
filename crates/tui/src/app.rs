@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -52,6 +53,9 @@ fn run_loop(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => {
+                    if !should_handle_key_event(&key) {
+                        continue;
+                    }
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('c')
                     {
@@ -71,6 +75,10 @@ fn run_loop(
             }
         }
     }
+}
+
+fn should_handle_key_event(key: &KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
 fn handle_search_key(state: &mut AppState, code: KeyCode) -> Result<()> {
@@ -157,5 +165,29 @@ fn handle_confirm_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_handle_key_event;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    #[test]
+    fn handles_press_events() {
+        let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Press);
+        assert!(should_handle_key_event(&key));
+    }
+
+    #[test]
+    fn handles_repeat_events() {
+        let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert!(should_handle_key_event(&key));
+    }
+
+    #[test]
+    fn ignores_release_events() {
+        let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Release);
+        assert!(!should_handle_key_event(&key));
     }
 }
