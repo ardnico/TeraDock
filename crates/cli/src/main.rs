@@ -17,7 +17,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use tdcore::agent;
-use tdcore::cmdset::{CmdSetStore, StepOnError};
+use tdcore::cmdset::{CmdSetStore, NewCmdSet, NewCmdStep, StepOnError};
+use tdcore::cmdset_runner::{run_cmdset_ssh, CmdSetRunRequest};
 use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
@@ -89,6 +90,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Initialize local TeraDock data and optionally install safe samples
+    Init(InitArgs),
     /// Execute a non-interactive command over SSH
     Exec {
         /// Profile ID to use
@@ -255,6 +258,13 @@ struct ProfileListArgs {
     /// Free-text query over id/name/host/user
     #[arg(long)]
     query: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Install safe read-only sample CommandSets
+    #[arg(long)]
+    with_samples: bool,
 }
 
 #[derive(Debug, Args)]
@@ -574,6 +584,7 @@ fn main() -> Result<()> {
         Some(Commands::Env { command }) => handle_env(command),
         Some(Commands::Agent { command }) => handle_agent(command),
         Some(Commands::Doctor { json }) => handle_doctor(json),
+        Some(Commands::Init(args)) => handle_init(args),
         Some(Commands::Exec {
             profile_id,
             timeout_ms,
@@ -676,6 +687,103 @@ fn print_import_report(report: &ImportReport) {
         report.secrets,
         report.secrets_skipped
     );
+}
+
+fn handle_init(args: InitArgs) -> Result<()> {
+    let config_dir = paths::config_dir()?;
+    let database_path = paths::database_path()?;
+    let conn = db::init_connection()?;
+    let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+
+    println!("TeraDock local data is ready.");
+    println!("Config dir: {}", config_dir.display());
+    println!("Database: {}", database_path.display());
+    println!("Schema version: {schema_version}");
+
+    if args.with_samples {
+        let mut cmdset_store = CmdSetStore::new(conn);
+        let installed = install_sample_cmdsets(&mut cmdset_store)?;
+        println!();
+        println!("Sample CommandSets:");
+        for item in installed {
+            println!("  {} {}", item.status.as_str(), item.cmdset_id);
+        }
+    }
+
+    println!();
+    println!("Next commands:");
+    println!("  td doctor");
+    if !args.with_samples {
+        println!("  td init --with-samples");
+    }
+    println!("  td profile add --name lab1 --host 192.0.2.10 --user admin --danger high");
+    println!("  td run <profile_id> linux-basic-check");
+    println!("  td ui");
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleInstallResult {
+    cmdset_id: String,
+    status: SampleInstallStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SampleInstallStatus {
+    Created,
+    Skipped,
+}
+
+impl SampleInstallStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+fn install_sample_cmdsets(store: &mut CmdSetStore) -> Result<Vec<SampleInstallResult>> {
+    let sample = linux_basic_check_sample();
+    let cmdset_id = sample
+        .cmdset_id
+        .clone()
+        .expect("sample cmdset id should be explicit");
+    if store.get(&cmdset_id)?.is_some() {
+        return Ok(vec![SampleInstallResult {
+            cmdset_id,
+            status: SampleInstallStatus::Skipped,
+        }]);
+    }
+    let created = store.insert(sample)?;
+    Ok(vec![SampleInstallResult {
+        cmdset_id: created.cmdset_id,
+        status: SampleInstallStatus::Created,
+    }])
+}
+
+fn linux_basic_check_sample() -> NewCmdSet {
+    let commands = [
+        "uname -a",
+        "uptime",
+        "df -h",
+        "free -m",
+        "systemctl --failed || true",
+    ];
+    NewCmdSet {
+        cmdset_id: Some("linux-basic-check".to_string()),
+        name: "Linux basic check".to_string(),
+        vars: None,
+        steps: commands
+            .iter()
+            .map(|cmd| NewCmdStep {
+                cmd: (*cmd).to_string(),
+                timeout_ms: Some(10_000),
+                on_error: StepOnError::Continue,
+                parser_spec: tdcore::parser::ParserSpec::Raw,
+            })
+            .collect(),
+    }
 }
 
 fn handle_profile(cmd: ProfileCommands) -> Result<()> {
@@ -1196,7 +1304,7 @@ fn handle_config_apply(args: ConfigApplyArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("config set not found: {}", args.config_id))?;
 
     let started = Instant::now();
-    let via = TransferVia::from_str(&args.via)?;
+    let via = TransferVia::parse(&args.via)?;
     let allow_insecure_transfers = settings::get_allow_insecure_transfers(profile_store.conn())?;
     ensure_insecure_allowed(via, allow_insecure_transfers, args.i_know_its_insecure)?;
     let ssh = resolve_client_for(
@@ -1823,116 +1931,48 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         println!("Aborted by user.");
         return Ok(());
     }
-    if cmdset_store.get(&cmdset_id)?.is_none() {
-        return Err(anyhow!("cmdset not found: {cmdset_id}"));
-    }
-    let steps = cmdset_store.list_steps(&cmdset_id)?;
-    if steps.is_empty() {
-        return Err(anyhow!("cmdset has no steps: {cmdset_id}"));
-    }
-
     let ssh = resolve_client_for(
         ClientKind::Ssh,
         profile.client_overrides.as_ref(),
         &profile_store,
     )?;
-    let run_started = Instant::now();
-    let mut stdout_all = String::new();
-    let mut stderr_all = String::new();
-    let mut step_results = Vec::new();
-    let mut overall_ok = true;
-    let mut last_exit_code = 0;
-
-    for step in steps {
-        let mut command = Command::new(&ssh);
-        command
-            .arg("-p")
-            .arg(profile.port.to_string())
-            .arg(format!("{}@{}", profile.user, profile.host))
-            .arg(&step.cmd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let step_started = Instant::now();
-        let output = match step.timeout_ms {
-            Some(ms) => run_with_timeout(command, Duration::from_millis(ms))
-                .map_err(|e| anyhow!("step {} timed out after {ms}ms: {e}", step.ord))?,
-            None => command.output().context("failed to execute ssh")?,
-        };
-        let duration_ms = step_started.elapsed().as_millis() as i64;
-        let exit_code = output.status.code().unwrap_or_default();
-        let ok = output.status.success();
-        last_exit_code = exit_code;
-        if !ok {
-            overall_ok = false;
-        }
-
-        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-        stdout_all.push_str(&stdout_text);
-        stderr_all.push_str(&stderr_text);
-
-        let parser_def = match &step.parser_spec {
-            tdcore::parser::ParserSpec::Regex(id) => cmdset_store.get_parser(id)?,
-            _ => None,
-        };
-        let parsed = parse_output(&step.parser_spec, &stdout_text, parser_def.as_ref())?;
-
-        step_results.push(serde_json::json!({
-            "ord": step.ord,
-            "cmd": step.cmd,
-            "ok": ok,
-            "exit_code": exit_code,
-            "stdout": stdout_text,
-            "stderr": stderr_text,
-            "duration_ms": duration_ms,
-            "parsed": parsed,
-        }));
-
-        if !json_output {
-            io::stdout().write_all(output.stdout.as_slice())?;
-            io::stderr().write_all(output.stderr.as_slice())?;
-        }
-
-        if !ok && step.on_error == StepOnError::Stop {
-            break;
-        }
-    }
-
-    let duration_ms = run_started.elapsed().as_millis() as i64;
-    profile_store.touch_last_used(&profile.profile_id)?;
-    let meta_json = serde_json::json!({
-        "cmdset_id": cmdset_id,
-        "steps_executed": step_results.len(),
-    });
-    let entry = oplog::OpLogEntry {
-        op: "run".into(),
-        profile_id: Some(profile.profile_id.clone()),
-        client_used: Some(ssh.to_string_lossy().into_owned()),
-        ok: overall_ok,
-        exit_code: Some(last_exit_code),
-        duration_ms: Some(duration_ms),
-        meta_json: Some(meta_json),
-    };
-    oplog::log_operation(profile_store.conn(), entry)?;
+    let auth = ssh_auth_context(profile_store.conn())?;
+    emit_ssh_auth_messages(&auth);
+    let result = run_cmdset_ssh(
+        &profile_store,
+        &cmdset_store,
+        CmdSetRunRequest {
+            profile_id: &profile_id,
+            cmdset_id: &cmdset_id,
+            ssh: &ssh,
+            ssh_auth_args: &auth.args,
+        },
+        |step| -> tdcore::error::Result<()> {
+            if !json_output {
+                io::stdout().write_all(step.stdout.as_bytes())?;
+                io::stderr().write_all(step.stderr.as_bytes())?;
+            }
+            Ok(())
+        },
+    )?;
 
     if json_output {
         let json = serde_json::json!({
-            "ok": overall_ok,
-            "exit_code": last_exit_code,
-            "stdout": stdout_all,
-            "stderr": stderr_all,
-            "duration_ms": duration_ms,
+            "ok": result.ok,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration_ms": result.duration_ms,
             "parsed": {
-                "steps": step_results,
+                "steps": result.steps,
             }
         });
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
 
-    if !overall_ok {
-        return Err(anyhow!("run failed with exit code {last_exit_code}"));
+    if !result.ok {
+        return Err(anyhow!("run failed with exit code {}", result.exit_code));
     }
     Ok(())
 }
@@ -2271,7 +2311,7 @@ fn handle_push(args: TransferArgs) -> Result<()> {
         println!("Aborted by user.");
         return Ok(());
     }
-    let via = TransferVia::from_str(&args.via)?;
+    let via = TransferVia::parse(&args.via)?;
     let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
@@ -2301,7 +2341,7 @@ fn handle_pull(args: TransferArgs) -> Result<()> {
         println!("Aborted by user.");
         return Ok(());
     }
-    let via = TransferVia::from_str(&args.via)?;
+    let via = TransferVia::parse(&args.via)?;
     let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
@@ -2340,7 +2380,7 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
         return Ok(());
     }
 
-    let via = TransferVia::from_str(&args.via)?;
+    let via = TransferVia::parse(&args.via)?;
     let allow_insecure_transfers = settings::get_allow_insecure_transfers(store.conn())?;
     let auth = ssh_auth_context(store.conn())?;
     emit_ssh_auth_messages(&auth);
@@ -3119,5 +3159,31 @@ mod tests {
             }
             _ => panic!("expected run command"),
         }
+    }
+
+    #[test]
+    fn parses_init_with_samples() {
+        let cli = Cli::try_parse_from(["td", "init", "--with-samples"]).expect("parses init");
+
+        match cli.command {
+            Some(Commands::Init(args)) => {
+                assert!(args.with_samples);
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn sample_cmdset_install_is_idempotent() {
+        let conn = db::init_in_memory().unwrap();
+        let mut store = CmdSetStore::new(conn);
+
+        let first = install_sample_cmdsets(&mut store).unwrap();
+        let second = install_sample_cmdsets(&mut store).unwrap();
+
+        assert_eq!(first[0].status, SampleInstallStatus::Created);
+        assert_eq!(second[0].status, SampleInstallStatus::Skipped);
+        let steps = store.list_steps("linux-basic-check").unwrap();
+        assert_eq!(steps.len(), 5);
     }
 }

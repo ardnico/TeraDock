@@ -536,7 +536,7 @@ fn insert_profile(tx: &Transaction<'_>, profile: &Profile) -> Result<()> {
     let overrides_json = profile
         .client_overrides
         .as_ref()
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()?;
 
     tx.execute(
@@ -582,7 +582,7 @@ fn insert_cmdset(tx: &Transaction<'_>, cmdset: &ExportCmdSet) -> Result<()> {
     let vars_json = cmdset
         .vars
         .as_ref()
-        .map(|vars| serde_json::to_string(vars))
+        .map(serde_json::to_string)
         .transpose()?;
     tx.execute(
         r#"

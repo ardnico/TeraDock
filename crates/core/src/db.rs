@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rusqlite::{Connection, TransactionBehavior};
 use tracing::info;
 
@@ -6,6 +8,10 @@ use crate::paths::database_path;
 
 pub fn init_connection() -> Result<Connection> {
     let path = database_path()?;
+    init_connection_at(&path)
+}
+
+pub fn init_connection_at(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     configure_connection(&mut conn)?;
     apply_migrations(&mut conn)?;
@@ -20,7 +26,7 @@ pub fn init_in_memory() -> Result<Connection> {
 }
 
 fn configure_connection(conn: &mut Connection) -> Result<()> {
-    conn.pragma_update(None, "foreign_keys", &true)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(())
 }
 

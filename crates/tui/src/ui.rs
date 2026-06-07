@@ -230,9 +230,10 @@ fn hints_line(state: &AppState) -> Line<'static> {
             ),
             Span::raw("  (Enter/Esc to stop)"),
         ]),
-        InputMode::Normal => Line::from(
-            "Keys: / search, T type, g group, D danger, [ ] tag, x toggle tag, space mark, d details, R bulk run, r run, ? help, 1-4 tabs, q quit",
-        ),
+        InputMode::Normal => Line::from(vec![
+            Span::styled(state.action_hint(), Style::default().fg(Color::Yellow)),
+            Span::raw(" | / search, r run, R bulk, Space mark, d details, ? help, q quit"),
+        ]),
     }
 }
 
@@ -251,7 +252,9 @@ fn action_info(state: &AppState) -> Text<'static> {
             profile.user, profile.host, profile.port, profile.profile_type, profile.danger_level
         )));
     } else {
-        lines.push(Line::from("No profile selected"));
+        lines.push(Line::from(
+            "No profile selected. Clear filters or add a profile.",
+        ));
     }
     if let Some(cmdset) = state.selected_cmdset() {
         lines.push(Line::from(format!(
@@ -259,7 +262,9 @@ fn action_info(state: &AppState) -> Text<'static> {
             cmdset.name, cmdset.cmdset_id
         )));
     } else {
-        lines.push(Line::from("CommandSet: none"));
+        lines.push(Line::from(
+            "CommandSet: none. Use td init --with-samples or import one.",
+        ));
     }
     if let Some(status) = state.status_message() {
         lines.push(Line::from(Span::styled(
@@ -326,6 +331,15 @@ fn summary_content(state: &AppState) -> Text<'static> {
         "Bulk run summary: {} total, {} ok, {} failed",
         summary.total, summary.ok_count, summary.fail_count
     )));
+    if summary.fail_count > 0 {
+        lines.push(Line::from(
+            "Review failed rows below; stdout/stderr tabs show the last executed profile.",
+        ));
+    } else {
+        lines.push(Line::from(
+            "All marked profiles completed successfully; stdout/stderr tabs show the last executed profile.",
+        ));
+    }
     lines.push(Line::from(""));
     for item in &summary.items {
         let status = if item.ok { "ok" } else { "fail" };
@@ -436,6 +450,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  R           run CommandSet on marked profiles"),
         Line::from("  d           toggle resolved details"),
         Line::from("  Space       mark/unmark profile"),
+        Line::from("  critical    type shown profile id(s), Enter confirms, Esc cancels"),
         Line::from(""),
         Line::from("Filters"),
         Line::from("  T           cycle profile type filter"),

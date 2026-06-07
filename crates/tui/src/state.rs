@@ -1,17 +1,13 @@
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use directories::BaseDirs;
-use wait_timeout::ChildExt;
 
-use tdcore::cmdset::{CmdSet, CmdSetStore, StepOnError};
+use tdcore::cmdset::{CmdSet, CmdSetStore};
+use tdcore::cmdset_runner::{run_cmdset_ssh, CmdSetRunRequest, CmdSetRunResult};
 use tdcore::doctor::{self, ClientKind};
-use tdcore::oplog;
-use tdcore::parser::{parse_output, ParserSpec};
 use tdcore::profile::{DangerLevel, Profile, ProfileFilters, ProfileStore, ProfileType};
 use tdcore::settings::{self, ResolvedSettingDetail, ResolvedSettingSource};
 
@@ -34,18 +30,6 @@ pub enum ResultTab {
     Stderr,
     Parsed,
     Summary,
-}
-
-#[derive(Debug, Clone)]
-pub struct StepResult {
-    pub ord: i64,
-    pub cmd: String,
-    pub ok: bool,
-    pub exit_code: i32,
-    pub duration_ms: i64,
-    pub stdout: String,
-    pub stderr: String,
-    pub parsed: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +70,37 @@ impl RunResult {
             stderr: String::new(),
             parsed_pretty: "{}".to_string(),
             error: Some(err.to_string()),
+        }
+    }
+
+    fn from_cmdset_run(run: CmdSetRunResult) -> Self {
+        let steps_json = run
+            .steps
+            .iter()
+            .map(|step| {
+                serde_json::json!({
+                    "ord": step.ord,
+                    "cmd": step.cmd,
+                    "ok": step.ok,
+                    "exit_code": step.exit_code,
+                    "stdout": step.stdout,
+                    "stderr": step.stderr,
+                    "duration_ms": step.duration_ms,
+                    "parsed": step.parsed,
+                })
+            })
+            .collect::<Vec<_>>();
+        let parsed_json = serde_json::json!({ "steps": steps_json });
+        let parsed_pretty =
+            serde_json::to_string_pretty(&parsed_json).unwrap_or_else(|_| "{}".into());
+        Self {
+            ok: run.ok,
+            exit_code: run.exit_code,
+            duration_ms: run.duration_ms,
+            stdout: run.stdout,
+            stderr: run.stderr,
+            parsed_pretty,
+            error: None,
         }
     }
 }
@@ -257,6 +272,40 @@ impl AppState {
 
     pub fn status_message(&self) -> Option<&str> {
         self.status_message.as_deref()
+    }
+
+    pub fn action_hint(&self) -> String {
+        if self.filtered.is_empty() {
+            return "No profiles match filters; press c to clear filters.".to_string();
+        }
+        if self.cmdsets.is_empty() {
+            return "No CommandSets available; use td init --with-samples or import one."
+                .to_string();
+        }
+        let Some(profile) = self.selected_profile() else {
+            return "No profile selected.".to_string();
+        };
+        let Some(cmdset) = self.selected_cmdset() else {
+            return "No CommandSet selected.".to_string();
+        };
+        if profile.profile_type != ProfileType::Ssh {
+            return format!(
+                "Selected profile is {}; CommandSet run currently supports SSH only.",
+                profile.profile_type
+            );
+        }
+        if self.marked_profiles.is_empty() {
+            format!(
+                "Ready: r runs '{}' on '{}'; Space marks profiles for bulk R.",
+                cmdset.cmdset_id, profile.profile_id
+            )
+        } else {
+            format!(
+                "Ready: r runs selected; R runs '{}' on {} marked profiles.",
+                cmdset.cmdset_id,
+                self.marked_profiles.len()
+            )
+        }
     }
 
     pub fn cmdsets(&self) -> &[CmdSet] {
@@ -481,11 +530,14 @@ impl AppState {
     pub fn request_run(&mut self) -> Result<()> {
         let (profile_id, cmdset_id, danger_level, profile_label) = {
             let Some(profile) = self.selected_profile() else {
-                self.status_message = Some("No profile selected.".to_string());
+                self.status_message =
+                    Some("No profile selected; clear filters or add a profile.".to_string());
                 return Ok(());
             };
             let Some(cmdset) = self.selected_cmdset() else {
-                self.status_message = Some("No CommandSet selected.".to_string());
+                self.status_message = Some(
+                    "No CommandSet selected; run td init --with-samples or import one.".to_string(),
+                );
                 return Ok(());
             };
             (
@@ -498,7 +550,7 @@ impl AppState {
         if danger_level == DangerLevel::Critical {
             self.confirm = Some(ConfirmState {
                 message: format!(
-                    "Profile '{}' is critical. Run CommandSet '{}' on {} ?",
+                    "Critical profile '{}'. Type the profile id to run CommandSet '{}' on {}.",
                     profile_id, cmdset_id, profile_label
                 ),
                 required_input: profile_id.clone(),
@@ -515,14 +567,17 @@ impl AppState {
 
     pub fn request_bulk_run(&mut self) -> Result<()> {
         if self.marked_profiles.is_empty() {
-            self.status_message = Some("No profiles marked for bulk run.".to_string());
+            self.status_message =
+                Some("No profiles marked; press Space on profiles before bulk run.".to_string());
             return Ok(());
         }
         let Some(cmdset_id) = self
             .selected_cmdset()
             .map(|cmdset| cmdset.cmdset_id.clone())
         else {
-            self.status_message = Some("No CommandSet selected.".to_string());
+            self.status_message = Some(
+                "No CommandSet selected; run td init --with-samples or import one.".to_string(),
+            );
             return Ok(());
         };
         let mut profile_ids: Vec<String> = self.marked_profiles.iter().cloned().collect();
@@ -539,7 +594,7 @@ impl AppState {
             let required = critical_ids.join(",");
             self.confirm = Some(ConfirmState {
                 message: format!(
-                    "Critical profiles selected. Type '{}' to confirm bulk run.",
+                    "Critical profiles in bulk run: {}. Type the comma-separated IDs exactly to continue.",
                     required
                 ),
                 required_input: required,
@@ -637,117 +692,24 @@ impl AppState {
         if profile.profile_type != ProfileType::Ssh {
             return Err(anyhow!("run only supports SSH profiles for now"));
         }
-        let cmdset = self
-            .cmdset_store
-            .get(cmdset_id)?
-            .ok_or_else(|| anyhow!("cmdset not found: {cmdset_id}"))?;
-        let steps = self.cmdset_store.list_steps(&cmdset.cmdset_id)?;
-        if steps.is_empty() {
-            return Err(anyhow!("cmdset has no steps: {cmdset_id}"));
-        }
-
         let ssh = resolve_client_for(
             ClientKind::Ssh,
             profile.client_overrides.as_ref(),
             &self.store,
         )?;
         let auth = ssh_auth_context(self.store.conn())?;
-
-        let run_started = Instant::now();
-        let mut stdout_all = String::new();
-        let mut stderr_all = String::new();
-        let mut step_results = Vec::new();
-        let mut overall_ok = true;
-        let mut last_exit_code = 0;
-
-        for step in steps {
-            let mut command = build_ssh_command(&ssh, &profile, &auth.args, &step.cmd);
-            let step_started = Instant::now();
-            let output = match step.timeout_ms {
-                Some(ms) => run_with_timeout(command, Duration::from_millis(ms))
-                    .map_err(|e| anyhow!("step {} timed out after {ms}ms: {e}", step.ord))?,
-                None => command.output().context("failed to execute ssh")?,
-            };
-            let duration_ms = step_started.elapsed().as_millis() as i64;
-            let exit_code = output.status.code().unwrap_or_default();
-            let ok = output.status.success();
-            last_exit_code = exit_code;
-            if !ok {
-                overall_ok = false;
-            }
-
-            let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-            stdout_all.push_str(&stdout_text);
-            stderr_all.push_str(&stderr_text);
-
-            let parser_def = match &step.parser_spec {
-                ParserSpec::Regex(id) => self.cmdset_store.get_parser(id)?,
-                _ => None,
-            };
-            let parsed = parse_output(&step.parser_spec, &stdout_text, parser_def.as_ref())?;
-
-            step_results.push(StepResult {
-                ord: step.ord,
-                cmd: step.cmd,
-                ok,
-                exit_code,
-                stdout: stdout_text,
-                stderr: stderr_text,
-                duration_ms,
-                parsed,
-            });
-
-            if !ok && step.on_error == StepOnError::Stop {
-                break;
-            }
-        }
-
-        let duration_ms = run_started.elapsed().as_millis() as i64;
-        self.store.touch_last_used(&profile.profile_id)?;
-        let meta_json = serde_json::json!({
-            "cmdset_id": cmdset_id,
-            "steps_executed": step_results.len(),
-        });
-        let entry = oplog::OpLogEntry {
-            op: "run".into(),
-            profile_id: Some(profile.profile_id.clone()),
-            client_used: Some(ssh.to_string_lossy().into_owned()),
-            ok: overall_ok,
-            exit_code: Some(last_exit_code),
-            duration_ms: Some(duration_ms),
-            meta_json: Some(meta_json),
-        };
-        oplog::log_operation(self.store.conn(), entry)?;
-
-        let steps_json = step_results
-            .iter()
-            .map(|step| {
-                serde_json::json!({
-                    "ord": step.ord,
-                    "cmd": step.cmd,
-                    "ok": step.ok,
-                    "exit_code": step.exit_code,
-                    "stdout": step.stdout,
-                    "stderr": step.stderr,
-                    "duration_ms": step.duration_ms,
-                    "parsed": step.parsed,
-                })
-            })
-            .collect::<Vec<_>>();
-        let parsed_json = serde_json::json!({ "steps": steps_json });
-        let parsed_pretty =
-            serde_json::to_string_pretty(&parsed_json).unwrap_or_else(|_| "{}".into());
-
-        Ok(RunResult {
-            ok: overall_ok,
-            exit_code: last_exit_code,
-            duration_ms,
-            stdout: stdout_all,
-            stderr: stderr_all,
-            parsed_pretty,
-            error: None,
-        })
+        let run = run_cmdset_ssh(
+            &self.store,
+            &self.cmdset_store,
+            CmdSetRunRequest {
+                profile_id,
+                cmdset_id,
+                ssh: &ssh,
+                ssh_auth_args: &auth.args,
+            },
+            |_| Ok(()),
+        )?;
+        Ok(RunResult::from_cmdset_run(run))
     }
 
     pub fn command_preview(&self, limit: usize) -> Vec<String> {
@@ -1088,40 +1050,7 @@ fn resolve_client_for(
         .ok_or_else(|| anyhow!("{} client not found via overrides or PATH", kind.as_str()))
 }
 
-fn build_ssh_command(
-    ssh: &PathBuf,
-    profile: &Profile,
-    auth_args: &[OsString],
-    cmd: &str,
-) -> Command {
-    let mut command = Command::new(ssh);
-    command
-        .arg("-p")
-        .arg(profile.port.to_string())
-        .args(auth_args)
-        .arg(format!("{}@{}", profile.user, profile.host))
-        .arg(cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-}
-
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output> {
-    let mut child = cmd.spawn().context("failed to spawn command")?;
-    let status = child
-        .wait_timeout(timeout)
-        .context("failed waiting for command")?;
-    if status.is_none() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(anyhow!("timeout after {}ms", timeout.as_millis()));
-    }
-    child
-        .wait_with_output()
-        .context("failed to collect command output")
-}
-
-fn format_ssh_invocation(ssh: &PathBuf, port: u16, auth_args: &[OsString]) -> String {
+fn format_ssh_invocation(ssh: &Path, port: u16, auth_args: &[OsString]) -> String {
     let mut parts = vec![
         ssh.to_string_lossy().to_string(),
         "-p".to_string(),
@@ -1143,12 +1072,10 @@ fn mask_sensitive_tokens(input: &str) -> String {
     let mut idx = 0;
     while idx < tokens.len() {
         let token = tokens[idx].clone();
-        if is_sensitive_flag(&token) {
-            if idx + 1 < tokens.len() {
-                tokens[idx + 1] = "****".to_string();
-                idx += 2;
-                continue;
-            }
+        if is_sensitive_flag(&token) && idx + 1 < tokens.len() {
+            tokens[idx + 1] = "****".to_string();
+            idx += 2;
+            continue;
         }
         if let Some(masked) = mask_sensitive_kv(&token) {
             tokens[idx] = masked;

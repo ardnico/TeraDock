@@ -1,4 +1,5 @@
-use rusqlite::{Connection, Row};
+use common::id::{generate_id, normalize_id, validate_id};
+use rusqlite::{params, Connection, Row};
 use serde_json::Value;
 
 use crate::error::{CoreError, Result};
@@ -18,6 +19,13 @@ pub enum StepOnError {
 }
 
 impl StepOnError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Continue => "continue",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "stop" => Ok(Self::Stop),
@@ -40,6 +48,33 @@ pub struct CmdStep {
     pub parser_spec: ParserSpec,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewCmdSet {
+    pub cmdset_id: Option<String>,
+    pub name: String,
+    pub vars: Option<Value>,
+    pub steps: Vec<NewCmdStep>,
+}
+
+impl NewCmdSet {
+    pub fn normalize_id(&self) -> Result<String> {
+        let id = match &self.cmdset_id {
+            Some(explicit) => normalize_id(explicit),
+            None => generate_id("c_"),
+        };
+        validate_id(&id).map_err(CoreError::InvalidId)?;
+        Ok(id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewCmdStep {
+    pub cmd: String,
+    pub timeout_ms: Option<u64>,
+    pub on_error: StepOnError,
+    pub parser_spec: ParserSpec,
+}
+
 pub struct CmdSetStore {
     conn: Connection,
 }
@@ -47,6 +82,44 @@ pub struct CmdSetStore {
 impl CmdSetStore {
     pub fn new(conn: Connection) -> Self {
         Self { conn }
+    }
+
+    pub fn insert(&mut self, input: NewCmdSet) -> Result<CmdSet> {
+        if input.steps.is_empty() {
+            return Err(CoreError::InvalidCommandSpec(
+                "cmdset must include at least one step".to_string(),
+            ));
+        }
+        let cmdset_id = input.normalize_id()?;
+        let vars_json = input.vars.as_ref().map(serde_json::to_string).transpose()?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO cmdsets (cmdset_id, name, vars_json)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![cmdset_id, input.name, vars_json],
+        )?;
+        for (idx, step) in input.steps.into_iter().enumerate() {
+            let timeout_ms = step.timeout_ms.map(|value| value as i64);
+            tx.execute(
+                r#"
+                INSERT INTO cmdsteps (cmdset_id, ord, cmd, timeout_ms, on_error, parser_spec)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    cmdset_id,
+                    (idx + 1) as i64,
+                    step.cmd,
+                    timeout_ms,
+                    step.on_error.as_str(),
+                    step.parser_spec.to_string()
+                ],
+            )?;
+        }
+        tx.commit()?;
+        self.get(&cmdset_id)?
+            .ok_or_else(|| CoreError::NotFound(cmdset_id))
     }
 
     pub fn get(&self, cmdset_id: &str) -> Result<Option<CmdSet>> {
@@ -193,5 +266,56 @@ mod tests {
         let parser = store.get_parser("r_status").unwrap().expect("parser");
         assert_eq!(parser.parser_id, "r_status");
         assert_eq!(parser.parser_type, ParserType::Regex);
+    }
+
+    #[test]
+    fn inserts_cmdset_with_steps() {
+        let conn = init_in_memory().unwrap();
+        let mut store = CmdSetStore::new(conn);
+
+        let created = store
+            .insert(NewCmdSet {
+                cmdset_id: Some("linux-basic-check".to_string()),
+                name: "Linux basic check".to_string(),
+                vars: None,
+                steps: vec![
+                    NewCmdStep {
+                        cmd: "uname -a".to_string(),
+                        timeout_ms: Some(10_000),
+                        on_error: StepOnError::Continue,
+                        parser_spec: ParserSpec::Raw,
+                    },
+                    NewCmdStep {
+                        cmd: "uptime".to_string(),
+                        timeout_ms: Some(10_000),
+                        on_error: StepOnError::Continue,
+                        parser_spec: ParserSpec::Raw,
+                    },
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(created.cmdset_id, "linux-basic-check");
+        let steps = store.list_steps("linux-basic-check").unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].ord, 1);
+        assert_eq!(steps[1].ord, 2);
+        assert_eq!(steps[0].parser_spec, ParserSpec::Raw);
+    }
+
+    #[test]
+    fn rejects_empty_cmdset() {
+        let conn = init_in_memory().unwrap();
+        let mut store = CmdSetStore::new(conn);
+        let err = store
+            .insert(NewCmdSet {
+                cmdset_id: Some("empty-set".to_string()),
+                name: "Empty".to_string(),
+                vars: None,
+                steps: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, CoreError::InvalidCommandSpec(_)));
     }
 }

@@ -157,11 +157,7 @@ impl SecretStore {
             input.value.as_bytes(),
         )?;
         let now = now_ms();
-        let meta_json = input
-            .meta
-            .as_ref()
-            .map(|v| serde_json::to_string(v))
-            .transpose()?;
+        let meta_json = input.meta.as_ref().map(serde_json::to_string).transpose()?;
         let _ = meta_json;
 
         self.conn.execute(

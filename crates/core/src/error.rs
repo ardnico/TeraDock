@@ -21,6 +21,8 @@ pub enum CoreError {
     InvalidId(IdError),
     #[error("invalid command spec: {0}")]
     InvalidCommandSpec(String),
+    #[error("command execution error: {0}")]
+    CommandExecution(String),
     #[error("parser not found: {0}")]
     ParserNotFound(String),
     #[error("regex error: {0}")]

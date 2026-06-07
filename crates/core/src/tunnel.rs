@@ -419,8 +419,25 @@ fn is_pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::init_in_memory;
+    use crate::db::init_connection_at;
     use crate::profile::{DangerLevel, NewProfile, ProfileStore, ProfileType};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "teradock-tunnel-{name}-{}-{}.db",
+            std::process::id(),
+            crate::util::now_ms()
+        ))
+    }
+
+    fn stores(db_path: &Path) -> (ProfileStore, ForwardStore) {
+        (
+            ProfileStore::new(init_connection_at(db_path).unwrap()),
+            ForwardStore::new(init_connection_at(db_path).unwrap()),
+        )
+    }
 
     fn sample_profile(store: &ProfileStore) -> String {
         let profile = store
@@ -444,10 +461,9 @@ mod tests {
 
     #[test]
     fn normalizes_listen_port_only() {
-        let conn = init_in_memory().unwrap();
-        let store = ProfileStore::new(conn);
+        let db_path = temp_db_path("normalize");
+        let (store, forward_store) = stores(&db_path);
         let profile_id = sample_profile(&store);
-        let forward_store = ForwardStore::new(store.conn().try_clone().unwrap());
         let forward = forward_store
             .insert(NewForward {
                 profile_id,
@@ -458,14 +474,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(forward.listen, "127.0.0.1:8080");
+        let _ = fs::remove_file(db_path);
     }
 
     #[test]
     fn rejects_dest_without_host() {
-        let conn = init_in_memory().unwrap();
-        let store = ProfileStore::new(conn);
+        let db_path = temp_db_path("reject");
+        let (store, forward_store) = stores(&db_path);
         let profile_id = sample_profile(&store);
-        let forward_store = ForwardStore::new(store.conn().try_clone().unwrap());
         let err = forward_store
             .insert(NewForward {
                 profile_id,
@@ -476,14 +492,14 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, CoreError::InvalidSetting(_)));
+        let _ = fs::remove_file(db_path);
     }
 
     #[test]
     fn dynamic_forward_omits_dest() {
-        let conn = init_in_memory().unwrap();
-        let store = ProfileStore::new(conn);
+        let db_path = temp_db_path("dynamic");
+        let (store, forward_store) = stores(&db_path);
         let profile_id = sample_profile(&store);
-        let forward_store = ForwardStore::new(store.conn().try_clone().unwrap());
         let forward = forward_store
             .insert(NewForward {
                 profile_id,
@@ -494,5 +510,6 @@ mod tests {
             })
             .unwrap();
         assert!(forward.dest.is_none());
+        let _ = fs::remove_file(db_path);
     }
 }

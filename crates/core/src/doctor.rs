@@ -392,7 +392,14 @@ mod tests {
         File::create(&binary).expect("create fake binary");
         let path_env = env::join_paths([&temp]).expect("join path");
         let found = find_in_path(&path_env, &["ssh-test"]).expect("should find client");
-        assert_eq!(found, binary);
+        if cfg!(windows) {
+            assert_eq!(
+                found.to_string_lossy().to_lowercase(),
+                binary.to_string_lossy().to_lowercase()
+            );
+        } else {
+            assert_eq!(found, binary);
+        }
         let _ = fs::remove_file(&binary);
         let _ = fs::remove_dir_all(&temp);
     }

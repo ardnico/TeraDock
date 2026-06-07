@@ -21,6 +21,7 @@ pub struct TransferOutcome {
     pub insecure: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_transfer_with_log(
     store: &ProfileStore,
     profile: &Profile,
@@ -73,6 +74,7 @@ pub fn run_transfer_with_log(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_transfer(
     profile: &Profile,
     direction: TransferDirection,

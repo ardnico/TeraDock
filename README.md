@@ -1,68 +1,126 @@
 # TeraDock
 
-TeraDock は、SSH/Telnet/Serial などの接続先プロファイルや CommandSet を一元管理し、CLI と TUI の両方から操作できるツールです。
+TeraDock is a CLI/TUI tool for managing connection profiles and safely running reusable command sets across SSH/Telnet/Serial targets.
 
-## 特徴
+The main workflow is simple: keep connection profiles in one local database, mark risky targets with a danger level, run a CommandSet against one or more SSH profiles, then inspect stdout, stderr, parsed output, and operation logs.
 
-- プロファイル管理（SSH/Telnet/Serial）
-- CommandSet の実行と結果表示
-- 設定スコープ（global/env/profile/command）による上書き
-- SSH トンネルとフォワード管理
-- CLI と TUI の両方を提供
+## Use Cases
 
-## 使い方（CLI）
+- Check the state of multiple Linux servers with the same read-only commands.
+- Manage access details for embedded devices, inspection equipment, lab hosts, and maintenance terminals.
+- Label production or fragile targets as `high` or `critical` before running actions.
+- Capture routine work as a CommandSet instead of retyping command sequences.
+- Use the TUI to search, filter, mark profiles, run CommandSets, and review bulk results.
+
+## Quick Start
+
+Build from source:
 
 ```bash
-# ヘルプ
+cargo build -p td --release
 cargo run -p td -- --help
-
-# プロファイル一覧
-cargo run -p td -- profile list
-
-# TUI 起動
-cargo run -p td -- ui
 ```
 
-## 使い方（TUI）
+Initialize local data and install the safe sample CommandSet:
 
-TUI は `td ui` で起動します。キーボード操作でプロファイルの選択、CommandSet の実行、結果表示、詳細表示ができます。
+```bash
+cargo run -p td -- init --with-samples
+cargo run -p td -- doctor
+```
+
+Add an SSH profile:
+
+```bash
+cargo run -p td -- profile add \
+  --profile-id lab1 \
+  --name "Lab server 1" \
+  --host 192.0.2.10 \
+  --user admin \
+  --danger high \
+  --group lab \
+  --tag linux
+```
+
+Run the sample read-only CommandSet:
+
+```bash
+cargo run -p td -- run lab1 linux-basic-check
+cargo run -p td -- run lab1 linux-basic-check --json
+```
+
+Open the TUI:
 
 ```bash
 cargo run -p td -- ui
 ```
 
-## ビルド
+After installing the binary as `td`, drop the `cargo run -p td --` prefix.
+
+## CLI Examples
 
 ```bash
-# CLI ビルド
-cargo build -p td
-
-# TUI ビルド
-cargo build -p tui
+td init --with-samples
+td doctor
+td profile list --group lab --tag linux
+td profile show lab1
+td exec lab1 --timeout-ms 5000 -- uname -a
+td run lab1 linux-basic-check --json
+td export -o teradock-export.json
+td import --conflict rename teradock-export.json
 ```
 
-## リリース
+CommandSets are currently created through `td init --with-samples`, import JSON, or direct database-backed tooling. The built-in `linux-basic-check` sample runs only read-only Linux commands: `uname -a`, `uptime`, `df -h`, `free -m`, and `systemctl --failed || true`.
 
-`v*` タグを push すると GitHub Actions がリリースを作成し、以下の成果物を付与します。
+## TUI Basics
 
-- Windows インストーラ
-- Debian パッケージ（.deb）
-- RPM パッケージ（.rpm）
+Run `td ui`.
 
-### リリース手順
+- `/` searches profiles.
+- `T`, `g`, `D`, `[`, `]`, and `x` filter by type, group, danger, and tags.
+- `Space` marks profiles for bulk execution.
+- `r` runs the selected CommandSet on the selected profile.
+- `R` runs the selected CommandSet on marked profiles.
+- `1` to `4` switch stdout, stderr, parsed, and summary result tabs.
+- `d` opens resolved settings details.
+- `?` shows the full key help.
 
-1. `Cargo.toml` と `crates/cli/Cargo.toml` の version を更新します。
-2. 変更をコミットして main ブランチにマージします。
-3. `vX.Y.Z` 形式でタグを作成し push します。
+The status line explains why a run is not currently available, such as no selected profile, no CommandSet, or no marked profiles for bulk run.
+
+## Safety Model
+
+Profiles have a danger level: `normal`, `high`, or `critical`. Critical profiles require explicit confirmation before connect, exec, run, transfer, and config apply operations. In the TUI, CommandSet execution on critical profiles requires typing the shown profile id, and bulk runs require typing the comma-separated critical ids.
+
+Secrets are stored encrypted behind a master password. TeraDock does not print secret values in normal listing commands. Be careful with `td secret reveal` and with `td export --include-secrets`; exports without that flag include only secret metadata.
+
+FTP transfer is treated as insecure and requires explicit opt-in. Prefer SSH-based `scp` or `sftp`.
+
+## Import And Export
+
+Use export/import to move local TeraDock data between machines, seed CommandSets, or back up profiles:
 
 ```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
+td export -o teradock-export.json
+td import --conflict reject teradock-export.json
+td import --conflict rename teradock-export.json
 ```
 
-タグ push 後、GitHub Actions の Release ワークフローがビルドを実行し、成果物を自動でリリースに付与します。
+The export format includes profiles, CommandSets, parser definitions, config sets, and secret metadata. Secret values are excluded unless `--include-secrets` is used.
 
-## 開発メモ
+## Platform Notes
 
-- 仕様・設計は `PROJECT_PLAN.md` と `EXTERNAL_DESIGN.md` を参照してください。
-- 実装計画は `execplans/` にあります。
+TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
+
+## What TeraDock Is Not
+
+- It is not a full replacement for configuration management tools such as Ansible.
+- It is not a Web UI.
+- It is not a password sharing tool.
+- It is not a monitoring system by itself.
+
+## More Documentation
+
+- [Getting Started](docs/getting-started.md)
+- [CommandSets](docs/commandsets.md)
+- [TUI](docs/tui.md)
+- [Security](docs/security.md)
+- [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)

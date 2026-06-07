@@ -21,7 +21,7 @@ pub enum TransferVia {
 }
 
 impl TransferVia {
-    pub fn from_str(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value.to_lowercase().as_str() {
             "scp" => Ok(Self::Scp),
             "sftp" => Ok(Self::Sftp),

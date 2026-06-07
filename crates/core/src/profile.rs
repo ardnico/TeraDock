@@ -37,18 +37,13 @@ impl fmt::Display for ProfileType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DangerLevel {
+    #[default]
     Normal,
     High,
     Critical,
-}
-
-impl Default for DangerLevel {
-    fn default() -> Self {
-        DangerLevel::Normal
-    }
 }
 
 impl fmt::Display for DangerLevel {
@@ -162,7 +157,7 @@ impl ProfileStore {
         let overrides_json = input
             .client_overrides
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()?;
 
         self.conn.execute(
@@ -306,7 +301,7 @@ impl ProfileStore {
         let overrides_json = profile
             .client_overrides
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()?;
 
         self.conn.execute(

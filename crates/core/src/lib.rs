@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod cmdset;
+pub mod cmdset_runner;
 pub mod configset;
 pub mod crypto;
 pub mod db;

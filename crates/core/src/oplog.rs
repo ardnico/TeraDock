@@ -18,7 +18,7 @@ pub fn log_operation(conn: &Connection, entry: OpLogEntry) -> Result<()> {
     let meta = entry
         .meta_json
         .as_ref()
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()?;
     conn.execute(
         r#"

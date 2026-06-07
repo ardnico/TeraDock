@@ -1,3 +1,5 @@
+use std::fmt;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +31,16 @@ impl ParserSpec {
                     )))
                 }
             }
+        }
+    }
+}
+
+impl fmt::Display for ParserSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Raw => write!(f, "raw"),
+            Self::Json => write!(f, "json"),
+            Self::Regex(id) => write!(f, "regex:{id}"),
         }
     }
 }

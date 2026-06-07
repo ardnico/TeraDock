@@ -80,7 +80,7 @@ pub fn run_profile_test(profile: &Profile, options: &TestOptions) -> TestReport 
     checks.push(TestCheck {
         name: "tcp".into(),
         ok: tcp_ok,
-        skipped: dns_ok && addresses.is_empty() || !dns_ok,
+        skipped: !dns_ok || addresses.is_empty(),
         duration_ms: Some(tcp_duration),
         detail: tcp_detail.clone(),
         data: if !addresses.is_empty() {
