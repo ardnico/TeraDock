@@ -1,7 +1,9 @@
 use std::io;
+use std::process::{Command, Stdio};
 use std::time::Duration;
+use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -16,7 +18,9 @@ use tdcore::cmdset::CmdSetStore;
 use tdcore::db;
 use tdcore::profile::ProfileStore;
 
-use crate::state::{ActivePane, AppState, InputMode, ResultTab};
+use crate::state::{
+    ActivePane, AppState, ConfirmedAction, InputMode, ResultTab, SshSessionCommand,
+};
 use crate::ui;
 
 pub fn run() -> Result<()> {
@@ -63,11 +67,13 @@ fn run_loop(
                     }
                     match state.mode() {
                         InputMode::Search => handle_search_key(state, key.code)?,
-                        InputMode::Normal => {
-                            if handle_normal_key(state, key.code)? {
-                                return Ok(());
+                        InputMode::Normal => match handle_normal_key(state, key.code)? {
+                            UiAction::Continue => {}
+                            UiAction::Quit => return Ok(()),
+                            UiAction::OpenSshSession => {
+                                handle_ssh_session_request(terminal, state)?;
                             }
-                        }
+                        },
                     }
                 }
                 Event::Resize(_, _) => {}
@@ -90,12 +96,19 @@ fn handle_search_key(state: &mut AppState, code: KeyCode) -> Result<()> {
     }
 }
 
-fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiAction {
+    Continue,
+    Quit,
+    OpenSshSession,
+}
+
+fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<UiAction> {
     if state.confirm_state().is_some() {
-        return handle_confirm_key(state, code).map(|_| false);
+        return handle_confirm_key(state, code);
     }
     match code {
-        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Char('q') => return Ok(UiAction::Quit),
         KeyCode::Char('/') => state.enter_search(),
         KeyCode::Char('T') => state.cycle_profile_type()?,
         KeyCode::Char('g') => state.cycle_group()?,
@@ -144,34 +157,137 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<bool> {
         KeyCode::Char('4') => state.set_result_tab(ResultTab::Summary),
         KeyCode::Char('r') | KeyCode::Enter => state.request_run()?,
         KeyCode::Char('R') => state.request_bulk_run()?,
+        KeyCode::Char('s') => return Ok(UiAction::OpenSshSession),
         _ => {}
     }
-    Ok(false)
+    Ok(UiAction::Continue)
 }
 
-fn handle_confirm_key(state: &mut AppState, code: KeyCode) -> Result<()> {
+fn handle_confirm_key(state: &mut AppState, code: KeyCode) -> Result<UiAction> {
     match code {
-        KeyCode::Enter => state.confirm_action(),
+        KeyCode::Enter => match state.confirm_action()? {
+            ConfirmedAction::Continue => Ok(UiAction::Continue),
+            ConfirmedAction::OpenSshSession => Ok(UiAction::OpenSshSession),
+        },
         KeyCode::Backspace => {
             state.pop_confirm_char();
-            Ok(())
+            Ok(UiAction::Continue)
         }
         KeyCode::Char(ch) => {
             state.push_confirm_char(ch);
-            Ok(())
+            Ok(UiAction::Continue)
         }
         KeyCode::Esc => {
             state.cancel_confirm();
-            Ok(())
+            Ok(UiAction::Continue)
         }
-        _ => Ok(()),
+        _ => Ok(UiAction::Continue),
     }
+}
+
+fn handle_ssh_session_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) -> Result<()> {
+    let Some(session) = state.build_ssh_session_command()? else {
+        return Ok(());
+    };
+    match run_interactive_ssh_session(terminal, &session)? {
+        SshSessionRunResult::Completed(outcome) => {
+            if let Err(err) = state.record_ssh_session_result(
+                &session,
+                outcome.ok,
+                outcome.exit_code,
+                outcome.duration_ms,
+            ) {
+                state.set_status_message(format!(
+                    "SSH session ended, but failed to record result: {err}"
+                ));
+            }
+        }
+        SshSessionRunResult::LaunchFailed(err) => {
+            state.set_status_message(format!("Failed to launch SSH session: {err}"));
+        }
+    }
+    Ok(())
+}
+
+struct SshSessionOutcome {
+    ok: bool,
+    exit_code: Option<i32>,
+    duration_ms: i64,
+}
+
+enum SshSessionRunResult {
+    Completed(SshSessionOutcome),
+    LaunchFailed(anyhow::Error),
+}
+
+fn run_interactive_ssh_session(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    session: &SshSessionCommand,
+) -> Result<SshSessionRunResult> {
+    suspend_tui_terminal(terminal)?;
+    let started = Instant::now();
+    let status = Command::new(&session.executable)
+        .args(&session.args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to launch ssh");
+    let duration_ms = started.elapsed().as_millis() as i64;
+    resume_tui_terminal(terminal).context("failed to restore TUI after SSH session")?;
+
+    match status {
+        Ok(status) => Ok(SshSessionRunResult::Completed(SshSessionOutcome {
+            ok: status.success(),
+            exit_code: status.code(),
+            duration_ms,
+        })),
+        Err(err) => Ok(SshSessionRunResult::LaunchFailed(err)),
+    }
+}
+
+fn suspend_tui_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn resume_tui_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::should_handle_key_event;
+    use super::{handle_normal_key, should_handle_key_event, UiAction};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use tdcore::cmdset::CmdSetStore;
+    use tdcore::db;
+    use tdcore::profile::ProfileStore;
+
+    use crate::state::AppState;
+
+    fn empty_state() -> AppState {
+        AppState::new(
+            ProfileStore::new(db::init_in_memory().unwrap()),
+            CmdSetStore::new(db::init_in_memory().unwrap()),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn handles_press_events() {
@@ -189,5 +305,14 @@ mod tests {
     fn ignores_release_events() {
         let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Release);
         assert!(!should_handle_key_event(&key));
+    }
+
+    #[test]
+    fn s_key_requests_ssh_session() {
+        let mut state = empty_state();
+
+        let action = handle_normal_key(&mut state, KeyCode::Char('s')).unwrap();
+
+        assert_eq!(action, UiAction::OpenSshSession);
     }
 }

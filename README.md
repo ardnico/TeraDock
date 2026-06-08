@@ -78,6 +78,7 @@ Run `td ui`.
 - `/` searches profiles.
 - `T`, `g`, `D`, `[`, `]`, and `x` filter by type, group, danger, and tags.
 - `Space` marks profiles for bulk execution.
+- `s` opens an interactive SSH session for the selected SSH profile in the same terminal, then returns to the TUI when the session exits.
 - `r` runs the selected CommandSet on the selected profile.
 - `R` runs the selected CommandSet on marked profiles.
 - `1` to `4` switch stdout, stderr, parsed, and summary result tabs.
@@ -88,7 +89,7 @@ The status line explains why a run is not currently available, such as no select
 
 ## Safety Model
 
-Profiles have a danger level: `normal`, `high`, or `critical`. Critical profiles require explicit confirmation before connect, exec, run, transfer, and config apply operations. In the TUI, CommandSet execution on critical profiles requires typing the shown profile id, and bulk runs require typing the comma-separated critical ids.
+Profiles have a danger level: `normal`, `high`, or `critical`. Critical profiles require explicit confirmation before connect, exec, run, transfer, and config apply operations. In the TUI, SSH sessions and single-profile CommandSet execution on critical profiles require typing the shown profile id, and bulk runs require typing the comma-separated critical ids.
 
 Secrets are stored encrypted behind a master password. TeraDock does not print secret values in normal listing commands. Be careful with `td secret reveal` and with `td export --include-secrets`; exports without that flag include only secret metadata.
 

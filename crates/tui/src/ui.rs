@@ -232,7 +232,7 @@ fn hints_line(state: &AppState) -> Line<'static> {
         ]),
         InputMode::Normal => Line::from(vec![
             Span::styled(state.action_hint(), Style::default().fg(Color::Yellow)),
-            Span::raw(" | / search, r run, R bulk, Space mark, d details, ? help, q quit"),
+            Span::raw(" | / search, s ssh, r run, R bulk, Space mark, d details, ? help, q quit"),
         ]),
     }
 }
@@ -446,6 +446,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  Up/Down     move selection"),
         Line::from(""),
         Line::from("Actions"),
+        Line::from("  s           open interactive SSH session"),
         Line::from("  r / Enter   run CommandSet"),
         Line::from("  R           run CommandSet on marked profiles"),
         Line::from("  d           toggle resolved details"),

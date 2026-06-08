@@ -8,6 +8,7 @@ use directories::BaseDirs;
 use tdcore::cmdset::{CmdSet, CmdSetStore};
 use tdcore::cmdset_runner::{run_cmdset_ssh, CmdSetRunRequest, CmdSetRunResult};
 use tdcore::doctor::{self, ClientKind};
+use tdcore::oplog::{self, OpLogEntry};
 use tdcore::profile::{DangerLevel, Profile, ProfileFilters, ProfileStore, ProfileType};
 use tdcore::settings::{self, ResolvedSettingDetail, ResolvedSettingSource};
 
@@ -58,6 +59,13 @@ pub struct RunResult {
     pub stderr: String,
     pub parsed_pretty: String,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshSessionCommand {
+    pub profile_id: String,
+    pub executable: PathBuf,
+    pub args: Vec<OsString>,
 }
 
 impl RunResult {
@@ -115,6 +123,9 @@ pub enum PendingAction {
         profile_ids: Vec<String>,
         cmdset_id: String,
     },
+    OpenSshSession {
+        profile_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +134,12 @@ pub struct ConfirmState {
     pub required_input: String,
     pub input: String,
     pub action: PendingAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmedAction {
+    Continue,
+    OpenSshSession,
 }
 
 pub struct AppState {
@@ -149,6 +166,7 @@ pub struct AppState {
     details_scroll: usize,
     help_open: bool,
     status_message: Option<String>,
+    confirmed_ssh_session_profile_id: Option<String>,
 }
 
 impl AppState {
@@ -183,6 +201,7 @@ impl AppState {
             details_scroll: 0,
             help_open: false,
             status_message: None,
+            confirmed_ssh_session_profile_id: None,
         })
     }
 
@@ -278,30 +297,35 @@ impl AppState {
         if self.filtered.is_empty() {
             return "No profiles match filters; press c to clear filters.".to_string();
         }
-        if self.cmdsets.is_empty() {
-            return "No CommandSets available; use td init --with-samples or import one."
-                .to_string();
-        }
         let Some(profile) = self.selected_profile() else {
             return "No profile selected.".to_string();
         };
-        let Some(cmdset) = self.selected_cmdset() else {
-            return "No CommandSet selected.".to_string();
-        };
         if profile.profile_type != ProfileType::Ssh {
             return format!(
-                "Selected profile is {}; CommandSet run currently supports SSH only.",
+                "Selected profile is {}; s and CommandSet run require SSH.",
                 profile.profile_type
             );
         }
+        if self.cmdsets.is_empty() {
+            return format!(
+                "Ready: s opens SSH session for '{}'; no CommandSets available.",
+                profile.profile_id
+            );
+        }
+        let Some(cmdset) = self.selected_cmdset() else {
+            return format!(
+                "Ready: s opens SSH session for '{}'; no CommandSet selected.",
+                profile.profile_id
+            );
+        };
         if self.marked_profiles.is_empty() {
             format!(
-                "Ready: r runs '{}' on '{}'; Space marks profiles for bulk R.",
+                "Ready: s opens SSH session; r runs '{}' on '{}'; Space marks profiles for bulk R.",
                 cmdset.cmdset_id, profile.profile_id
             )
         } else {
             format!(
-                "Ready: r runs selected; R runs '{}' on {} marked profiles.",
+                "Ready: s opens SSH session; r runs selected; R runs '{}' on {} marked profiles.",
                 cmdset.cmdset_id,
                 self.marked_profiles.len()
             )
@@ -494,24 +518,34 @@ impl AppState {
         self.confirm = None;
     }
 
-    pub fn confirm_action(&mut self) -> Result<()> {
+    pub fn confirm_action(&mut self) -> Result<ConfirmedAction> {
         let Some(confirm) = self.confirm.as_ref() else {
-            return Ok(());
+            return Ok(ConfirmedAction::Continue);
         };
         if confirm.input != confirm.required_input {
             self.status_message = Some(format!("Type '{}' to confirm.", confirm.required_input));
-            return Ok(());
+            return Ok(ConfirmedAction::Continue);
         }
         let confirm = self.confirm.take().expect("confirm state should exist");
         match confirm.action {
             PendingAction::RunCmdSet {
                 profile_id,
                 cmdset_id,
-            } => self.execute_cmdset_run(&profile_id, &cmdset_id),
+            } => {
+                self.execute_cmdset_run(&profile_id, &cmdset_id)?;
+                Ok(ConfirmedAction::Continue)
+            }
             PendingAction::RunCmdSetBulk {
                 profile_ids,
                 cmdset_id,
-            } => self.execute_cmdset_run_bulk(&profile_ids, &cmdset_id),
+            } => {
+                self.execute_cmdset_run_bulk(&profile_ids, &cmdset_id)?;
+                Ok(ConfirmedAction::Continue)
+            }
+            PendingAction::OpenSshSession { profile_id } => {
+                self.confirmed_ssh_session_profile_id = Some(profile_id);
+                Ok(ConfirmedAction::OpenSshSession)
+            }
         }
     }
 
@@ -607,6 +641,95 @@ impl AppState {
             return Ok(());
         }
         self.execute_cmdset_run_bulk(&profile_ids, &cmdset_id)
+    }
+
+    pub fn build_ssh_session_command(&mut self) -> Result<Option<SshSessionCommand>> {
+        let confirmed_profile_id = self.confirmed_ssh_session_profile_id.take();
+        let Some(profile) = self.selected_profile().cloned() else {
+            self.status_message =
+                Some("No profile selected; clear filters or add a profile.".to_string());
+            return Ok(None);
+        };
+        if profile.profile_type != ProfileType::Ssh {
+            self.status_message = Some(format!(
+                "Selected profile is {}; SSH session requires an SSH profile.",
+                profile.profile_type
+            ));
+            return Ok(None);
+        }
+        if profile.danger_level == DangerLevel::Critical
+            && confirmed_profile_id.as_deref() != Some(profile.profile_id.as_str())
+        {
+            self.confirm = Some(ConfirmState {
+                message: format!(
+                    "Critical profile '{}'. Type the profile id to open SSH session to {}@{}:{}.",
+                    profile.profile_id, profile.user, profile.host, profile.port
+                ),
+                required_input: profile.profile_id.clone(),
+                input: String::new(),
+                action: PendingAction::OpenSshSession {
+                    profile_id: profile.profile_id,
+                },
+            });
+            return Ok(None);
+        }
+        let ssh = match resolve_client_for(
+            ClientKind::Ssh,
+            profile.client_overrides.as_ref(),
+            &self.store,
+        ) {
+            Ok(ssh) => ssh,
+            Err(err) => {
+                self.status_message = Some(format!("SSH client not found: {err}"));
+                return Ok(None);
+            }
+        };
+        let auth = match ssh_auth_context(self.store.conn()) {
+            Ok(auth) => auth,
+            Err(err) => {
+                self.status_message = Some(format!("Failed to build SSH auth options: {err}"));
+                return Ok(None);
+            }
+        };
+        let mut args = vec![
+            OsString::from("-p"),
+            OsString::from(profile.port.to_string()),
+        ];
+        args.extend(auth.args);
+        args.push(OsString::from(format!("{}@{}", profile.user, profile.host)));
+        Ok(Some(SshSessionCommand {
+            profile_id: profile.profile_id,
+            executable: ssh,
+            args,
+        }))
+    }
+
+    pub fn record_ssh_session_result(
+        &mut self,
+        session: &SshSessionCommand,
+        ok: bool,
+        exit_code: Option<i32>,
+        duration_ms: i64,
+    ) -> Result<()> {
+        self.store.touch_last_used(&session.profile_id)?;
+        oplog::log_operation(
+            self.store.conn(),
+            OpLogEntry {
+                op: "connect".into(),
+                profile_id: Some(session.profile_id.clone()),
+                client_used: Some(session.executable.to_string_lossy().into_owned()),
+                ok,
+                exit_code,
+                duration_ms: Some(duration_ms),
+                meta_json: None,
+            },
+        )?;
+        self.status_message = Some(ssh_session_result_message(ok, exit_code));
+        Ok(())
+    }
+
+    pub fn set_status_message(&mut self, message: impl Into<String>) {
+        self.status_message = Some(message.into());
     }
 
     fn execute_cmdset_run(&mut self, profile_id: &str, cmdset_id: &str) -> Result<()> {
@@ -865,6 +988,14 @@ fn display_opt(value: Option<&str>) -> &str {
     value.unwrap_or("(unset)")
 }
 
+fn ssh_session_result_message(ok: bool, exit_code: Option<i32>) -> String {
+    match exit_code {
+        Some(0) if ok => "SSH session ended.".to_string(),
+        Some(code) => format!("SSH session ended with exit code {code}."),
+        None => "SSH session ended without exit code.".to_string(),
+    }
+}
+
 fn collect_groups(profiles: &[Profile]) -> Vec<String> {
     let mut set = BTreeSet::new();
     for profile in profiles {
@@ -1107,5 +1238,156 @@ fn mask_sensitive_kv(token: &str) -> Option<String> {
         Some(format!("{key}=****"))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::fs;
+
+    use tdcore::cmdset::CmdSetStore;
+    use tdcore::db;
+    use tdcore::doctor::ClientOverrides;
+    use tdcore::profile::{NewProfile, ProfileStore};
+
+    fn empty_cmdset_store() -> CmdSetStore {
+        CmdSetStore::new(db::init_in_memory().unwrap())
+    }
+
+    fn state_with_profiles(profiles: Vec<NewProfile>) -> AppState {
+        let store = ProfileStore::new(db::init_in_memory().unwrap());
+        for profile in profiles {
+            store.insert(profile).unwrap();
+        }
+        AppState::new(store, empty_cmdset_store()).unwrap()
+    }
+
+    fn base_profile(profile_type: ProfileType) -> NewProfile {
+        NewProfile {
+            profile_id: Some("p_test".to_string()),
+            name: "Test Profile".to_string(),
+            profile_type,
+            host: "example.com".to_string(),
+            port: 2222,
+            user: "alice".to_string(),
+            danger_level: DangerLevel::Normal,
+            group: None,
+            tags: Vec::new(),
+            note: None,
+            initial_send: None,
+            client_overrides: None,
+        }
+    }
+
+    fn fake_ssh_path(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "teradock-tui-fake-ssh-{name}-{}{}",
+            std::process::id(),
+            if cfg!(windows) { ".cmd" } else { "" }
+        ));
+        fs::write(&path, "fake ssh").unwrap();
+        path
+    }
+
+    #[test]
+    fn builds_selected_ssh_session_command() {
+        let fake_ssh = fake_ssh_path("build");
+        let mut profile = base_profile(ProfileType::Ssh);
+        profile.client_overrides = Some(ClientOverrides {
+            ssh: Some(fake_ssh.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        let mut state = state_with_profiles(vec![profile]);
+
+        let command = state
+            .build_ssh_session_command()
+            .unwrap()
+            .expect("ssh session command");
+
+        assert_eq!(command.profile_id, "p_test");
+        assert_eq!(command.executable, fake_ssh);
+        assert_eq!(command.args[0], OsStr::new("-p"));
+        assert_eq!(command.args[1], OsStr::new("2222"));
+        assert_eq!(
+            command.args.last().unwrap(),
+            OsStr::new("alice@example.com")
+        );
+        let _ = fs::remove_file(command.executable);
+    }
+
+    #[test]
+    fn rejects_ssh_session_when_no_profile_is_selected() {
+        let mut state = state_with_profiles(Vec::new());
+
+        let command = state.build_ssh_session_command().unwrap();
+
+        assert!(command.is_none());
+        assert_eq!(
+            state.status_message(),
+            Some("No profile selected; clear filters or add a profile.")
+        );
+    }
+
+    #[test]
+    fn rejects_ssh_session_for_non_ssh_profile() {
+        let mut state = state_with_profiles(vec![base_profile(ProfileType::Telnet)]);
+
+        let command = state.build_ssh_session_command().unwrap();
+
+        assert!(command.is_none());
+        assert_eq!(
+            state.status_message(),
+            Some("Selected profile is telnet; SSH session requires an SSH profile.")
+        );
+    }
+
+    #[test]
+    fn critical_ssh_session_requires_confirmation() {
+        let fake_ssh = fake_ssh_path("critical");
+        let mut profile = base_profile(ProfileType::Ssh);
+        profile.danger_level = DangerLevel::Critical;
+        profile.client_overrides = Some(ClientOverrides {
+            ssh: Some(fake_ssh.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        let mut state = state_with_profiles(vec![profile]);
+
+        let command = state.build_ssh_session_command().unwrap();
+
+        assert!(command.is_none());
+        assert!(state.confirm_state().is_some());
+        for ch in "p_test".chars() {
+            state.push_confirm_char(ch);
+        }
+        assert_eq!(
+            state.confirm_action().unwrap(),
+            ConfirmedAction::OpenSshSession
+        );
+
+        let command = state
+            .build_ssh_session_command()
+            .unwrap()
+            .expect("confirmed ssh session command");
+
+        assert_eq!(command.profile_id, "p_test");
+        let _ = fs::remove_file(command.executable);
+    }
+
+    #[test]
+    fn formats_ssh_session_result_status_messages() {
+        assert_eq!(
+            ssh_session_result_message(true, Some(0)),
+            "SSH session ended."
+        );
+        assert_eq!(
+            ssh_session_result_message(false, Some(255)),
+            "SSH session ended with exit code 255."
+        );
+        assert_eq!(
+            ssh_session_result_message(false, None),
+            "SSH session ended without exit code."
+        );
     }
 }
