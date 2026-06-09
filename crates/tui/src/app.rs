@@ -1,9 +1,9 @@
-use std::io;
+use std::io::{self, IsTerminal};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -24,6 +24,7 @@ use crate::state::{
 use crate::ui;
 
 pub fn run() -> Result<()> {
+    ensure_interactive_tty()?;
     let conn = db::init_connection()?;
     let store = ProfileStore::new(conn);
     let cmdset_store = CmdSetStore::new(db::init_connection()?);
@@ -205,8 +206,15 @@ fn handle_ssh_session_request(
                 ));
             }
         }
-        SshSessionRunResult::LaunchFailed(err) => {
-            state.set_status_message(format!("Failed to launch SSH session: {err}"));
+        SshSessionRunResult::LaunchFailed { error, duration_ms } => {
+            let error_message = error.to_string();
+            let mut status_message = format!("Failed to launch SSH session: {error_message}");
+            if let Err(err) =
+                state.record_ssh_session_launch_failure(&session, &error_message, duration_ms)
+            {
+                status_message.push_str(&format!("; failed to record SSH session failure: {err}"));
+            }
+            state.set_status_message(status_message);
         }
     }
     Ok(())
@@ -220,7 +228,10 @@ struct SshSessionOutcome {
 
 enum SshSessionRunResult {
     Completed(SshSessionOutcome),
-    LaunchFailed(anyhow::Error),
+    LaunchFailed {
+        error: anyhow::Error,
+        duration_ms: i64,
+    },
 }
 
 fn run_interactive_ssh_session(
@@ -245,8 +256,15 @@ fn run_interactive_ssh_session(
             exit_code: status.code(),
             duration_ms,
         })),
-        Err(err) => Ok(SshSessionRunResult::LaunchFailed(err)),
+        Err(error) => Ok(SshSessionRunResult::LaunchFailed { error, duration_ms }),
     }
+}
+
+fn ensure_interactive_tty() -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        bail!("td ui requires an interactive TTY; interactive SSH sessions require a TTY");
+    }
+    Ok(())
 }
 
 fn suspend_tui_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {

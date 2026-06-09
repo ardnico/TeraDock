@@ -37,6 +37,7 @@ use tdcore::tester::{self, SshBatchCommand, TestOptions};
 use tdcore::transfer::{TransferDirection, TransferTempDir, TransferVia};
 use tdcore::tunnel::{ForwardKind, ForwardStore, NewSession, SessionKind, SessionStore};
 use tdcore::util::now_ms;
+use time::OffsetDateTime;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use tui as tdtui;
@@ -126,6 +127,15 @@ enum Commands {
         /// One-time string to send right after connect (overrides profile)
         #[arg(long)]
         initial_send: Option<String>,
+    },
+    /// Show recently used interactive SSH session profiles
+    Recent {
+        /// Maximum number of profiles to show
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Manage SSH tunnels
     Tunnel {
@@ -601,6 +611,7 @@ fn main() -> Result<()> {
             profile_id,
             initial_send,
         }) => handle_connect(profile_id, initial_send),
+        Some(Commands::Recent { limit, json }) => handle_recent(limit, json),
         Some(Commands::Tunnel { command }) => handle_tunnel(command),
         Some(Commands::Test {
             profile_id,
@@ -2007,6 +2018,40 @@ fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()
     }
 }
 
+fn handle_recent(limit: usize, json: bool) -> Result<()> {
+    if limit == 0 {
+        return Err(anyhow!("--limit must be greater than 0"));
+    }
+    let conn = db::init_connection()?;
+    let recent = oplog::recent_ssh_sessions(&conn, limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&recent)?);
+        return Ok(());
+    }
+    if recent.is_empty() {
+        println!("(no recent SSH sessions)");
+        return Ok(());
+    }
+    println!(
+        "{:<16} {:<20} {:<28} {:<6} {:<8} {:<20} status",
+        "profile_id", "name", "endpoint", "type", "danger", "last_connected"
+    );
+    for item in recent {
+        let endpoint = format!("{}@{}:{}", item.user, item.host, item.port);
+        println!(
+            "{:<16} {:<20} {:<28} {:<6} {:<8} {:<20} {}",
+            item.profile_id,
+            item.name,
+            endpoint,
+            item.profile_type,
+            item.danger_level,
+            format_unix_ms_utc(item.last_connected_at),
+            format_recent_status(item.last_ok, item.last_exit_code.as_ref())
+        );
+    }
+    Ok(())
+}
+
 fn handle_doctor(json: bool) -> Result<()> {
     let conn = db::init_connection()?;
     let global_overrides = settings::get_client_overrides(&conn)?;
@@ -2061,6 +2106,31 @@ fn handle_doctor(json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn format_recent_status(ok: bool, exit_code: Option<&i32>) -> String {
+    match (ok, exit_code) {
+        (true, Some(code)) => format!("ok exit {code}"),
+        (false, Some(code)) => format!("failed exit {code}"),
+        (true, None) => "ok without exit code".to_string(),
+        (false, None) => "failed without exit code".to_string(),
+    }
+}
+
+fn format_unix_ms_utc(ts_ms: i64) -> String {
+    let secs = ts_ms.div_euclid(1000);
+    let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) else {
+        return ts_ms.to_string();
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
 }
 
 fn handle_test(profile_id: String, json: bool, include_ssh: bool) -> Result<()> {
@@ -3158,6 +3228,20 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_recent_command() {
+        let cli =
+            Cli::try_parse_from(["td", "recent", "--limit", "5", "--json"]).expect("parses recent");
+
+        match cli.command {
+            Some(Commands::Recent { limit, json }) => {
+                assert_eq!(limit, 5);
+                assert!(json);
+            }
+            _ => panic!("expected recent command"),
         }
     }
 

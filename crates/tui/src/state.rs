@@ -64,6 +64,10 @@ pub struct RunResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshSessionCommand {
     pub profile_id: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub profile_type: ProfileType,
     pub executable: PathBuf,
     pub args: Vec<OsString>,
 }
@@ -516,6 +520,7 @@ impl AppState {
 
     pub fn cancel_confirm(&mut self) {
         self.confirm = None;
+        self.status_message = Some("Confirmation cancelled.".to_string());
     }
 
     pub fn confirm_action(&mut self) -> Result<ConfirmedAction> {
@@ -698,7 +703,11 @@ impl AppState {
         args.extend(auth.args);
         args.push(OsString::from(format!("{}@{}", profile.user, profile.host)));
         Ok(Some(SshSessionCommand {
-            profile_id: profile.profile_id,
+            profile_id: profile.profile_id.clone(),
+            host: profile.host,
+            port: profile.port,
+            user: profile.user,
+            profile_type: profile.profile_type,
             executable: ssh,
             args,
         }))
@@ -715,16 +724,38 @@ impl AppState {
         oplog::log_operation(
             self.store.conn(),
             OpLogEntry {
-                op: "connect".into(),
+                op: oplog::SSH_SESSION_OP.into(),
                 profile_id: Some(session.profile_id.clone()),
                 client_used: Some(session.executable.to_string_lossy().into_owned()),
                 ok,
                 exit_code,
                 duration_ms: Some(duration_ms),
-                meta_json: None,
+                meta_json: Some(ssh_session_meta_json(session, None)),
             },
         )?;
         self.status_message = Some(ssh_session_result_message(ok, exit_code));
+        Ok(())
+    }
+
+    pub fn record_ssh_session_launch_failure(
+        &mut self,
+        session: &SshSessionCommand,
+        error: &str,
+        duration_ms: i64,
+    ) -> Result<()> {
+        self.store.touch_last_used(&session.profile_id)?;
+        oplog::log_operation(
+            self.store.conn(),
+            OpLogEntry {
+                op: oplog::SSH_SESSION_OP.into(),
+                profile_id: Some(session.profile_id.clone()),
+                client_used: Some(session.executable.to_string_lossy().into_owned()),
+                ok: false,
+                exit_code: None,
+                duration_ms: Some(duration_ms),
+                meta_json: Some(ssh_session_meta_json(session, Some(error))),
+            },
+        )?;
         Ok(())
     }
 
@@ -994,6 +1025,24 @@ fn ssh_session_result_message(ok: bool, exit_code: Option<i32>) -> String {
         Some(code) => format!("SSH session ended with exit code {code}."),
         None => "SSH session ended without exit code.".to_string(),
     }
+}
+
+fn ssh_session_meta_json(
+    session: &SshSessionCommand,
+    launch_error: Option<&str>,
+) -> serde_json::Value {
+    let mut meta = serde_json::json!({
+        "mode": "interactive",
+        "source": "tui",
+        "host": session.host.as_str(),
+        "port": session.port,
+        "user": session.user.as_str(),
+        "profile_type": session.profile_type.to_string(),
+    });
+    if let Some(error) = launch_error {
+        meta["launch_error"] = serde_json::Value::String(error.to_string());
+    }
+    meta
 }
 
 fn collect_groups(profiles: &[Profile]) -> Vec<String> {
@@ -1291,6 +1340,18 @@ mod tests {
         path
     }
 
+    fn sample_ssh_session_command() -> SshSessionCommand {
+        SshSessionCommand {
+            profile_id: "p_test".to_string(),
+            host: "example.com".to_string(),
+            port: 2222,
+            user: "alice".to_string(),
+            profile_type: ProfileType::Ssh,
+            executable: PathBuf::from("ssh"),
+            args: Vec::new(),
+        }
+    }
+
     #[test]
     fn builds_selected_ssh_session_command() {
         let fake_ssh = fake_ssh_path("build");
@@ -1307,6 +1368,10 @@ mod tests {
             .expect("ssh session command");
 
         assert_eq!(command.profile_id, "p_test");
+        assert_eq!(command.host, "example.com");
+        assert_eq!(command.port, 2222);
+        assert_eq!(command.user, "alice");
+        assert_eq!(command.profile_type, ProfileType::Ssh);
         assert_eq!(command.executable, fake_ssh);
         assert_eq!(command.args[0], OsStr::new("-p"));
         assert_eq!(command.args[1], OsStr::new("2222"));
@@ -1376,6 +1441,24 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_confirmation_sets_status_message() {
+        let mut state = state_with_profiles(vec![base_profile(ProfileType::Ssh)]);
+        state.confirm = Some(ConfirmState {
+            message: "Confirm".to_string(),
+            required_input: "p_test".to_string(),
+            input: String::new(),
+            action: PendingAction::OpenSshSession {
+                profile_id: "p_test".to_string(),
+            },
+        });
+
+        state.cancel_confirm();
+
+        assert!(state.confirm_state().is_none());
+        assert_eq!(state.status_message(), Some("Confirmation cancelled."));
+    }
+
+    #[test]
     fn formats_ssh_session_result_status_messages() {
         assert_eq!(
             ssh_session_result_message(true, Some(0)),
@@ -1389,5 +1472,79 @@ mod tests {
             ssh_session_result_message(false, None),
             "SSH session ended without exit code."
         );
+    }
+
+    #[test]
+    fn records_ssh_session_result_to_oplog() {
+        let mut state = state_with_profiles(vec![base_profile(ProfileType::Ssh)]);
+        let session = sample_ssh_session_command();
+
+        state
+            .record_ssh_session_result(&session, false, None, 42)
+            .unwrap();
+
+        let (op, ok, exit_code, duration_ms, meta_json): (
+            String,
+            i64,
+            Option<i32>,
+            Option<i64>,
+            String,
+        ) = state
+            .store
+            .conn()
+            .query_row(
+                "SELECT op, ok, exit_code, duration_ms, meta_json FROM op_logs",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let profile = state.store.get("p_test").unwrap().expect("profile exists");
+        let meta: serde_json::Value = serde_json::from_str(&meta_json).unwrap();
+
+        assert_eq!(op, tdcore::oplog::SSH_SESSION_OP);
+        assert_eq!(ok, 0);
+        assert_eq!(exit_code, None);
+        assert_eq!(duration_ms, Some(42));
+        assert!(profile.last_used_at.is_some());
+        assert_eq!(meta["mode"], "interactive");
+        assert_eq!(meta["source"], "tui");
+        assert_eq!(meta["host"], "example.com");
+        assert_eq!(meta["port"], 2222);
+        assert_eq!(meta["user"], "alice");
+        assert_eq!(meta["profile_type"], "ssh");
+        assert!(meta.get("launch_error").is_none());
+    }
+
+    #[test]
+    fn records_ssh_session_launch_failure_to_oplog() {
+        let mut state = state_with_profiles(vec![base_profile(ProfileType::Ssh)]);
+        let session = sample_ssh_session_command();
+
+        state
+            .record_ssh_session_launch_failure(&session, "permission denied", 7)
+            .unwrap();
+
+        let (ok, exit_code, meta_json): (i64, Option<i32>, String) = state
+            .store
+            .conn()
+            .query_row(
+                "SELECT ok, exit_code, meta_json FROM op_logs WHERE op = ?1",
+                [tdcore::oplog::SSH_SESSION_OP],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_json).unwrap();
+
+        assert_eq!(ok, 0);
+        assert_eq!(exit_code, None);
+        assert_eq!(meta["launch_error"], "permission denied");
     }
 }

@@ -16,7 +16,7 @@ Do not put raw passwords, tokens, or private keys in profile notes, CommandSet c
 
 ## Critical Profiles
 
-Use `--danger critical` for production, safety-sensitive, or fragile targets. Critical profiles require explicit confirmation before connect, exec, run, transfer, and config apply operations. In the TUI, CommandSet runs require typing the profile id; bulk runs require typing the listed critical ids exactly.
+Use `--danger critical` for production, safety-sensitive, or fragile targets. Critical profiles require explicit confirmation before connect, exec, run, transfer, and config apply operations. In the TUI, interactive SSH sessions and single-profile CommandSet runs require typing the profile id; bulk runs require typing the listed critical ids exactly.
 
 ## FTP
 
@@ -36,4 +36,6 @@ Review imported files before loading them. Import can add profiles, CommandSets,
 
 ## Operation Logs
 
-TeraDock records operation type, profile id, client used, success/failure, exit code, duration, and small metadata such as CommandSet id. Command stdout and stderr are shown to the caller but are not currently stored in `op_logs`.
+TeraDock records operation type, profile id, client used, success/failure, exit code, duration, and small metadata such as CommandSet id. TUI interactive SSH sessions are recorded as `ssh_session` after the SSH process exits or after process launch failure.
+
+Operation logs must stay free of secrets. Passwords, secret values, tokens, SSH auth arguments, and full command strings are not written to TUI SSH session log metadata. Command stdout and stderr are shown to the caller but are not currently stored in `op_logs`.

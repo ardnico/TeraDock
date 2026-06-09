@@ -35,11 +35,17 @@ The status line explains the next available action or why a run cannot start. Co
 
 This is separate from CommandSet execution. TeraDock temporarily leaves the TUI screen, restores the normal terminal mode, and starts `ssh -p <port> <auth options> user@host` with standard input, output, and error inherited from the current terminal. When the SSH process exits, the TUI returns and shows whether the session ended normally, with an exit code, or without an exit code.
 
+If SSH cannot be launched, the TUI returns and shows the launch error. If SSH exits without an exit code, for example after signal termination on platforms that report it that way, the TUI shows that explicitly. The TUI clears and redraws after returning from SSH so resize changes during the session do not leave stale screen content.
+
 If no profile is selected, the selected profile is not SSH, or the SSH client cannot be resolved from the profile/global overrides or `PATH`, the TUI stays open and shows a status message.
 
 Critical profiles require typing the profile id before the SSH session opens.
 
-Future extensions may add opening sessions in a new terminal window, terminal emulator selection, profile-specific terminal command overrides, tmux pane/window integration, SSH session history, and recently connected profile lists.
+Interactive SSH sessions require a TTY. Running `td ui` with redirected input or output, such as `td ui < input.txt`, exits with a clear error instead of entering raw mode.
+
+Each TUI SSH session attempt is written to `op_logs` as `op = ssh_session` after the session exits or after launch failure. The log row includes the profile id, SSH client path, success flag, exit code when available, duration, and small metadata such as `mode = interactive`, `source = tui`, host, port, user, and profile type. Passwords, secret values, SSH auth arguments, and full command strings are not logged.
+
+Use `td recent`, `td recent --limit 10`, or `td recent --json` to list recently used interactive SSH profiles from the CLI. TUI recent-profile panes are not part of the current UI.
 
 ## Critical Confirmation
 

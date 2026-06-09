@@ -65,6 +65,7 @@ td profile list --group lab --tag linux
 td profile show lab1
 td exec lab1 --timeout-ms 5000 -- uname -a
 td run lab1 linux-basic-check --json
+td recent --limit 10
 td export -o teradock-export.json
 td import --conflict rename teradock-export.json
 ```
@@ -78,7 +79,7 @@ Run `td ui`.
 - `/` searches profiles.
 - `T`, `g`, `D`, `[`, `]`, and `x` filter by type, group, danger, and tags.
 - `Space` marks profiles for bulk execution.
-- `s` opens an interactive SSH session for the selected SSH profile in the same terminal, then returns to the TUI when the session exits.
+- `s` opens an interactive SSH session for the selected SSH profile in the same terminal. TeraDock pauses the TUI, restores normal terminal mode while SSH runs, then returns to the TUI when the session exits.
 - `r` runs the selected CommandSet on the selected profile.
 - `R` runs the selected CommandSet on marked profiles.
 - `1` to `4` switch stdout, stderr, parsed, and summary result tabs.
@@ -86,6 +87,10 @@ Run `td ui`.
 - `?` shows the full key help.
 
 The status line explains why a run is not currently available, such as no selected profile, no CommandSet, or no marked profiles for bulk run.
+
+Interactive SSH sessions require a TTY. If `td ui` is started with redirected stdin/stdout, TeraDock exits with a clear error instead of entering the TUI.
+
+SSH sessions opened from the TUI are recorded in `op_logs` as `ssh_session` operations after the session exits or when process launch fails. Secrets, passwords, SSH auth arguments, and full command strings are not written to the session log metadata. Use `td recent` or `td recent --json` to review recently used interactive SSH profiles.
 
 ## Safety Model
 
