@@ -1,11 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use directories::BaseDirs;
 use rusqlite::Connection;
-use std::collections::HashSet;
-use std::env;
-use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +29,7 @@ use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::settings;
 use tdcore::settings::SettingScope;
 use tdcore::settings_registry;
+use tdcore::ssh::{self, SshAuthContext, SshInvocation, SshInvocationMode, SshInvocationRequest};
 use tdcore::tester::{self, SshBatchCommand, TestOptions};
 use tdcore::transfer::{TransferDirection, TransferTempDir, TransferVia};
 use tdcore::tunnel::{ForwardKind, ForwardStore, NewSession, SessionKind, SessionStore};
@@ -457,7 +454,7 @@ struct ClientOverrideArgs {
 struct AuthOrderArgs {
     /// Preferred SSH auth order (comma-delimited: agent,keys,password)
     #[arg(long, value_delimiter = ',')]
-    order: Vec<SshAuthMethod>,
+    order: Vec<CliSshAuthMethod>,
 }
 
 #[derive(Debug, Args)]
@@ -543,18 +540,18 @@ struct ConfigApplyArgs {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
-enum SshAuthMethod {
+enum CliSshAuthMethod {
     Agent,
     Keys,
     Password,
 }
 
-impl SshAuthMethod {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Keys => "keys",
-            Self::Password => "password",
+impl From<CliSshAuthMethod> for ssh::SshAuthMethod {
+    fn from(method: CliSshAuthMethod) -> Self {
+        match method {
+            CliSshAuthMethod::Agent => Self::Agent,
+            CliSshAuthMethod::Keys => Self::Keys,
+            CliSshAuthMethod::Password => Self::Password,
         }
     }
 }
@@ -1500,179 +1497,20 @@ fn resolve_remote_dest(dest: &str, remote_home: Option<&str>) -> Result<String> 
     }
 }
 
-struct SshAuthAvailability {
-    agent: bool,
-    keys: bool,
+fn normalize_auth_order(order: Vec<CliSshAuthMethod>) -> Result<Vec<ssh::SshAuthMethod>> {
+    ssh::normalize_auth_order(order.into_iter().map(Into::into).collect()).map_err(Into::into)
 }
 
-struct SshAuthContext {
-    order: Vec<SshAuthMethod>,
-    args: Vec<OsString>,
-    hint: Option<String>,
-    warn_password_fallback: bool,
+fn format_auth_order(order: &[ssh::SshAuthMethod]) -> String {
+    ssh::format_auth_order(order)
 }
 
-fn normalize_auth_order(order: Vec<SshAuthMethod>) -> Result<Vec<SshAuthMethod>> {
-    if order.is_empty() {
-        return Err(anyhow!("auth order cannot be empty"));
-    }
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for method in order {
-        if !seen.insert(method) {
-            return Err(anyhow!(
-                "auth order contains duplicate '{}'",
-                method.as_str()
-            ));
-        }
-        normalized.push(method);
-    }
-    Ok(normalized)
-}
-
-fn parse_auth_order_setting(raw: &str) -> Result<Vec<SshAuthMethod>> {
-    if raw.trim().is_empty() {
-        return Err(anyhow!("auth order setting is empty"));
-    }
-    let mut order = Vec::new();
-    let mut seen = HashSet::new();
-    for item in raw.split(',') {
-        let trimmed = item.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let method = match trimmed {
-            "agent" => SshAuthMethod::Agent,
-            "keys" => SshAuthMethod::Keys,
-            "password" => SshAuthMethod::Password,
-            _ => return Err(anyhow!("unknown auth method '{trimmed}'")),
-        };
-        if !seen.insert(method) {
-            return Err(anyhow!("auth order contains duplicate '{trimmed}'"));
-        }
-        order.push(method);
-    }
-    if order.is_empty() {
-        return Err(anyhow!("auth order setting is empty"));
-    }
-    Ok(order)
-}
-
-fn format_auth_order(order: &[SshAuthMethod]) -> String {
-    order
-        .iter()
-        .map(SshAuthMethod::as_str)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn default_auth_order() -> Vec<SshAuthMethod> {
-    vec![
-        SshAuthMethod::Agent,
-        SshAuthMethod::Keys,
-        SshAuthMethod::Password,
-    ]
-}
-
-fn load_ssh_auth_order(conn: &Connection) -> Result<Vec<SshAuthMethod>> {
-    match settings::get_ssh_auth_order(conn)? {
-        Some(raw) => parse_auth_order_setting(&raw)
-            .map_err(|err| anyhow!("invalid ssh auth order setting: {err}")),
-        None => Ok(default_auth_order()),
-    }
-}
-
-fn detect_ssh_auth_availability() -> SshAuthAvailability {
-    let agent = env::var_os("SSH_AUTH_SOCK")
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
-    let keys = if let Some(dirs) = BaseDirs::new() {
-        let ssh_dir = dirs.home_dir().join(".ssh");
-        [
-            "id_ed25519",
-            "id_rsa",
-            "id_ecdsa",
-            "id_ed25519_sk",
-            "id_ecdsa_sk",
-            "id_dsa",
-            "identity",
-        ]
-        .iter()
-        .any(|name| ssh_dir.join(name).exists())
-    } else {
-        false
-    };
-    SshAuthAvailability { agent, keys }
-}
-
-fn build_ssh_auth_args(
-    order: &[SshAuthMethod],
-    availability: &SshAuthAvailability,
-) -> Vec<OsString> {
-    let mut preferred = Vec::new();
-    let mut publickey_added = false;
-    for method in order {
-        match method {
-            SshAuthMethod::Agent | SshAuthMethod::Keys => {
-                if !publickey_added {
-                    preferred.push("publickey");
-                    publickey_added = true;
-                }
-            }
-            SshAuthMethod::Password => {
-                preferred.push("keyboard-interactive");
-                preferred.push("password");
-            }
-        }
-    }
-    let mut args = Vec::new();
-    if !preferred.is_empty() {
-        args.push(OsString::from("-o"));
-        args.push(OsString::from(format!(
-            "PreferredAuthentications={}",
-            preferred.join(",")
-        )));
-    }
-    if !availability.agent || !order.contains(&SshAuthMethod::Agent) {
-        args.push(OsString::from("-o"));
-        args.push(OsString::from("IdentityAgent=none"));
-    }
-    args
-}
-
-fn is_auth_method_available(method: SshAuthMethod, availability: &SshAuthAvailability) -> bool {
-    match method {
-        SshAuthMethod::Agent => availability.agent,
-        SshAuthMethod::Keys => availability.keys,
-        SshAuthMethod::Password => true,
-    }
+fn load_ssh_auth_order(conn: &Connection) -> Result<Vec<ssh::SshAuthMethod>> {
+    ssh::load_ssh_auth_order(conn).map_err(Into::into)
 }
 
 fn ssh_auth_context(conn: &Connection) -> Result<SshAuthContext> {
-    let order = load_ssh_auth_order(conn)?;
-    let availability = detect_ssh_auth_availability();
-    let args = build_ssh_auth_args(&order, &availability);
-    let hint = match order.first().copied() {
-        Some(SshAuthMethod::Agent) if !availability.agent => Some(
-            "Hint: SSH auth order prefers agent; start ssh-agent or set SSH_AUTH_SOCK to avoid password prompts.".to_string(),
-        ),
-        Some(SshAuthMethod::Keys) if !availability.keys => Some(
-            "Hint: SSH auth order prefers keys; add a key under ~/.ssh or update the auth order.".to_string(),
-        ),
-        _ => None,
-    };
-    let first_available = order
-        .iter()
-        .copied()
-        .find(|method| is_auth_method_available(*method, &availability));
-    let warn_password_fallback = matches!(first_available, Some(SshAuthMethod::Password))
-        && order.first().copied() != Some(SshAuthMethod::Password);
-    Ok(SshAuthContext {
-        order,
-        args,
-        hint,
-        warn_password_fallback,
-    })
+    ssh::ssh_auth_context(conn).map_err(Into::into)
 }
 
 fn emit_ssh_auth_messages(auth: &SshAuthContext) {
@@ -1859,15 +1697,18 @@ fn handle_exec(
         return Ok(());
     }
 
-    let ssh = resolve_client_for(ClientKind::Ssh, profile.client_overrides.as_ref(), &store)?;
-    let auth = ssh_auth_context(store.conn())?;
-    emit_ssh_auth_messages(&auth);
-    let mut command = Command::new(&ssh);
+    let invocation = ssh::build_ssh_invocation(
+        &store,
+        SshInvocationRequest {
+            profile_id: &profile_id,
+            source: "cli",
+            mode: SshInvocationMode::Exec,
+        },
+    )?;
+    emit_ssh_auth_messages(&invocation.auth_context);
+    let mut command = Command::new(&invocation.client_path);
     command
-        .arg("-p")
-        .arg(profile.port.to_string())
-        .args(&auth.args)
-        .arg(format!("{}@{}", profile.user, profile.host))
+        .args(&invocation.args)
         .args(&cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1886,7 +1727,7 @@ fn handle_exec(
     let entry = oplog::OpLogEntry {
         op: "exec".into(),
         profile_id: Some(profile.profile_id.clone()),
-        client_used: Some(ssh.to_string_lossy().into_owned()),
+        client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
         ok,
         exit_code: Some(exit_code),
         duration_ms: Some(duration_ms),
@@ -1942,21 +1783,23 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
         println!("Aborted by user.");
         return Ok(());
     }
-    let ssh = resolve_client_for(
-        ClientKind::Ssh,
-        profile.client_overrides.as_ref(),
+    let invocation = ssh::build_ssh_invocation(
         &profile_store,
+        SshInvocationRequest {
+            profile_id: &profile_id,
+            source: "cli",
+            mode: SshInvocationMode::CommandSet,
+        },
     )?;
-    let auth = ssh_auth_context(profile_store.conn())?;
-    emit_ssh_auth_messages(&auth);
+    emit_ssh_auth_messages(&invocation.auth_context);
     let result = run_cmdset_ssh(
         &profile_store,
         &cmdset_store,
         CmdSetRunRequest {
             profile_id: &profile_id,
             cmdset_id: &cmdset_id,
-            ssh: &ssh,
-            ssh_auth_args: &auth.args,
+            ssh: &invocation.client_path,
+            ssh_auth_args: &invocation.auth_context.args,
         },
         |step| -> tdcore::error::Result<()> {
             if !json_output {
@@ -2000,11 +1843,16 @@ fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()
     let initial_send = initial_send.or_else(|| profile.initial_send.clone());
     match profile.profile_type {
         ProfileType::Ssh => {
-            let ssh =
-                resolve_client_for(ClientKind::Ssh, profile.client_overrides.as_ref(), &store)?;
-            let auth = ssh_auth_context(store.conn())?;
-            emit_ssh_auth_messages(&auth);
-            connect_ssh(&store, profile, ssh, &auth)
+            let invocation = ssh::build_ssh_invocation(
+                &store,
+                SshInvocationRequest {
+                    profile_id: &profile.profile_id,
+                    source: "cli",
+                    mode: SshInvocationMode::Interactive,
+                },
+            )?;
+            emit_ssh_auth_messages(&invocation.auth_context);
+            connect_ssh(&store, invocation)
         }
         ProfileType::Telnet => {
             let telnet = resolve_client_for(
@@ -2535,27 +2383,19 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     }
 }
 
-fn connect_ssh(
-    store: &ProfileStore,
-    profile: Profile,
-    ssh: PathBuf,
-    auth: &SshAuthContext,
-) -> Result<()> {
-    let mut cmd = Command::new(&ssh);
-    cmd.arg("-p")
-        .arg(profile.port.to_string())
-        .args(&auth.args)
-        .arg(format!("{}@{}", profile.user, profile.host));
+fn connect_ssh(store: &ProfileStore, invocation: SshInvocation) -> Result<()> {
+    let mut cmd = Command::new(&invocation.client_path);
+    cmd.args(&invocation.args);
     let started = Instant::now();
     let status = cmd.status().context("failed to launch ssh")?;
     let duration_ms = started.elapsed().as_millis() as i64;
     let ok = status.success();
     let exit_code = status.code().unwrap_or_default();
-    store.touch_last_used(&profile.profile_id)?;
+    store.touch_last_used(&invocation.target.profile_id)?;
     let entry = oplog::OpLogEntry {
         op: "connect".into(),
-        profile_id: Some(profile.profile_id.clone()),
-        client_used: Some(ssh.to_string_lossy().into_owned()),
+        profile_id: Some(invocation.target.profile_id.clone()),
+        client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
         ok,
         exit_code: Some(exit_code),
         duration_ms: Some(duration_ms),
@@ -2832,9 +2672,7 @@ fn resolve_client_for(
     profile_overrides: Option<&ClientOverrides>,
     store: &ProfileStore,
 ) -> Result<PathBuf> {
-    let global_overrides = settings::get_client_overrides(store.conn())?;
-    doctor::resolve_client_with_overrides(kind, profile_overrides, global_overrides.as_ref())
-        .ok_or_else(|| anyhow!("{} client not found via overrides or PATH", kind.as_str()))
+    ssh::resolve_client_for(kind, profile_overrides, store.conn()).map_err(Into::into)
 }
 
 fn ensure_ssh_profile(profile: &Profile, op: &str) -> Result<()> {

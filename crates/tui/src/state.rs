@@ -1,16 +1,16 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use directories::BaseDirs;
 
 use tdcore::cmdset::{CmdSet, CmdSetStore};
 use tdcore::cmdset_runner::{run_cmdset_ssh, CmdSetRunRequest, CmdSetRunResult};
-use tdcore::doctor::{self, ClientKind};
+use tdcore::doctor::ClientKind;
 use tdcore::oplog::{self, OpLogEntry};
 use tdcore::profile::{DangerLevel, Profile, ProfileFilters, ProfileStore, ProfileType};
 use tdcore::settings::{self, ResolvedSettingDetail, ResolvedSettingSource};
+use tdcore::ssh::{self, SshBuildError, SshInvocationMode, SshInvocationRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -70,6 +70,7 @@ pub struct SshSessionCommand {
     pub profile_type: ProfileType,
     pub executable: PathBuf,
     pub args: Vec<OsString>,
+    pub safe_metadata: serde_json::Value,
 }
 
 impl RunResult {
@@ -678,38 +679,29 @@ impl AppState {
             });
             return Ok(None);
         }
-        let ssh = match resolve_client_for(
-            ClientKind::Ssh,
-            profile.client_overrides.as_ref(),
+        let invocation = match ssh::build_ssh_invocation(
             &self.store,
+            SshInvocationRequest {
+                profile_id: &profile.profile_id,
+                source: "tui",
+                mode: SshInvocationMode::Interactive,
+            },
         ) {
-            Ok(ssh) => ssh,
+            Ok(invocation) => invocation,
             Err(err) => {
-                self.status_message = Some(format!("SSH client not found: {err}"));
+                self.status_message = Some(ssh_build_status_message(&err));
                 return Ok(None);
             }
         };
-        let auth = match ssh_auth_context(self.store.conn()) {
-            Ok(auth) => auth,
-            Err(err) => {
-                self.status_message = Some(format!("Failed to build SSH auth options: {err}"));
-                return Ok(None);
-            }
-        };
-        let mut args = vec![
-            OsString::from("-p"),
-            OsString::from(profile.port.to_string()),
-        ];
-        args.extend(auth.args);
-        args.push(OsString::from(format!("{}@{}", profile.user, profile.host)));
         Ok(Some(SshSessionCommand {
-            profile_id: profile.profile_id.clone(),
-            host: profile.host,
-            port: profile.port,
-            user: profile.user,
-            profile_type: profile.profile_type,
-            executable: ssh,
-            args,
+            profile_id: invocation.target.profile_id,
+            host: invocation.target.host,
+            port: invocation.target.port,
+            user: invocation.target.user,
+            profile_type: ProfileType::Ssh,
+            executable: invocation.client_path,
+            args: invocation.args,
+            safe_metadata: invocation.safe_metadata,
         }))
     }
 
@@ -846,12 +838,12 @@ impl AppState {
         if profile.profile_type != ProfileType::Ssh {
             return Err(anyhow!("run only supports SSH profiles for now"));
         }
-        let ssh = resolve_client_for(
+        let ssh = ssh::resolve_client_for(
             ClientKind::Ssh,
             profile.client_overrides.as_ref(),
-            &self.store,
+            self.store.conn(),
         )?;
-        let auth = ssh_auth_context(self.store.conn())?;
+        let auth = ssh::ssh_auth_context(self.store.conn())?;
         let run = run_cmdset_ssh(
             &self.store,
             &self.cmdset_store,
@@ -877,15 +869,15 @@ impl AppState {
         let Ok(steps) = steps else {
             return vec!["Failed to load command steps.".to_string()];
         };
-        let ssh = resolve_client_for(
+        let ssh = ssh::resolve_client_for(
             ClientKind::Ssh,
             profile.client_overrides.as_ref(),
-            &self.store,
+            self.store.conn(),
         );
         let Ok(ssh) = ssh else {
             return vec!["SSH client not found.".to_string()];
         };
-        let auth = ssh_auth_context(self.store.conn());
+        let auth = ssh::ssh_auth_context(self.store.conn());
         let auth_args = auth.map(|context| context.args).unwrap_or_default();
         steps
             .into_iter()
@@ -894,7 +886,7 @@ impl AppState {
                 let cmd = mask_sensitive_tokens(&step.cmd);
                 format!(
                     "{} {}@{} {}",
-                    format_ssh_invocation(&ssh, profile.port, &auth_args),
+                    ssh::format_ssh_invocation(&ssh, profile.port, &auth_args),
                     profile.user,
                     profile.host,
                     cmd
@@ -1027,18 +1019,23 @@ fn ssh_session_result_message(ok: bool, exit_code: Option<i32>) -> String {
     }
 }
 
+fn ssh_build_status_message(err: &SshBuildError) -> String {
+    match err {
+        SshBuildError::ClientNotFound { .. } => format!("SSH client not found: {err}"),
+        SshBuildError::InvalidAuthOrder(_) | SshBuildError::SettingsError(_) => {
+            format!("Failed to build SSH auth options: {err}")
+        }
+        SshBuildError::ProfileNotFound(_) | SshBuildError::UnsupportedProfileType { .. } => {
+            format!("Failed to build SSH session command: {err}")
+        }
+    }
+}
+
 fn ssh_session_meta_json(
     session: &SshSessionCommand,
     launch_error: Option<&str>,
 ) -> serde_json::Value {
-    let mut meta = serde_json::json!({
-        "mode": "interactive",
-        "source": "tui",
-        "host": session.host.as_str(),
-        "port": session.port,
-        "user": session.user.as_str(),
-        "profile_type": session.profile_type.to_string(),
-    });
+    let mut meta = session.safe_metadata.clone();
     if let Some(error) = launch_error {
         meta["launch_error"] = serde_json::Value::String(error.to_string());
     }
@@ -1063,185 +1060,6 @@ fn collect_tags(profiles: &[Profile]) -> Vec<String> {
         }
     }
     set.into_iter().collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum SshAuthMethod {
-    Agent,
-    Keys,
-    Password,
-}
-
-impl SshAuthMethod {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Keys => "keys",
-            Self::Password => "password",
-        }
-    }
-}
-
-struct SshAuthAvailability {
-    agent: bool,
-    keys: bool,
-}
-
-struct SshAuthContext {
-    args: Vec<OsString>,
-}
-
-fn normalize_auth_order(order: Vec<SshAuthMethod>) -> Result<Vec<SshAuthMethod>> {
-    if order.is_empty() {
-        return Err(anyhow!("auth order cannot be empty"));
-    }
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for method in order {
-        if !seen.insert(method) {
-            return Err(anyhow!(
-                "auth order contains duplicate '{}'",
-                method.as_str()
-            ));
-        }
-        normalized.push(method);
-    }
-    Ok(normalized)
-}
-
-fn parse_auth_order_setting(raw: &str) -> Result<Vec<SshAuthMethod>> {
-    if raw.trim().is_empty() {
-        return Err(anyhow!("auth order setting is empty"));
-    }
-    let mut order = Vec::new();
-    let mut seen = HashSet::new();
-    for item in raw.split(',') {
-        let trimmed = item.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let method = match trimmed {
-            "agent" => SshAuthMethod::Agent,
-            "keys" => SshAuthMethod::Keys,
-            "password" => SshAuthMethod::Password,
-            _ => return Err(anyhow!("unknown auth method '{trimmed}'")),
-        };
-        if !seen.insert(method) {
-            return Err(anyhow!("auth order contains duplicate '{trimmed}'"));
-        }
-        order.push(method);
-    }
-    normalize_auth_order(order)
-}
-
-fn default_auth_order() -> Vec<SshAuthMethod> {
-    vec![
-        SshAuthMethod::Agent,
-        SshAuthMethod::Keys,
-        SshAuthMethod::Password,
-    ]
-}
-
-fn load_ssh_auth_order(conn: &rusqlite::Connection) -> Result<Vec<SshAuthMethod>> {
-    match settings::get_ssh_auth_order(conn)? {
-        Some(raw) => parse_auth_order_setting(&raw)
-            .map_err(|err| anyhow!("invalid ssh auth order setting: {err}")),
-        None => Ok(default_auth_order()),
-    }
-}
-
-fn detect_ssh_auth_availability() -> SshAuthAvailability {
-    let agent = std::env::var_os("SSH_AUTH_SOCK")
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
-    let keys = if let Some(dirs) = BaseDirs::new() {
-        let ssh_dir = dirs.home_dir().join(".ssh");
-        [
-            "id_ed25519",
-            "id_rsa",
-            "id_ecdsa",
-            "id_ed25519_sk",
-            "id_ecdsa_sk",
-            "id_dsa",
-            "identity",
-        ]
-        .iter()
-        .any(|name| ssh_dir.join(name).exists())
-    } else {
-        false
-    };
-    SshAuthAvailability { agent, keys }
-}
-
-fn build_ssh_auth_args(
-    order: &[SshAuthMethod],
-    availability: &SshAuthAvailability,
-) -> Vec<OsString> {
-    let mut preferred = Vec::new();
-    let mut publickey_added = false;
-    for method in order {
-        match method {
-            SshAuthMethod::Agent | SshAuthMethod::Keys => {
-                let available = match method {
-                    SshAuthMethod::Agent => availability.agent,
-                    SshAuthMethod::Keys => availability.keys,
-                    _ => false,
-                };
-                if !publickey_added && available {
-                    preferred.push("publickey");
-                    publickey_added = true;
-                }
-            }
-            SshAuthMethod::Password => {
-                preferred.push("keyboard-interactive");
-                preferred.push("password");
-            }
-        }
-    }
-    let mut args = Vec::new();
-    if !preferred.is_empty() {
-        args.push(OsString::from("-o"));
-        args.push(OsString::from(format!(
-            "PreferredAuthentications={}",
-            preferred.join(",")
-        )));
-    }
-    if !availability.agent || !order.contains(&SshAuthMethod::Agent) {
-        args.push(OsString::from("-o"));
-        args.push(OsString::from("IdentityAgent=none"));
-    }
-    args
-}
-
-fn ssh_auth_context(conn: &rusqlite::Connection) -> Result<SshAuthContext> {
-    let order = load_ssh_auth_order(conn)?;
-    let availability = detect_ssh_auth_availability();
-    let args = build_ssh_auth_args(&order, &availability);
-    Ok(SshAuthContext { args })
-}
-
-fn resolve_client_for(
-    kind: ClientKind,
-    profile_overrides: Option<&tdcore::doctor::ClientOverrides>,
-    store: &ProfileStore,
-) -> Result<PathBuf> {
-    let global_overrides = settings::get_client_overrides(store.conn())?;
-    doctor::resolve_client_with_overrides(kind, profile_overrides, global_overrides.as_ref())
-        .ok_or_else(|| anyhow!("{} client not found via overrides or PATH", kind.as_str()))
-}
-
-fn format_ssh_invocation(ssh: &Path, port: u16, auth_args: &[OsString]) -> String {
-    let mut parts = vec![
-        ssh.to_string_lossy().to_string(),
-        "-p".to_string(),
-        port.to_string(),
-    ];
-    parts.extend(
-        auth_args
-            .iter()
-            .map(|arg| arg.to_string_lossy().to_string()),
-    );
-    parts.join(" ")
 }
 
 fn mask_sensitive_tokens(input: &str) -> String {
@@ -1349,6 +1167,14 @@ mod tests {
             profile_type: ProfileType::Ssh,
             executable: PathBuf::from("ssh"),
             args: Vec::new(),
+            safe_metadata: serde_json::json!({
+                "mode": "interactive",
+                "source": "tui",
+                "host": "example.com",
+                "port": 2222,
+                "user": "alice",
+                "profile_type": "ssh",
+            }),
         }
     }
 

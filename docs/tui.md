@@ -33,7 +33,7 @@ The status line explains the next available action or why a run cannot start. Co
 
 - `s`: open an interactive SSH session for the selected SSH profile.
 
-This is separate from CommandSet execution. TeraDock temporarily leaves the TUI screen, restores the normal terminal mode, and starts `ssh -p <port> <auth options> user@host` with standard input, output, and error inherited from the current terminal. When the SSH process exits, the TUI returns and shows whether the session ended normally, with an exit code, or without an exit code.
+This is separate from CommandSet execution. TeraDock temporarily leaves the TUI screen, restores the normal terminal mode, and starts a shared core-built `ssh -p <port> <auth options> user@host` invocation with standard input, output, and error inherited from the current terminal. When the SSH process exits, the TUI returns and shows whether the session ended normally, with an exit code, or without an exit code.
 
 If SSH cannot be launched, the TUI returns and shows the launch error. If SSH exits without an exit code, for example after signal termination on platforms that report it that way, the TUI shows that explicitly. The TUI clears and redraws after returning from SSH so resize changes during the session do not leave stale screen content.
 
@@ -43,7 +43,7 @@ Critical profiles require typing the profile id before the SSH session opens.
 
 Interactive SSH sessions require a TTY. Running `td ui` with redirected input or output, such as `td ui < input.txt`, exits with a clear error instead of entering raw mode.
 
-Each TUI SSH session attempt is written to `op_logs` as `op = ssh_session` after the session exits or after launch failure. The log row includes the profile id, SSH client path, success flag, exit code when available, duration, and small metadata such as `mode = interactive`, `source = tui`, host, port, user, and profile type. Passwords, secret values, SSH auth arguments, and full command strings are not logged.
+Each TUI SSH session attempt is written to `op_logs` as `op = ssh_session` after the session exits or after launch failure. The log row includes the profile id, SSH client path, success flag, exit code when available, duration, and shared core-built metadata such as `mode = interactive`, `source = tui`, host, port, user, and profile type. Passwords, secret values, SSH auth arguments, and full command strings are not logged.
 
 Use `td recent`, `td recent --limit 10`, or `td recent --json` to list recently used interactive SSH profiles from the CLI. TUI recent-profile panes are not part of the current UI.
 

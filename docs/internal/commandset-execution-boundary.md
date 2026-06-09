@@ -24,7 +24,7 @@ CLI still owns:
 
 - Argument parsing and text/JSON output formatting.
 - Critical profile confirmation.
-- SSH client resolution and SSH authentication option messages.
+- SSH authentication option messages.
 - Streaming step stdout/stderr to the terminal for non-JSON runs.
 
 TUI still owns:
@@ -37,7 +37,7 @@ TUI still owns:
 
 ## Known Follow-Ups
 
-- Move SSH auth order parsing/building into core to remove the remaining duplication between CLI and TUI.
+- Pass a core SSH invocation or narrower target/client/auth bundle into `tdcore::cmdset_runner`.
 - Add first-class `td cmdset add/list/show/rm` commands instead of relying on samples, import JSON, or direct DB-backed tooling.
 - Add a small executor abstraction so timeout tests can avoid spawning shell scripts.
 - Consider recording timeout failures in `op_logs`; the current behavior matches the previous implementation and returns before logging.

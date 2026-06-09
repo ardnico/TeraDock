@@ -130,3 +130,4 @@ TeraDock is tested on Windows and Linux in CI. SSH actions require an external `
 - [TUI](docs/tui.md)
 - [Security](docs/security.md)
 - [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)
+- [Internal SSH Invocation Boundary](docs/internal/ssh-invocation-boundary.md)

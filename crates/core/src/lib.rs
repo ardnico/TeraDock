@@ -14,6 +14,7 @@ pub mod profile;
 pub mod secret;
 pub mod settings;
 pub mod settings_registry;
+pub mod ssh;
 pub mod tester;
 pub mod transfer;
 pub mod tunnel;
