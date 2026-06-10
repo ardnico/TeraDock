@@ -4,6 +4,9 @@ TeraDock 0.1.0 is an early release of a local-first CLI/TUI tool for managing co
 
 Feedback is welcome, especially around onboarding, packaging, and day-to-day TUI workflows.
 
+This release is distributed through GitHub Release artifacts. It is not
+published to crates.io.
+
 ## Who is this for?
 
 TeraDock is for operators, developers, and lab or maintenance teams who need a small local tool to keep connection profiles, mark risky targets, run repeated SSH checks, and inspect results without building a larger automation stack.
@@ -27,8 +30,9 @@ Download the artifact for your platform from the GitHub Release:
 
 - Windows: `td-0.1.0-windows-x86_64-setup.exe`
 - Linux portable archive: `td-0.1.0-linux-x86_64.tar.gz`
-- Debian package: `.deb`
-- RPM package: `.rpm`
+- Debian package: `.deb` generated from the `td` package metadata
+- RPM package: `.rpm` generated from the `td` package metadata
+- Checksums: `SHA256SUMS-linux-x86_64` and `SHA256SUMS-windows-x86_64`
 
 You can also build from source:
 
@@ -59,6 +63,7 @@ Inside the TUI, use `/` to search, `Space` to mark profiles, `r` to run the sele
 - Transfer and tunnel command shapes are not fully converted to `SshInvocation`.
 - Real SSH server integration tests are not included in the automated test suite.
 - Telnet and Serial are scoped primarily to connection workflows in this early release.
+- Fresh install smoke testing of release artifacts should be completed before broad operational rollout.
 
 ## Safety notes
 

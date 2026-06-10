@@ -19,8 +19,10 @@ Install from a GitHub Release artifact when available:
 - Windows: `td-0.1.0-windows-x86_64-setup.exe`
 - Linux portable archive: `td-0.1.0-linux-x86_64.tar.gz`
 - Linux packages: `.deb` and `.rpm`
+- Checksums: `SHA256SUMS-linux-x86_64` and `SHA256SUMS-windows-x86_64`
 
 The v0.1 release candidate is prepared for GitHub Releases. crates.io publication is not part of this release path.
+Before broad use, validate downloaded artifacts with the [release artifact validation guide](docs/release-artifact-validation.md).
 
 To build from source:
 
@@ -146,6 +148,7 @@ TeraDock is tested on Windows and Linux in CI. SSH actions require an external `
 - [CommandSets](docs/commandsets.md)
 - [TUI](docs/tui.md)
 - [Security](docs/security.md)
+- [Release Artifact Validation](docs/release-artifact-validation.md)
 - [Release Checklist](RELEASE_CHECKLIST.md)
 - [Release Notes 0.1.0](RELEASE_NOTES_0.1.0.md)
 - [Changelog](CHANGELOG.md)

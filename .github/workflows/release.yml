@@ -4,9 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for artifact-only validation builds"
+        required: true
+        default: "0.1.0-rc-artifact"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,7 +39,13 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install libudev (build deps)
         if: runner.os == 'Linux'
@@ -80,6 +92,23 @@ jobs:
         if: runner.os == 'Linux'
         run: packaging/linux/package-tar.sh "${{ steps.version.outputs.version }}"
 
+      - name: Stage Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/debian/*.deb dist/
+          cp target/generate-rpm/*.rpm dist/
+
+      - name: Generate checksums (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum td-*-linux-x86_64.tar.gz *.deb *.rpm > SHA256SUMS-linux-x86_64
+
       # ----------------
       # Windows packaging
       # ----------------
@@ -95,6 +124,15 @@ jobs:
             /DMyAppVersion="${{ steps.version.outputs.version }}" `
             "packaging\windows\td.iss"
 
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hashes = Get-FileHash -Algorithm SHA256 -Path "dist\td-*-windows-x86_64-setup.exe"
+          $hashes |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Encoding ASCII "dist\SHA256SUMS-windows-x86_64"
+
       # ----------------
       # Collect artifacts
       # ----------------
@@ -105,8 +143,9 @@ jobs:
           name: linux-artifacts
           path: |
             dist/td-*-linux-x86_64.tar.gz
-            target/debian/*.deb
-            target/generate-rpm/*.rpm
+            dist/*.deb
+            dist/*.rpm
+            dist/SHA256SUMS-linux-x86_64
 
       - name: Upload artifacts (Windows)
         if: runner.os == 'Windows'
@@ -115,11 +154,15 @@ jobs:
           name: windows-artifacts
           path: |
             dist/td-*-windows-x86_64-setup.exe
+            dist/SHA256SUMS-windows-x86_64
 
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-test')
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -132,3 +175,4 @@ jobs:
           files: release-assets/**/*
           fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
