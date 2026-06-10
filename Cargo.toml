@@ -9,8 +9,13 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 version = "0.1.0"
+authors = ["TeraDock contributors"]
+repository = "https://github.com/ardnico/TeraDock"
+readme = "README.md"
+keywords = ["ssh", "tui", "cli", "operations"]
+categories = ["command-line-utilities"]
 
 [workspace.dependencies]
 clap = { version = "4.5.4", features = ["derive"] }

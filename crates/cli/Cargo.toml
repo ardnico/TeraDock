@@ -2,8 +2,14 @@
 name = "td"
 version = "0.1.0"
 edition.workspace = true
-license = "Apache-2.0"
-description = "TeraDock command-line interface"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "CLI and TUI binary for managing TeraDock connection profiles and CommandSets"
+publish = false
 
 [package.metadata.deb]
 maintainer = "TeraDock Team <noreply@example.com>"

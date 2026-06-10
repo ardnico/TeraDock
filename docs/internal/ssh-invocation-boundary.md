@@ -68,6 +68,8 @@ The full core invocation builder is used by:
 
 TUI CommandSet execution, transfer, tunnel, test, and config-apply paths now reuse the same core auth/client resolution helpers where practical, but their full command shapes remain separate.
 
+For v0.1, this means transfer and tunnel are documented release limitations rather than release blockers.
+
 ## Future Cleanup Targets
 
 - CommandSet: accept a core SSH invocation or narrower target/client/auth bundle directly in `tdcore::cmdset_runner`.

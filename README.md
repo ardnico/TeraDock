@@ -14,7 +14,15 @@ The main workflow is simple: keep connection profiles in one local database, mar
 
 ## Quick Start
 
-Build from source:
+Install from a GitHub Release artifact when available:
+
+- Windows: `td-0.1.0-windows-x86_64-setup.exe`
+- Linux portable archive: `td-0.1.0-linux-x86_64.tar.gz`
+- Linux packages: `.deb` and `.rpm`
+
+The v0.1 release candidate is prepared for GitHub Releases. crates.io publication is not part of this release path.
+
+To build from source:
 
 ```bash
 cargo build -p td --release
@@ -66,6 +74,7 @@ td profile show lab1
 td exec lab1 --timeout-ms 5000 -- uname -a
 td run lab1 linux-basic-check --json
 td recent --limit 10
+td recent --json
 td export -o teradock-export.json
 td import --conflict rename teradock-export.json
 ```
@@ -116,6 +125,14 @@ The export format includes profiles, CommandSets, parser definitions, config set
 
 TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
 
+## Known Limitations
+
+- TUI recent-profile browsing is not implemented; use `td recent` or `td recent --json`.
+- Terminal emulator launch and tmux integration are not implemented.
+- CommandSet execution still receives SSH path and auth args separately inside `tdcore::cmdset_runner`.
+- Transfer and tunnel command shapes are not fully represented by `SshInvocation` yet.
+- Automated tests do not include real SSH server integration tests.
+
 ## What TeraDock Is Not
 
 - It is not a full replacement for configuration management tools such as Ansible.
@@ -129,5 +146,8 @@ TeraDock is tested on Windows and Linux in CI. SSH actions require an external `
 - [CommandSets](docs/commandsets.md)
 - [TUI](docs/tui.md)
 - [Security](docs/security.md)
+- [Release Checklist](RELEASE_CHECKLIST.md)
+- [Release Notes 0.1.0](RELEASE_NOTES_0.1.0.md)
+- [Changelog](CHANGELOG.md)
 - [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)
 - [Internal SSH Invocation Boundary](docs/internal/ssh-invocation-boundary.md)

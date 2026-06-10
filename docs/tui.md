@@ -56,3 +56,10 @@ Press `Esc` to cancel a confirmation prompt.
 ## Results
 
 Single runs populate stdout, stderr, and parsed tabs. Bulk runs also populate the summary tab with one row per profile. After a bulk run, stdout, stderr, and parsed tabs show the most recently executed profile.
+
+## Known Limitations
+
+- Recent SSH sessions are available through `td recent`, not a TUI pane.
+- Interactive SSH opens in the current terminal only; terminal emulator launch is not implemented.
+- tmux integration is not implemented.
+- The automated test suite does not connect to a real SSH server.

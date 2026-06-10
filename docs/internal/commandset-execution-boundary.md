@@ -35,6 +35,10 @@ TUI still owns:
 - Result tab state and summary display.
 - Command preview rendering with masked sensitive tokens.
 
+## v0.1 Release Boundary
+
+For v0.1, `tdcore::cmdset_runner` remains shared between CLI and TUI but still receives the resolved SSH path and auth args separately from callers. This is a known limitation for the release candidate, not a new feature target for this pass.
+
 ## Known Follow-Ups
 
 - Pass a core SSH invocation or narrower target/client/auth bundle into `tdcore::cmdset_runner`.
