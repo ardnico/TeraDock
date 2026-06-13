@@ -26,6 +26,10 @@ use tdcore::profile::{
     DangerLevel, NewProfile, Profile, ProfileFilters, ProfileStore, ProfileType, UpdateProfile,
 };
 use tdcore::secret::{NewSecret, SecretStore};
+use tdcore::session_log::{
+    self, SessionLogFiles, SessionLogPlan, SessionLogReference,
+    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+};
 use tdcore::settings;
 use tdcore::settings::SettingScope;
 use tdcore::settings_registry;
@@ -133,6 +137,11 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Inspect saved interactive SSH session logs
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
     },
     /// Manage SSH tunnels
     Tunnel {
@@ -272,6 +281,38 @@ struct InitArgs {
     /// Install safe read-only sample CommandSets
     #[arg(long)]
     with_samples: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommands {
+    /// List saved interactive SSH session logs
+    List(SessionListArgs),
+    /// Show metadata for a saved interactive SSH session log
+    Show(SessionShowArgs),
+    /// Print the terminal log path for a saved session
+    Path { session_id: String },
+}
+
+#[derive(Debug, Args)]
+struct SessionListArgs {
+    /// Maximum number of sessions to show
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionShowArgs {
+    /// Session log ID
+    session_id: String,
+    /// Output metadata as JSON
+    #[arg(long)]
+    json: bool,
+    /// Print the last N log lines after metadata
+    #[arg(long)]
+    tail: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -609,6 +650,7 @@ fn main() -> Result<()> {
             initial_send,
         }) => handle_connect(profile_id, initial_send),
         Some(Commands::Recent { limit, json }) => handle_recent(limit, json),
+        Some(Commands::Session { command }) => handle_session(command),
         Some(Commands::Tunnel { command }) => handle_tunnel(command),
         Some(Commands::Test {
             profile_id,
@@ -1143,17 +1185,35 @@ fn handle_config_get(conn: &Connection, args: ConfigGetArgs) -> Result<()> {
     let scope = SettingScope::parse(&args.scope)
         .map_err(|err| anyhow!("invalid scope '{}': {err}", args.scope))?;
     ensure_scope_supported(&args.key, scope.kind())?;
-    let value = if args.resolved {
+    let mut value = if args.resolved {
         settings::get_setting_resolved(conn, &scope, &args.key)?
     } else {
         settings::get_setting_scoped(conn, &scope, &args.key)?
     };
+    if args.resolved && value.is_none() {
+        value = default_resolved_config_value(conn, &args.key)?;
+    }
     if let Some(value) = value {
         println!("{}={}", args.key, value);
     } else {
         println!("{}=", args.key);
     }
     Ok(())
+}
+
+fn default_resolved_config_value(conn: &Connection, key: &str) -> Result<Option<String>> {
+    match key {
+        session_log::SESSION_LOG_ENABLED_KEY => Ok(Some("false".to_string())),
+        session_log::SESSION_LOG_BACKEND_KEY => {
+            Ok(Some(session_log::SESSION_LOG_BACKEND_AUTO.to_string()))
+        }
+        session_log::SESSION_LOG_DIR_KEY => Ok(Some(
+            session_log::configured_session_log_dir(conn)?
+                .display()
+                .to_string(),
+        )),
+        _ => Ok(None),
+    }
 }
 
 fn handle_config_set(conn: &Connection, args: ConfigSetArgs) -> Result<()> {
@@ -1900,6 +1960,124 @@ fn handle_recent(limit: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn handle_session(cmd: SessionCommands) -> Result<()> {
+    let conn = db::init_connection()?;
+    match cmd {
+        SessionCommands::List(args) => handle_session_list(&conn, args),
+        SessionCommands::Show(args) => handle_session_show(&conn, args),
+        SessionCommands::Path { session_id } => {
+            let metadata = session_log::get_session_log(&conn, &session_id)?;
+            let Some(log_path) = metadata.log_path else {
+                return Err(anyhow!("session has no terminal log path: {session_id}"));
+            };
+            println!("{}", log_path.display());
+            Ok(())
+        }
+    }
+}
+
+fn handle_session_list(conn: &Connection, args: SessionListArgs) -> Result<()> {
+    if args.limit == 0 {
+        return Err(anyhow!("--limit must be greater than 0"));
+    }
+    let mut sessions = session_log::list_session_logs(conn)?;
+    sessions.truncate(args.limit);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+    if sessions.is_empty() {
+        println!("(no saved SSH session logs)");
+        return Ok(());
+    }
+    println!(
+        "{:<14} {:<16} {:<28} {:<20} {:<12} {:<18} log_path",
+        "session_id", "profile_id", "endpoint", "started", "duration", "status"
+    );
+    for item in sessions {
+        let endpoint = format!("{}@{}:{}", item.user, item.host, item.port);
+        let log_path = item
+            .log_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<14} {:<16} {:<28} {:<20} {:<12} {:<18} {}",
+            item.session_id,
+            item.profile_id,
+            endpoint,
+            format_unix_ms_utc(item.started_at),
+            format_duration_ms(item.duration_ms),
+            format_session_status(&item),
+            log_path
+        );
+    }
+    Ok(())
+}
+
+fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
+    let metadata = session_log::get_session_log(conn, &args.session_id)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&metadata)?);
+        return Ok(());
+    }
+
+    println!("session_id: {}", metadata.session_id);
+    println!("profile_id: {}", metadata.profile_id);
+    println!(
+        "endpoint: {}@{}:{}",
+        metadata.user, metadata.host, metadata.port
+    );
+    println!("started_at: {}", format_unix_ms_utc(metadata.started_at));
+    println!("ended_at: {}", format_unix_ms_utc(metadata.ended_at));
+    println!("duration: {}", format_duration_ms(metadata.duration_ms));
+    println!(
+        "exit_code: {}",
+        metadata
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!("backend: {}", metadata.backend);
+    println!("status: {}", metadata.status);
+    if let Some(reason) = &metadata.reason {
+        println!("reason: {reason}");
+    }
+    println!(
+        "log_path: {}",
+        metadata
+            .log_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!("metadata_path: {}", metadata.metadata_path.display());
+
+    if let Some(tail) = args.tail {
+        if tail == 0 {
+            return Err(anyhow!("--tail must be greater than 0"));
+        }
+        let Some(log_path) = metadata.log_path.as_ref() else {
+            return Err(anyhow!("session has no terminal log path"));
+        };
+        print_log_tail(log_path, tail)?;
+    }
+    Ok(())
+}
+
+fn print_log_tail(log_path: &Path, tail: usize) -> Result<()> {
+    let raw = std::fs::read_to_string(log_path)
+        .with_context(|| format!("failed to read session log {}", log_path.display()))?;
+    let lines = raw.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(tail);
+    println!();
+    println!("log_tail:");
+    for line in &lines[start..] {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 fn handle_doctor(json: bool) -> Result<()> {
     let conn = db::init_connection()?;
     let global_overrides = settings::get_client_overrides(&conn)?;
@@ -1979,6 +2157,21 @@ fn format_unix_ms_utc(ts_ms: i64) -> String {
         dt.minute(),
         dt.second()
     )
+}
+
+fn format_duration_ms(duration_ms: i64) -> String {
+    if duration_ms >= 1000 {
+        format!("{:.1}s", duration_ms as f64 / 1000.0)
+    } else {
+        format!("{duration_ms}ms")
+    }
+}
+
+fn format_session_status(metadata: &session_log::SessionLogMetadata) -> String {
+    match metadata.exit_code {
+        Some(code) => format!("{} exit {}", metadata.status, code),
+        None => metadata.status.clone(),
+    }
 }
 
 fn handle_test(profile_id: String, json: bool, include_ssh: bool) -> Result<()> {
@@ -2383,30 +2576,180 @@ fn handle_xfer(args: XferArgs) -> Result<()> {
     }
 }
 
+struct CliSshOutcome {
+    ok: bool,
+    exit_code: Option<i32>,
+    duration_ms: i64,
+    session_log: SessionLogReference,
+}
+
+enum CliSshRunResult {
+    Completed(CliSshOutcome),
+    LaunchFailed {
+        error: anyhow::Error,
+        duration_ms: i64,
+        session_log: SessionLogReference,
+    },
+}
+
 fn connect_ssh(store: &ProfileStore, invocation: SshInvocation) -> Result<()> {
+    let plan = session_log::plan_for_target(store.conn(), &invocation.target);
+    emit_session_log_notice(&plan);
+    let result = match &plan {
+        SessionLogPlan::Script { script_path, files } => {
+            run_script_logged_cli_ssh(&invocation, script_path, files)
+        }
+        SessionLogPlan::Disabled | SessionLogPlan::NoLog { .. } => {
+            run_plain_cli_ssh(&invocation, plan.not_saved_reference())
+        }
+    };
+    match result {
+        CliSshRunResult::Completed(outcome) => {
+            store.touch_last_used(&invocation.target.profile_id)?;
+            let entry = oplog::OpLogEntry {
+                op: "connect".into(),
+                profile_id: Some(invocation.target.profile_id.clone()),
+                client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
+                ok: outcome.ok,
+                exit_code: outcome.exit_code,
+                duration_ms: Some(outcome.duration_ms),
+                meta_json: Some(ssh_connect_meta(&invocation, None, &outcome.session_log)),
+            };
+            oplog::log_operation(store.conn(), entry)?;
+            if outcome.ok {
+                Ok(())
+            } else if let Some(code) = outcome.exit_code {
+                Err(anyhow!("ssh exited with code {code}"))
+            } else {
+                Err(anyhow!("ssh ended without exit code"))
+            }
+        }
+        CliSshRunResult::LaunchFailed {
+            error,
+            duration_ms,
+            session_log,
+        } => {
+            let error_message = error.to_string();
+            store.touch_last_used(&invocation.target.profile_id)?;
+            let entry = oplog::OpLogEntry {
+                op: "connect".into(),
+                profile_id: Some(invocation.target.profile_id.clone()),
+                client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
+                ok: false,
+                exit_code: None,
+                duration_ms: Some(duration_ms),
+                meta_json: Some(ssh_connect_meta(
+                    &invocation,
+                    Some(&error_message),
+                    &session_log,
+                )),
+            };
+            oplog::log_operation(store.conn(), entry)?;
+            Err(error)
+        }
+    }
+}
+
+fn run_plain_cli_ssh(
+    invocation: &SshInvocation,
+    session_log: SessionLogReference,
+) -> CliSshRunResult {
     let mut cmd = Command::new(&invocation.client_path);
     cmd.args(&invocation.args);
     let started = Instant::now();
-    let status = cmd.status().context("failed to launch ssh")?;
+    let status = cmd.status().context("failed to launch ssh");
     let duration_ms = started.elapsed().as_millis() as i64;
-    let ok = status.success();
-    let exit_code = status.code().unwrap_or_default();
-    store.touch_last_used(&invocation.target.profile_id)?;
-    let entry = oplog::OpLogEntry {
-        op: "connect".into(),
-        profile_id: Some(invocation.target.profile_id.clone()),
-        client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
-        ok,
-        exit_code: Some(exit_code),
-        duration_ms: Some(duration_ms),
-        meta_json: None,
-    };
-    oplog::log_operation(store.conn(), entry)?;
-    if ok {
-        Ok(())
-    } else {
-        Err(anyhow!("ssh exited with code {}", exit_code))
+
+    match status {
+        Ok(status) => CliSshRunResult::Completed(CliSshOutcome {
+            ok: status.success(),
+            exit_code: status.code(),
+            duration_ms,
+            session_log,
+        }),
+        Err(error) => CliSshRunResult::LaunchFailed {
+            error,
+            duration_ms,
+            session_log,
+        },
     }
+}
+
+fn run_script_logged_cli_ssh(
+    invocation: &SshInvocation,
+    script_path: &Path,
+    files: &SessionLogFiles,
+) -> CliSshRunResult {
+    let script = session_log::build_script_invocation(
+        script_path,
+        files,
+        &invocation.client_path,
+        &invocation.args,
+    );
+    let log_started_at = now_ms();
+    let started = Instant::now();
+    let status = Command::new(&script.executable)
+        .args(&script.args)
+        .status()
+        .context("failed to launch script");
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    match status {
+        Ok(status) => {
+            let exit_code = status.code();
+            let session_log = match session_log::complete_script_session(
+                files,
+                &invocation.target,
+                log_started_at,
+                duration_ms,
+                exit_code,
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            CliSshRunResult::Completed(CliSshOutcome {
+                ok: status.success(),
+                exit_code,
+                duration_ms,
+                session_log,
+            })
+        }
+        Err(error) => {
+            eprintln!(
+                "TeraDock session logging failed to start ({error}); continuing without logging."
+            );
+            run_plain_cli_ssh(
+                invocation,
+                SessionLogReference::not_saved(SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED),
+            )
+        }
+    }
+}
+
+fn emit_session_log_notice(plan: &SessionLogPlan) {
+    if let Some(notice) = plan.notice() {
+        eprintln!("{notice}");
+        if matches!(plan, SessionLogPlan::Script { .. }) {
+            eprintln!(
+                "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
+            );
+        }
+    }
+}
+
+fn ssh_connect_meta(
+    invocation: &SshInvocation,
+    launch_error: Option<&str>,
+    session_log: &SessionLogReference,
+) -> serde_json::Value {
+    let mut meta = invocation.safe_metadata.clone();
+    if let Some(error) = launch_error {
+        meta["launch_error"] = serde_json::Value::String(error.to_string());
+    }
+    session_log::add_reference_to_meta(&mut meta, session_log);
+    meta
 }
 
 fn connect_telnet(
@@ -3081,6 +3424,51 @@ mod tests {
             }
             _ => panic!("expected recent command"),
         }
+    }
+
+    #[test]
+    fn parses_session_list_command() {
+        let cli = Cli::try_parse_from(["td", "session", "list", "--limit", "5", "--json"])
+            .expect("parses session list");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::List(args),
+            }) => {
+                assert_eq!(args.limit, 5);
+                assert!(args.json);
+            }
+            _ => panic!("expected session list command"),
+        }
+    }
+
+    #[test]
+    fn parses_session_path_command() {
+        let cli = Cli::try_parse_from(["td", "session", "path", "sl_abc123"])
+            .expect("parses session path");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::Path { session_id },
+            }) => {
+                assert_eq!(session_id, "sl_abc123");
+            }
+            _ => panic!("expected session path command"),
+        }
+    }
+
+    #[test]
+    fn session_log_config_defaults_are_resolved() {
+        let conn = db::init_in_memory().unwrap();
+
+        assert_eq!(
+            default_resolved_config_value(&conn, session_log::SESSION_LOG_ENABLED_KEY).unwrap(),
+            Some("false".to_string())
+        );
+        assert_eq!(
+            default_resolved_config_value(&conn, session_log::SESSION_LOG_BACKEND_KEY).unwrap(),
+            Some("auto".to_string())
+        );
     }
 
     #[test]

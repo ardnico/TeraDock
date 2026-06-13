@@ -22,6 +22,13 @@ pub fn logs_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn session_logs_dir() -> Result<PathBuf> {
+    let mut dir = config_dir()?;
+    dir.push("session-logs");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 pub fn database_path() -> Result<PathBuf> {
     let mut dir = config_dir()?;
     dir.push("teradock.db");

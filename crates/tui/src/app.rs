@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::Instant;
@@ -17,6 +17,11 @@ use ratatui::Terminal;
 use tdcore::cmdset::CmdSetStore;
 use tdcore::db;
 use tdcore::profile::ProfileStore;
+use tdcore::session_log::{
+    self, SessionLogFiles, SessionLogPlan, SessionLogReference,
+    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+};
+use tdcore::util::now_ms;
 
 use crate::state::{
     ActivePane, AppState, ConfirmedAction, InputMode, ResultTab, SshSessionCommand,
@@ -200,18 +205,26 @@ fn handle_ssh_session_request(
                 outcome.ok,
                 outcome.exit_code,
                 outcome.duration_ms,
+                &outcome.session_log,
             ) {
                 state.set_status_message(format!(
                     "SSH session ended, but failed to record result: {err}"
                 ));
             }
         }
-        SshSessionRunResult::LaunchFailed { error, duration_ms } => {
+        SshSessionRunResult::LaunchFailed {
+            error,
+            duration_ms,
+            session_log,
+        } => {
             let error_message = error.to_string();
             let mut status_message = format!("Failed to launch SSH session: {error_message}");
-            if let Err(err) =
-                state.record_ssh_session_launch_failure(&session, &error_message, duration_ms)
-            {
+            if let Err(err) = state.record_ssh_session_launch_failure(
+                &session,
+                &error_message,
+                duration_ms,
+                &session_log,
+            ) {
                 status_message.push_str(&format!("; failed to record SSH session failure: {err}"));
             }
             state.set_status_message(status_message);
@@ -224,6 +237,7 @@ struct SshSessionOutcome {
     ok: bool,
     exit_code: Option<i32>,
     duration_ms: i64,
+    session_log: SessionLogReference,
 }
 
 enum SshSessionRunResult {
@@ -231,6 +245,7 @@ enum SshSessionRunResult {
     LaunchFailed {
         error: anyhow::Error,
         duration_ms: i64,
+        session_log: SessionLogReference,
     },
 }
 
@@ -239,6 +254,32 @@ fn run_interactive_ssh_session(
     session: &SshSessionCommand,
 ) -> Result<SshSessionRunResult> {
     suspend_tui_terminal(terminal)?;
+    if let Some(notice) = session.session_log_plan.notice() {
+        println!("{notice}");
+        if matches!(&session.session_log_plan, SessionLogPlan::Script { .. }) {
+            println!(
+                "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
+            );
+        }
+        io::stdout().flush()?;
+    }
+    let result = match &session.session_log_plan {
+        SessionLogPlan::Script { script_path, files } => {
+            run_script_logged_ssh_session(session, script_path, files)
+        }
+        SessionLogPlan::Disabled | SessionLogPlan::NoLog { .. } => {
+            run_plain_ssh_session(session, session.session_log_plan.not_saved_reference())
+        }
+    };
+    resume_tui_terminal(terminal).context("failed to restore TUI after SSH session")?;
+
+    Ok(result)
+}
+
+fn run_plain_ssh_session(
+    session: &SshSessionCommand,
+    session_log: SessionLogReference,
+) -> SshSessionRunResult {
     let started = Instant::now();
     let status = Command::new(&session.executable)
         .args(&session.args)
@@ -248,15 +289,88 @@ fn run_interactive_ssh_session(
         .status()
         .context("failed to launch ssh");
     let duration_ms = started.elapsed().as_millis() as i64;
-    resume_tui_terminal(terminal).context("failed to restore TUI after SSH session")?;
 
     match status {
-        Ok(status) => Ok(SshSessionRunResult::Completed(SshSessionOutcome {
+        Ok(status) => SshSessionRunResult::Completed(SshSessionOutcome {
             ok: status.success(),
             exit_code: status.code(),
             duration_ms,
-        })),
-        Err(error) => Ok(SshSessionRunResult::LaunchFailed { error, duration_ms }),
+            session_log,
+        }),
+        Err(error) => SshSessionRunResult::LaunchFailed {
+            error,
+            duration_ms,
+            session_log,
+        },
+    }
+}
+
+fn run_script_logged_ssh_session(
+    session: &SshSessionCommand,
+    script_path: &std::path::Path,
+    files: &SessionLogFiles,
+) -> SshSessionRunResult {
+    let invocation = session_log::build_script_invocation(
+        script_path,
+        files,
+        &session.executable,
+        &session.args,
+    );
+    let log_started_at = now_ms();
+    let started = Instant::now();
+    let status = Command::new(&invocation.executable)
+        .args(&invocation.args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to launch script");
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    match status {
+        Ok(status) => {
+            let exit_code = status.code();
+            let target = session_log_target(session);
+            let session_log = match session_log::complete_script_session(
+                files,
+                &target,
+                log_started_at,
+                duration_ms,
+                exit_code,
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            SshSessionRunResult::Completed(SshSessionOutcome {
+                ok: status.success(),
+                exit_code,
+                duration_ms,
+                session_log,
+            })
+        }
+        Err(error) => {
+            println!(
+                "TeraDock session logging failed to start ({error}); continuing without logging."
+            );
+            let _ = io::stdout().flush();
+            run_plain_ssh_session(
+                session,
+                SessionLogReference::not_saved(SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED),
+            )
+        }
+    }
+}
+
+fn session_log_target(session: &SshSessionCommand) -> tdcore::ssh::SshTarget {
+    tdcore::ssh::SshTarget {
+        profile_id: session.profile_id.clone(),
+        name: session.profile_id.clone(),
+        user: session.user.clone(),
+        host: session.host.clone(),
+        port: session.port,
+        danger_level: tdcore::profile::DangerLevel::Normal,
     }
 }
 

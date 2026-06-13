@@ -12,6 +12,7 @@ pub mod parser;
 pub mod paths;
 pub mod profile;
 pub mod secret;
+pub mod session_log;
 pub mod settings;
 pub mod settings_registry;
 pub mod ssh;

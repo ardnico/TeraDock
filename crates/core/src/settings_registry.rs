@@ -43,10 +43,15 @@ impl SettingDefinition {
 }
 
 const SSH_AUTH_ALLOWED: [&str; 3] = ["agent", "keys", "password"];
+const SESSION_LOG_BACKENDS: [&str; 3] = ["auto", "script", "no-log"];
 const ALLOW_INSECURE_EXAMPLES: [&str; 2] = ["true", "false"];
 const SSH_AUTH_EXAMPLES: [&str; 2] = ["agent,keys,password", "keys,password"];
 const CLIENT_OVERRIDE_EXAMPLES: [&str; 1] = [r#"{"ssh":"/usr/bin/ssh","scp":"/usr/bin/scp"}"#];
 const SSH_USE_AGENT_EXAMPLES: [&str; 2] = ["true", "false"];
+const SESSION_LOG_DIR_EXAMPLES: [&str; 2] = [
+    "/home/alice/.config/teradock/session-logs",
+    "C:\\Users\\alice\\AppData\\Roaming\\TeraDock\\session-logs",
+];
 
 static SETTINGS: &[SettingDefinition] = &[
     SettingDefinition {
@@ -108,6 +113,50 @@ static SETTINGS: &[SettingDefinition] = &[
             scopes: &[SettingScopeKind::Global],
         },
         validator: validate_json,
+    },
+    SettingDefinition {
+        schema: SettingSchema {
+            key: "session.log.enabled",
+            description: "Enable terminal transcript logging for interactive SSH sessions. Logs may contain secrets shown in the terminal.",
+            value_type: SettingValueType::Boolean,
+            allowed_values: &ALLOW_INSECURE_EXAMPLES,
+            examples: &ALLOW_INSECURE_EXAMPLES,
+            dangerous: true,
+            scopes: &[
+                SettingScopeKind::Global,
+                SettingScopeKind::Env,
+                SettingScopeKind::Profile,
+            ],
+        },
+        validator: validate_bool,
+    },
+    SettingDefinition {
+        schema: SettingSchema {
+            key: "session.log.dir",
+            description: "Directory for interactive SSH session transcript logs and metadata.",
+            value_type: SettingValueType::String,
+            allowed_values: &[],
+            examples: &SESSION_LOG_DIR_EXAMPLES,
+            dangerous: false,
+            scopes: &[SettingScopeKind::Global],
+        },
+        validator: validate_non_empty,
+    },
+    SettingDefinition {
+        schema: SettingSchema {
+            key: "session.log.backend",
+            description: "Backend for interactive SSH session logging (auto, script, or no-log).",
+            value_type: SettingValueType::String,
+            allowed_values: &SESSION_LOG_BACKENDS,
+            examples: &SESSION_LOG_BACKENDS,
+            dangerous: false,
+            scopes: &[
+                SettingScopeKind::Global,
+                SettingScopeKind::Env,
+                SettingScopeKind::Profile,
+            ],
+        },
+        validator: validate_session_log_backend,
     },
 ];
 
@@ -194,6 +243,55 @@ fn validate_json(raw: &str) -> Result<String> {
     Ok(serde_json::to_string(&value)?)
 }
 
+fn validate_non_empty(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::InvalidSetting(
+            "value cannot be empty".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_session_log_backend(raw: &str) -> Result<String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if SESSION_LOG_BACKENDS.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(CoreError::InvalidSetting(format!(
+            "unknown session log backend '{raw}'"
+        )))
+    }
+}
+
 fn slice_is_empty<T>(slice: &[T]) -> bool {
     slice.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_log_keys_are_registered() {
+        let keys = list_keys();
+
+        assert!(keys.contains(&"session.log.enabled"));
+        assert!(keys.contains(&"session.log.dir"));
+        assert!(keys.contains(&"session.log.backend"));
+    }
+
+    #[test]
+    fn validates_session_log_settings() {
+        assert_eq!(
+            validate_setting_value("session.log.enabled", "yes").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            validate_setting_value("session.log.backend", "SCRIPT").unwrap(),
+            "script"
+        );
+        assert!(validate_setting_value("session.log.backend", "pty").is_err());
+        assert!(validate_setting_value("session.log.dir", " ").is_err());
+    }
 }

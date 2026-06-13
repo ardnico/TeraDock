@@ -45,6 +45,47 @@ Interactive SSH sessions require a TTY. Running `td ui` with redirected input or
 
 Each TUI SSH session attempt is written to `op_logs` as `op = ssh_session` after the session exits or after launch failure. The log row includes the profile id, SSH client path, success flag, exit code when available, duration, and shared core-built metadata such as `mode = interactive`, `source = tui`, host, port, user, and profile type. Passwords, secret values, SSH auth arguments, and full command strings are not logged.
 
+## Interactive Session Logs
+
+Interactive session logging saves the terminal transcript from an interactive SSH session. This is separate from `op_logs`: `op_logs` record operation events, while session logs record terminal output.
+
+Session logging is disabled by default:
+
+```bash
+td config get session.log.enabled --resolved
+td config set session.log.enabled true
+td config set session.log.backend auto
+td config get session.log.dir --resolved
+```
+
+Defaults:
+
+- `session.log.enabled=false`
+- `session.log.dir=<data_dir>/session-logs`
+- `session.log.backend=auto`
+
+When logging is enabled, pressing `s` still uses the same TUI suspend/resume lifecycle. TeraDock leaves raw mode and the alternate screen before starting the logged SSH session, then returns to the TUI after the session exits.
+
+Linux/macOS use the `script` backend when available. If `script` is missing or cannot be launched, TeraDock continues with a normal SSH session and records that no session log was saved. Windows session logging is unsupported in this initial implementation and also falls back to normal SSH.
+
+Saved sessions can be inspected from the CLI:
+
+```bash
+td session list
+td session list --json
+td session show <session_id>
+td session show <session_id> --tail 50
+td session path <session_id>
+```
+
+`td session show` displays metadata by default. It does not print the full terminal log unless `--tail N` is provided.
+
+Session metadata includes the session id, profile id, user, host, port, start/end times, duration, exit code, backend, status, log path, and metadata path. It does not include SSH auth arguments, full command strings, private key paths, passwords, secrets, or tokens.
+
+The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript.
+
+When a TUI SSH session writes to `op_logs`, the row includes only `session_log_saved`, `session_log_id` when a log was saved, or `session_log_reason` when no log was saved. The log path is kept in the session metadata rather than copied into `op_logs`.
+
 Use `td recent`, `td recent --limit 10`, or `td recent --json` to list recently used interactive SSH profiles from the CLI. TUI recent-profile panes are not part of the current UI.
 
 ## Critical Confirmation
@@ -61,5 +102,6 @@ Single runs populate stdout, stderr, and parsed tabs. Bulk runs also populate th
 
 - Recent SSH sessions are available through `td recent`, not a TUI pane.
 - Interactive SSH opens in the current terminal only; terminal emulator launch is not implemented.
+- Windows interactive session logging is not implemented yet.
 - tmux integration is not implemented.
 - The automated test suite does not connect to a real SSH server.

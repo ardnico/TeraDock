@@ -9,6 +9,7 @@ use tdcore::cmdset_runner::{run_cmdset_ssh, CmdSetRunRequest, CmdSetRunResult};
 use tdcore::doctor::ClientKind;
 use tdcore::oplog::{self, OpLogEntry};
 use tdcore::profile::{DangerLevel, Profile, ProfileFilters, ProfileStore, ProfileType};
+use tdcore::session_log::{self, SessionLogPlan, SessionLogReference};
 use tdcore::settings::{self, ResolvedSettingDetail, ResolvedSettingSource};
 use tdcore::ssh::{self, SshBuildError, SshInvocationMode, SshInvocationRequest};
 
@@ -71,6 +72,7 @@ pub struct SshSessionCommand {
     pub executable: PathBuf,
     pub args: Vec<OsString>,
     pub safe_metadata: serde_json::Value,
+    pub session_log_plan: SessionLogPlan,
 }
 
 impl RunResult {
@@ -693,6 +695,7 @@ impl AppState {
                 return Ok(None);
             }
         };
+        let session_log_plan = session_log::plan_for_target(self.store.conn(), &invocation.target);
         Ok(Some(SshSessionCommand {
             profile_id: invocation.target.profile_id,
             host: invocation.target.host,
@@ -702,6 +705,7 @@ impl AppState {
             executable: invocation.client_path,
             args: invocation.args,
             safe_metadata: invocation.safe_metadata,
+            session_log_plan,
         }))
     }
 
@@ -711,6 +715,7 @@ impl AppState {
         ok: bool,
         exit_code: Option<i32>,
         duration_ms: i64,
+        session_log: &SessionLogReference,
     ) -> Result<()> {
         self.store.touch_last_used(&session.profile_id)?;
         oplog::log_operation(
@@ -722,7 +727,7 @@ impl AppState {
                 ok,
                 exit_code,
                 duration_ms: Some(duration_ms),
-                meta_json: Some(ssh_session_meta_json(session, None)),
+                meta_json: Some(ssh_session_meta_json(session, None, session_log)),
             },
         )?;
         self.status_message = Some(ssh_session_result_message(ok, exit_code));
@@ -734,6 +739,7 @@ impl AppState {
         session: &SshSessionCommand,
         error: &str,
         duration_ms: i64,
+        session_log: &SessionLogReference,
     ) -> Result<()> {
         self.store.touch_last_used(&session.profile_id)?;
         oplog::log_operation(
@@ -745,7 +751,7 @@ impl AppState {
                 ok: false,
                 exit_code: None,
                 duration_ms: Some(duration_ms),
-                meta_json: Some(ssh_session_meta_json(session, Some(error))),
+                meta_json: Some(ssh_session_meta_json(session, Some(error), session_log)),
             },
         )?;
         Ok(())
@@ -1034,11 +1040,13 @@ fn ssh_build_status_message(err: &SshBuildError) -> String {
 fn ssh_session_meta_json(
     session: &SshSessionCommand,
     launch_error: Option<&str>,
+    session_log: &SessionLogReference,
 ) -> serde_json::Value {
     let mut meta = session.safe_metadata.clone();
     if let Some(error) = launch_error {
         meta["launch_error"] = serde_json::Value::String(error.to_string());
     }
+    session_log::add_reference_to_meta(&mut meta, session_log);
     meta
 }
 
@@ -1175,6 +1183,7 @@ mod tests {
                 "user": "alice",
                 "profile_type": "ssh",
             }),
+            session_log_plan: SessionLogPlan::Disabled,
         }
     }
 
@@ -1306,7 +1315,13 @@ mod tests {
         let session = sample_ssh_session_command();
 
         state
-            .record_ssh_session_result(&session, false, None, 42)
+            .record_ssh_session_result(
+                &session,
+                false,
+                None,
+                42,
+                &SessionLogReference::not_saved("disabled"),
+            )
             .unwrap();
 
         let (op, ok, exit_code, duration_ms, meta_json): (
@@ -1346,6 +1361,9 @@ mod tests {
         assert_eq!(meta["port"], 2222);
         assert_eq!(meta["user"], "alice");
         assert_eq!(meta["profile_type"], "ssh");
+        assert_eq!(meta["session_log_saved"], false);
+        assert_eq!(meta["session_log_reason"], "disabled");
+        assert!(meta.get("session_log_id").is_none());
         assert!(meta.get("launch_error").is_none());
     }
 
@@ -1355,7 +1373,12 @@ mod tests {
         let session = sample_ssh_session_command();
 
         state
-            .record_ssh_session_launch_failure(&session, "permission denied", 7)
+            .record_ssh_session_launch_failure(
+                &session,
+                "permission denied",
+                7,
+                &SessionLogReference::saved("sl_abc123"),
+            )
             .unwrap();
 
         let (ok, exit_code, meta_json): (i64, Option<i32>, String) = state
@@ -1372,5 +1395,8 @@ mod tests {
         assert_eq!(ok, 0);
         assert_eq!(exit_code, None);
         assert_eq!(meta["launch_error"], "permission denied");
+        assert_eq!(meta["session_log_saved"], true);
+        assert_eq!(meta["session_log_id"], "sl_abc123");
+        assert!(meta.get("log_path").is_none());
     }
 }

@@ -40,6 +40,43 @@ TeraDock records operation type, profile id, client used, success/failure, exit 
 
 Operation logs must stay free of secrets. Passwords, secret values, tokens, SSH auth arguments, private key paths, and full command strings are not written to TUI SSH session log metadata. Command stdout and stderr are shown to the caller but are not currently stored in `op_logs`.
 
+## Interactive Session Logs
+
+Interactive session logs are terminal transcripts for interactive SSH sessions. They are not `op_logs` and are not enabled by default.
+
+Enable only when the operator accepts the risk:
+
+```bash
+td config set session.log.enabled true
+td config set session.log.backend auto
+td config get session.log.dir --resolved
+```
+
+The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
+
+Session log metadata is intentionally small. It may include the session id, profile id, user, host, port, timestamps, duration, exit code, backend, status, log path, and metadata path. It must not include:
+
+- Passwords, secrets, or tokens.
+- SSH auth arguments.
+- Full SSH command strings.
+- Private key paths.
+
+The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
+
+Linux/macOS use the `script` backend when available. Windows session logging is unsupported in the initial implementation and falls back to a normal SSH session without saving a terminal transcript.
+
+Use these commands to inspect saved sessions:
+
+```bash
+td session list
+td session list --json
+td session show <session_id>
+td session show <session_id> --tail 50
+td session path <session_id>
+```
+
+Do not attach raw session logs to issues, pull requests, support requests, release evidence, or screenshots unless hosts, users, prompts, command output, and sensitive values have been reviewed and redacted.
+
 ## Release Safety Scope
 
 The v0.1 release path is GitHub Release artifacts, not crates.io publication. Before tagging, run the release checklist and smoke-test packaged artifacts on clean systems where possible.

@@ -79,6 +79,9 @@ td exec lab1 --timeout-ms 5000 -- uname -a
 td run lab1 linux-basic-check --json
 td recent --limit 10
 td recent --json
+td config set session.log.enabled true
+td session list
+td session path <session_id>
 td export -o teradock-export.json
 td import --conflict rename teradock-export.json
 ```
@@ -105,6 +108,19 @@ Interactive SSH sessions require a TTY. If `td ui` is started with redirected st
 
 SSH sessions opened from the TUI are recorded in `op_logs` as `ssh_session` operations after the session exits or when process launch fails. Secrets, passwords, SSH auth arguments, and full command strings are not written to the session log metadata. Use `td recent` or `td recent --json` to review recently used interactive SSH profiles.
 
+Interactive SSH terminal transcript logging is available for v1.1 preparation and is disabled by default:
+
+```bash
+td config set session.log.enabled true
+td config set session.log.backend auto
+td config get session.log.dir --resolved
+td session list
+td session show <session_id>
+td session path <session_id>
+```
+
+When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured. Windows falls back to normal SSH without saving terminal logs in this initial implementation. Terminal output shown during the session may include passwords, tokens, or secrets and can be captured in the log file.
+
 ## Safety Model
 
 Profiles have a danger level: `normal`, `high`, or `critical`. Critical profiles require explicit confirmation before connect, exec, run, transfer, and config apply operations. In the TUI, SSH sessions and single-profile CommandSet execution on critical profiles require typing the shown profile id, and bulk runs require typing the comma-separated critical ids.
@@ -112,6 +128,8 @@ Profiles have a danger level: `normal`, `high`, or `critical`. Critical profiles
 Secrets are stored encrypted behind a master password. TeraDock does not print secret values in normal listing commands. Be careful with `td secret reveal` and with `td export --include-secrets`; exports without that flag include only secret metadata.
 
 FTP transfer is treated as insecure and requires explicit opt-in. Prefer SSH-based `scp` or `sftp`.
+
+Interactive session logging is a separate terminal transcript feature, not `op_logs`. It is disabled by default because the transcript can capture any sensitive text displayed in the terminal. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens, but displayed terminal output is not masked.
 
 ## Import And Export
 
@@ -129,6 +147,8 @@ The export format includes profiles, CommandSets, parser definitions, config set
 
 TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
 
+Interactive session logging uses `script` on Linux/macOS. Windows session logging is currently unsupported and falls back to a normal interactive SSH session.
+
 ## Project Operations
 
 - Report bugs with the GitHub bug report template. Remove secrets, passwords, tokens, private keys, and mask SSH host/user values before posting logs.
@@ -140,6 +160,7 @@ TeraDock is tested on Windows and Linux in CI. SSH actions require an external `
 
 - TUI recent-profile browsing is not implemented; use `td recent` or `td recent --json`.
 - Terminal emulator launch and tmux integration are not implemented.
+- Windows interactive session logging is not implemented in the v1.1 candidate path.
 - CommandSet execution still receives SSH path and auth args separately inside `tdcore::cmdset_runner`.
 - Transfer and tunnel command shapes are not fully represented by `SshInvocation` yet.
 - Automated tests do not include real SSH server integration tests.
@@ -167,3 +188,4 @@ TeraDock is tested on Windows and Linux in CI. SSH actions require an external `
 - [Changelog](CHANGELOG.md)
 - [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)
 - [Internal SSH Invocation Boundary](docs/internal/ssh-invocation-boundary.md)
+- [Internal Session Logging Design](docs/internal/session-logging-design.md)

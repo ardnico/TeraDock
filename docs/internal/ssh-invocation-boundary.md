@@ -17,6 +17,8 @@ Shared SSH construction logic lives in `tdcore::ssh`:
 
 The shared builder returns an invocation object. It does not spawn external processes.
 
+Interactive terminal transcript logging lives in `tdcore::session_log`. It decides whether a session should use the default-disabled no-log path, the Linux/macOS `script` backend, or an unsupported fallback. It may build a wrapper command and metadata paths, but it does not own TUI raw mode or process spawning.
+
 ## CLI Responsibilities
 
 CLI code keeps command-line behavior and user interaction:
@@ -25,6 +27,7 @@ CLI code keeps command-line behavior and user interaction:
 - Prompt for critical-profile confirmation.
 - Print SSH auth hints and password-fallback warnings.
 - Spawn `ssh` for `connect` and `exec`.
+- Wrap interactive SSH `connect` with session logging when enabled and supported.
 - Pass the core-built SSH client and auth args into CommandSet execution.
 - Record operation logs for CLI operations.
 
@@ -36,6 +39,7 @@ TUI code keeps UI and terminal behavior:
 - Convert a selected profile into an SSH session request.
 - Spawn the interactive SSH process with inherited stdio.
 - Suspend and resume the TUI terminal around interactive SSH sessions.
+- Wrap interactive SSH sessions with session logging when enabled and supported.
 - Record `ssh_session` results and launch failures using the core-built safe metadata.
 
 Terminal suspend/resume stays in `crates/tui/src/app.rs` because it is coupled to raw mode, alternate screen state, mouse capture, redraw behavior, and the concrete TUI terminal backend. Core must stay usable from CLI and future non-terminal callers.

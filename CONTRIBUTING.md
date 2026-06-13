@@ -76,6 +76,8 @@ user=<masked-user>
 
 Do not add logs that expose full SSH auth arguments, private key paths, decrypted secret values, or full commands containing sensitive arguments.
 
+Interactive session logs are terminal transcripts and may contain anything displayed during SSH, including prompt responses and command output. Review and redact saved session logs before using them in bug reports, pull requests, screenshots, fixtures, or release evidence.
+
 ## Feature Scope
 
 The 1.0.x line is for stabilization. Appropriate changes include:

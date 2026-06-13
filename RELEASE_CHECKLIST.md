@@ -97,6 +97,7 @@ td init --with-samples
 td profile list
 td config keys
 td recent --json
+td session list --json
 ```
 
 ## 5. TUI smoke tests
@@ -106,6 +107,12 @@ td recent --json
 - Type, group, danger, tag, and query filters work.
 - Details view opens.
 - `s` opens an SSH session for an SSH profile.
+- With `session.log.enabled=false`, `s` opens SSH without saving a terminal
+  transcript.
+- With `session.log.enabled=true` on Linux/macOS, `s` uses `script` when
+  available and `td session list` shows the saved metadata after return.
+- On Windows, enabled session logging reports unsupported and falls back to a
+  normal SSH session.
 - A non-SSH profile does not open an SSH session.
 - A critical profile requires typed confirmation.
 - SSH session exit returns to the TUI and redraws the screen.
@@ -116,7 +123,13 @@ td recent --json
 - No password, token, or secret value appears in logs.
 - No SSH auth args, private key paths, or full SSH command string appears in
   `ssh_session` metadata.
+- Interactive session log metadata excludes SSH auth args, private key paths,
+  full SSH command strings, passwords, secrets, and tokens.
+- Interactive terminal transcripts are treated as sensitive because terminal
+  output displayed during SSH can be captured.
 - `td recent --json` does not expose excessive credential or invocation data.
+- `td session show <session_id>` does not dump the full terminal log unless
+  `--tail N` is explicitly provided.
 - FTP requires `allow_insecure_transfers=true` and `--i-know-its-insecure`.
 - Critical confirmation works for connect, exec, run, transfer, config apply,
   and TUI SSH sessions.
@@ -130,6 +143,8 @@ td recent --json
 - `docs/release-artifact-validation.md` matches the workflow behavior.
 - `docs/tui.md` reflects current keybindings.
 - `docs/security.md` reflects current logging and security policy.
+- `docs/internal/session-logging-design.md` reflects current session logging
+  backend and security decisions.
 - `docs/internal/ssh-invocation-boundary.md` reflects the current SSH boundary.
 - `docs/internal/commandset-execution-boundary.md` reflects the current
   CommandSet boundary.

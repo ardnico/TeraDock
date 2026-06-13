@@ -14,13 +14,15 @@
 
 ## 1.1 candidates
 
-1. TUI recent pane.
-2. Terminal emulator launch configuration.
-3. tmux integration design.
-4. Transfer/tunnel SSH invocation cleanup.
-5. CommandSet runner boundary cleanup.
-6. Better smoke test script.
-7. Screenshots/GIF documentation.
+1. Interactive SSH session log saving with default-disabled `script` backend.
+2. Stability improvements after the session logging slice.
+3. TUI recent pane.
+4. Terminal emulator launch configuration.
+5. tmux integration design.
+6. Transfer/tunnel SSH invocation cleanup.
+7. CommandSet runner boundary cleanup.
+8. Better smoke test script.
+9. Screenshots/GIF documentation.
 
 ## Not planned for 1.1
 
