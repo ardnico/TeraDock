@@ -76,9 +76,9 @@ Defaults:
 
 When logging is enabled, pressing `s` still uses the same TUI suspend/resume lifecycle. TeraDock leaves raw mode and the alternate screen before starting the logged SSH session, then returns to the TUI after the session exits.
 
-Linux/macOS use the `script` backend when available. Windows uses `powershell-transcript` when PowerShell and `ssh` are available. If `auto` cannot resolve the platform backend, TeraDock continues with a normal SSH session and records that no session log was saved. If an explicit backend such as `powershell-transcript` is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
+Linux/macOS use the `script` backend when available. Windows `auto` resolves to `no-log` with `windows_terminal_content_logging_requires_conpty` because reliable Windows SSH terminal-content logging requires a future ConPTY backend. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
 
-Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, `script` command availability, PowerShell availability, `ssh` availability, log directory existence and writability, platform support, fallback reason, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
+Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, dependency availability, log directory existence and writability, platform support, fallback reason, content-capture reliability, warning, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
 
 Saved sessions can be inspected from the CLI:
 
@@ -93,9 +93,9 @@ td session path <session_id>
 
 `td session show` displays metadata by default. It does not print the full terminal log unless `--tail N` is provided.
 
-Session metadata includes the session id, profile id, user, host, port, start/end times, duration, exit code, backend, status, log path, and metadata path. It does not include SSH auth arguments, full command strings, private key paths, passwords, secrets, or tokens.
+Session metadata includes the session id, profile id, user, host, port, start/end times, duration, exit code, backend, status, log path, metadata path, and capture reliability/status warnings. It does not include SSH auth arguments, full command strings, private key paths, passwords, secrets, or tokens.
 
-The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript. On Windows, the transcript format is PowerShell-dependent, terminal control sequences are not guaranteed to replay exactly, and not every interactive prompt is guaranteed to behave identically to a ConPTY recorder.
+The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript. On Windows, PowerShell Transcript is explicit best-effort only; it may capture only host transcript metadata and omit remote commands/output.
 
 When a TUI SSH session writes to `op_logs`, the row includes only `session_log_saved`, `session_log_id` when a log was saved, or `session_log_reason` when no log was saved. The log path is kept in the session metadata rather than copied into `op_logs`.
 
@@ -115,6 +115,6 @@ Single runs populate stdout, stderr, and parsed tabs. Bulk runs also populate th
 
 - Recent SSH sessions are available through `td recent`, not a TUI pane.
 - Interactive SSH opens in the current terminal only; terminal emulator launch is not implemented.
-- Windows interactive session logging uses PowerShell Transcript; ConPTY logging is not implemented yet.
+- Windows full SSH terminal-content logging is not implemented yet; ConPTY support is required.
 - tmux integration is not implemented.
 - The automated test suite does not connect to a real SSH server.

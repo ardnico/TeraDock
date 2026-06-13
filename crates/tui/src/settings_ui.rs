@@ -685,7 +685,13 @@ fn render_diagnostics(frame: &mut Frame<'_>, state: &SettingsUiState, area: Rect
         diag_line("Status", &diagnostics.status),
     ];
     if let Some(reason) = &diagnostics.fallback_reason {
-        lines.push(diag_line("Fallback reason", reason));
+        lines.push(diag_line("Reason", &display_fallback_reason(reason)));
+    }
+    if let Some(reliability) = &diagnostics.content_capture_reliability {
+        lines.push(diag_line("Capture reliability", reliability));
+    }
+    if let Some(warning) = &diagnostics.warning {
+        lines.push(diag_line("Warning", warning));
     }
     if !diagnostics.hints.is_empty() {
         lines.push(Line::from(""));
@@ -708,6 +714,14 @@ fn command_found(path: Option<&PathBuf>, note: Option<&str>) -> String {
         "found".to_string()
     } else {
         note.unwrap_or("unknown").to_string()
+    }
+}
+
+fn display_fallback_reason(reason: &str) -> String {
+    if reason == session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY {
+        "conpty backend required for full SSH logging".to_string()
+    } else {
+        reason.to_string()
     }
 }
 
@@ -886,5 +900,13 @@ mod tests {
         let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Release);
 
         assert!(!should_handle_key_event(&key));
+    }
+
+    #[test]
+    fn conpty_fallback_reason_is_human_readable() {
+        assert_eq!(
+            display_fallback_reason(session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY),
+            "conpty backend required for full SSH logging"
+        );
     }
 }

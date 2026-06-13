@@ -54,11 +54,11 @@ td config set session.log.backend auto
 td config get session.log.dir --resolved
 ```
 
-The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, or a no-log fallback, whether PowerShell and `ssh` are available on Windows, whether the log directory looks writable, and whether the current platform is supported.
+The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, or a no-log fallback, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort, whether dependencies are available, and whether the log directory looks writable.
 
 The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
 
-Session log metadata is intentionally small. It may include the session id, profile id, user, host, port, timestamps, duration, exit code, backend, status, log path, and metadata path. It must not include:
+Session log metadata is intentionally small. It may include the session id, profile id, user, host, port, timestamps, duration, exit code, backend, status, log path, metadata path, and capture reliability/status warnings. It must not include:
 
 - Passwords, secrets, or tokens.
 - SSH auth arguments.
@@ -67,7 +67,7 @@ Session log metadata is intentionally small. It may include the session id, prof
 
 The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
 
-Linux/macOS use the `script` backend when available. Windows uses the `powershell-transcript` backend when PowerShell and `ssh` are available. PowerShell Transcript output is PowerShell-dependent, terminal control sequences may not be fully reproducible, and TeraDock does not guarantee that every interactive prompt behaves exactly like a ConPTY-based recorder.
+Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging is not available in the current stable backend. On Windows, `session.log.backend=auto` resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output. A ConPTY backend is required for reliable Windows SSH terminal-content logging.
 
 Use these commands to inspect saved sessions:
 

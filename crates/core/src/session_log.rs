@@ -36,6 +36,16 @@ pub const SESSION_LOG_REASON_SETUP_FAILED: &str = "setup_failed";
 pub const SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED: &str = "script_launch_failed";
 pub const SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED: &str = "powershell_launch_failed";
 pub const SESSION_LOG_REASON_METADATA_WRITE_FAILED: &str = "metadata_write_failed";
+pub const SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY: &str =
+    "windows_terminal_content_logging_requires_conpty";
+pub const SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT: &str = "best_effort";
+pub const SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT: &str =
+    "powershell_transcript_may_not_capture_interactive_ssh_io";
+pub const SESSION_LOG_CAPTURE_STATUS_HOST_ONLY_OR_EMPTY: &str = "host_only_or_empty";
+pub const SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT: &str =
+    "No SSH terminal content appears to have been captured.";
+pub const SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT: &str =
+    "may not capture interactive SSH input/output";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLogBackendSetting {
@@ -93,6 +103,8 @@ pub struct SessionLogDiagnostics {
     pub platform: String,
     pub platform_supported: bool,
     pub fallback_reason: Option<String>,
+    pub content_capture_reliability: Option<String>,
+    pub warning: Option<String>,
     pub status: String,
     pub hints: Vec<String>,
 }
@@ -162,7 +174,7 @@ impl SessionLogPlan {
                 files.log_path.display()
             )),
             Self::PowerShellTranscript { files, .. } => Some(format!(
-                "TeraDock session logging is enabled; terminal output may include secrets and will be saved to {}.",
+                "TeraDock PowerShell Transcript logging is experimental and best-effort; it may miss interactive SSH input/output. Log path: {}.",
                 files.log_path.display()
             )),
         }
@@ -186,6 +198,16 @@ pub struct SessionLogMetadata {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_capture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_capture_reliable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_capture_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_capture_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -357,10 +379,7 @@ fn diagnose_config_with_environment(
     clients: SessionLogClientCommands,
 ) -> Result<SessionLogDiagnostics> {
     let (log_directory_exists, log_directory_writable, log_directory_reason) =
-        log_directory_readiness(
-            &config.dir,
-            config.enabled && config.backend != SessionLogBackendSetting::NoLog,
-        );
+        log_directory_readiness(&config.dir, should_check_log_directory(config, platform));
     let last_session_log = list_session_logs_in_dir(&config.dir)?
         .first()
         .map(|metadata| metadata.session_id.clone());
@@ -396,6 +415,17 @@ fn diagnose_config_with_environment(
         script_command_note = Some("not checked because backend is no-log".to_string());
         powershell_command_note = Some("not checked because backend is no-log".to_string());
         ssh_command_note = Some("not checked because backend is no-log".to_string());
+    } else if config.backend == SessionLogBackendSetting::Auto
+        && platform == SessionLogPlatform::Windows
+    {
+        script_command = None;
+        powershell_command = None;
+        ssh_command = None;
+        script_command_note =
+            Some("not checked because script is unsupported on this platform".to_string());
+        powershell_command_note =
+            Some("not checked because Windows auto does not use PowerShell Transcript".to_string());
+        ssh_command_note = Some("not checked because Windows auto resolves to no-log".to_string());
     } else if !matches!(
         config.backend,
         SessionLogBackendSetting::Auto | SessionLogBackendSetting::Script
@@ -413,10 +443,14 @@ fn diagnose_config_with_environment(
         &resolution.resolved_backend,
         resolution.fallback_reason.as_deref(),
     );
+    let (content_capture_reliability, warning) =
+        diagnostics_capture_fields(&resolution.resolved_backend);
     let hints = diagnostics_hints(
         config.enabled,
         config.backend,
+        platform,
         resolution.platform_supported,
+        &resolution.resolved_backend,
         resolution.fallback_reason.as_deref(),
         last_session_log.is_some(),
     );
@@ -438,6 +472,8 @@ fn diagnose_config_with_environment(
         platform: platform_name,
         platform_supported: resolution.platform_supported,
         fallback_reason: resolution.fallback_reason,
+        content_capture_reliability,
+        warning,
         status,
         hints,
     })
@@ -497,10 +533,12 @@ fn plan_from_config_with_environment(
 
     match config.backend {
         SessionLogBackendSetting::Auto => {
-            if platform.supports_powershell_transcript() {
-                plan_powershell_backend(config, clients.powershell, clients.ssh, true)
-            } else if platform.supports_script() {
+            if platform.supports_script() {
                 plan_script_backend(config, clients.script, true)
+            } else if platform == SessionLogPlatform::Windows {
+                SessionLogPlan::NoLog {
+                    reason: SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY.to_string(),
+                }
             } else {
                 SessionLogPlan::NoLog {
                     reason: SESSION_LOG_REASON_UNSUPPORTED_ON_PLATFORM.to_string(),
@@ -707,7 +745,7 @@ fn complete_logged_session(
         )));
     }
     set_user_only_file_permissions(&files.log_path)?;
-    let metadata = SessionLogMetadata {
+    let mut metadata = SessionLogMetadata {
         session_id: files.session_id.clone(),
         profile_id: target.profile_id.clone(),
         user: target.user.clone(),
@@ -722,7 +760,15 @@ fn complete_logged_session(
         metadata_path: files.metadata_path.clone(),
         status: status_for_exit(exit_code),
         reason: None,
+        content_capture: None,
+        content_capture_reliable: None,
+        backend_warning: None,
+        content_capture_status: None,
+        content_capture_warning: None,
     };
+    if backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT {
+        annotate_powershell_transcript_metadata(&mut metadata, &files.log_path);
+    }
     write_metadata(&metadata)?;
     Ok(metadata)
 }
@@ -841,10 +887,10 @@ fn resolve_backend(
 
     match config.backend {
         SessionLogBackendSetting::Auto => {
-            if platform.supports_powershell_transcript() {
-                resolve_powershell_backend(powershell_command, ssh_command, log_directory_reason)
-            } else if platform.supports_script() {
+            if platform.supports_script() {
                 resolve_script_backend(script_command, log_directory_reason)
+            } else if platform == SessionLogPlatform::Windows {
+                fallback(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY)
             } else {
                 fallback(SESSION_LOG_REASON_UNSUPPORTED_ON_PLATFORM)
             }
@@ -931,6 +977,18 @@ fn command_note(path: Option<&PathBuf>) -> Option<String> {
     }
 }
 
+fn should_check_log_directory(config: &SessionLogConfig, platform: SessionLogPlatform) -> bool {
+    if !config.enabled || config.backend == SessionLogBackendSetting::NoLog {
+        return false;
+    }
+    match config.backend {
+        SessionLogBackendSetting::Auto => platform.supports_script(),
+        SessionLogBackendSetting::Script => platform.supports_script(),
+        SessionLogBackendSetting::PowerShellTranscript => platform.supports_powershell_transcript(),
+        SessionLogBackendSetting::NoLog => false,
+    }
+}
+
 fn log_directory_readiness(dir: &Path, enabled: bool) -> (bool, Option<bool>, Option<String>) {
     if !enabled {
         return (dir.is_dir(), None, None);
@@ -979,19 +1037,33 @@ fn diagnostics_status(
     if fallback_reason.is_some() {
         return "not_ready".to_string();
     }
-    if resolved_backend == SESSION_LOG_BACKEND_SCRIPT
-        || resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
-    {
+    if resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT {
+        return "degraded".to_string();
+    }
+    if resolved_backend == SESSION_LOG_BACKEND_SCRIPT {
         "ready".to_string()
     } else {
         "not_ready".to_string()
     }
 }
 
+fn diagnostics_capture_fields(resolved_backend: &str) -> (Option<String>, Option<String>) {
+    if resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT {
+        (
+            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
+            Some(SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT.to_string()),
+        )
+    } else {
+        (None, None)
+    }
+}
+
 fn diagnostics_hints(
     enabled: bool,
     backend: SessionLogBackendSetting,
+    platform: SessionLogPlatform,
     platform_supported: bool,
+    resolved_backend: &str,
     fallback_reason: Option<&str>,
     has_last_session_log: bool,
 ) -> Vec<String> {
@@ -1022,13 +1094,43 @@ fn diagnostics_hints(
             hints.push("Update session.log.dir or fix directory permissions.".to_string());
         }
         Some(SESSION_LOG_REASON_UNSUPPORTED_ON_WINDOWS) => {
-            hints
-                .push("Use powershell-transcript or auto for Windows session logging.".to_string());
+            hints.push(
+                "Windows full SSH terminal logging requires a future ConPTY backend.".to_string(),
+            );
         }
         Some(SESSION_LOG_REASON_UNSUPPORTED_ON_PLATFORM) => {
             hints.push("Use script on Linux/macOS or no-log on unsupported platforms.".to_string());
         }
+        Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY) => {
+            hints.push(
+                "Windows full SSH terminal logging is not available in the current stable backend."
+                    .to_string(),
+            );
+            hints.push(
+                "A ConPTY backend is required for full SSH terminal logging on Windows."
+                    .to_string(),
+            );
+            hints.push(
+                "PowerShell Transcript is available only as an explicit best-effort backend."
+                    .to_string(),
+            );
+            hints.push(
+                "Set session.log.backend powershell-transcript only if you accept that SSH I/O may not be captured."
+                    .to_string(),
+            );
+        }
         _ => {}
+    }
+    if platform == SessionLogPlatform::Windows
+        && resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+    {
+        hints.push(
+            "PowerShell Transcript may capture only the PowerShell host transcript.".to_string(),
+        );
+        hints.push("It may not capture interactive SSH terminal input/output.".to_string());
+        hints.push(
+            "For full SSH terminal logging on Windows, a ConPTY backend is required.".to_string(),
+        );
     }
     if !has_last_session_log {
         hints.push("Saved logs appear after an interactive SSH session exits.".to_string());
@@ -1067,6 +1169,71 @@ fn status_for_exit(exit_code: Option<i32>) -> String {
         Some(_) => "completed_nonzero".to_string(),
         None => "completed_without_exit_code".to_string(),
     }
+}
+
+fn annotate_powershell_transcript_metadata(metadata: &mut SessionLogMetadata, log_path: &Path) {
+    metadata.content_capture = Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string());
+    metadata.content_capture_reliable = Some(false);
+    metadata.backend_warning = Some(SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT.to_string());
+
+    let Ok(raw) = fs::read_to_string(log_path) else {
+        return;
+    };
+    if powershell_transcript_is_host_only_or_empty(&raw) {
+        metadata.content_capture_status =
+            Some(SESSION_LOG_CAPTURE_STATUS_HOST_ONLY_OR_EMPTY.to_string());
+        metadata.content_capture_warning =
+            Some(SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT.to_string());
+    }
+}
+
+fn powershell_transcript_is_host_only_or_empty(raw: &str) -> bool {
+    let lines = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return true;
+    }
+    let has_transcript_marker = lines.iter().any(|line| {
+        line.eq_ignore_ascii_case("PowerShell transcript start")
+            || line.eq_ignore_ascii_case("PowerShell transcript end")
+    });
+    if !has_transcript_marker {
+        return false;
+    }
+    lines
+        .iter()
+        .all(|line| is_known_powershell_transcript_metadata_line(line))
+}
+
+fn is_known_powershell_transcript_metadata_line(line: &str) -> bool {
+    if line.chars().all(|ch| ch == '*') || line.chars().all(|ch| ch == '-') {
+        return true;
+    }
+    let lower = line.to_ascii_lowercase();
+    lower == "powershell transcript start"
+        || lower == "powershell transcript end"
+        || lower.starts_with("start time:")
+        || lower.starts_with("end time:")
+        || lower.starts_with("username:")
+        || lower.starts_with("runas user:")
+        || lower.starts_with("configuration name:")
+        || lower.starts_with("machine:")
+        || lower.starts_with("host application:")
+        || lower.starts_with("process id:")
+        || lower.starts_with("psversion:")
+        || lower.starts_with("psedition:")
+        || lower.starts_with("gitcommitid:")
+        || lower.starts_with("os:")
+        || lower.starts_with("platform:")
+        || lower.starts_with("pscompatibleversions:")
+        || lower.starts_with("psremotingprotocolversion:")
+        || lower.starts_with("serializationversion:")
+        || lower.starts_with("wsmanstackversion:")
+        || lower.starts_with("transcript started, output file is")
+        || lower.starts_with("transcript stopped, output file is")
 }
 
 fn powershell_transcript_command(
@@ -1250,7 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_auto_resolves_to_powershell_transcript_when_ready() {
+    fn windows_auto_resolves_to_no_log_until_conpty_backend_exists() {
         let dir = temp_dir("windows-auto-ready");
         let config = SessionLogConfig {
             enabled: true,
@@ -1271,13 +1438,15 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
+        assert_eq!(diagnostics.status, "not_ready");
+        assert!(!diagnostics.platform_supported);
         assert_eq!(
-            diagnostics.resolved_backend,
-            SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+            diagnostics.fallback_reason.as_deref(),
+            Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY)
         );
-        assert_eq!(diagnostics.status, "ready");
-        assert!(diagnostics.platform_supported);
-        assert_eq!(diagnostics.fallback_reason, None);
+        assert_eq!(diagnostics.content_capture_reliability, None);
+        assert!(diagnostics.hints.iter().any(|hint| hint.contains("ConPTY")));
 
         let plan = plan_from_config_with_environment(
             &config,
@@ -1288,22 +1457,18 @@ mod tests {
                 script: None,
             },
         );
-        match plan {
-            SessionLogPlan::PowerShellTranscript {
-                launch_failure_policy,
-                ..
-            } => assert_eq!(
-                launch_failure_policy,
-                SessionLogLaunchFailurePolicy::FallbackToPlain
-            ),
-            other => panic!("expected PowerShell transcript plan, got {other:?}"),
-        }
+        assert_eq!(
+            plan,
+            SessionLogPlan::NoLog {
+                reason: SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY.to_string()
+            }
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn windows_auto_reports_powershell_missing() {
+    fn windows_auto_does_not_require_powershell() {
         let dir = temp_dir("windows-auto-no-powershell");
         let config = SessionLogConfig {
             enabled: true,
@@ -1325,7 +1490,7 @@ mod tests {
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
         assert_eq!(
             diagnostics.fallback_reason.as_deref(),
-            Some(SESSION_LOG_REASON_POWERSHELL_NOT_FOUND)
+            Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY)
         );
         assert_eq!(diagnostics.status, "not_ready");
 
@@ -1333,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_auto_reports_ssh_missing() {
+    fn windows_auto_does_not_require_ssh() {
         let dir = temp_dir("windows-auto-no-ssh");
         let config = SessionLogConfig {
             enabled: true,
@@ -1355,9 +1520,71 @@ mod tests {
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
         assert_eq!(
             diagnostics.fallback_reason.as_deref(),
-            Some(SESSION_LOG_REASON_SSH_NOT_FOUND)
+            Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY)
         );
         assert_eq!(diagnostics.status, "not_ready");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explicit_powershell_transcript_reports_degraded_best_effort() {
+        let dir = temp_dir("explicit-powershell-degraded");
+        let config = SessionLogConfig {
+            enabled: true,
+            dir: dir.clone(),
+            backend: SessionLogBackendSetting::PowerShellTranscript,
+        };
+
+        let diagnostics = diagnose_config_with_environment(
+            &config,
+            SessionLogPlatform::Windows,
+            SessionLogClientCommands {
+                powershell: Some(PathBuf::from("powershell.exe")),
+                ssh: Some(PathBuf::from("ssh.exe")),
+                script: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            diagnostics.resolved_backend,
+            SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+        );
+        assert_eq!(diagnostics.status, "degraded");
+        assert_eq!(diagnostics.fallback_reason, None);
+        assert_eq!(
+            diagnostics.content_capture_reliability.as_deref(),
+            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+        );
+        assert_eq!(
+            diagnostics.warning.as_deref(),
+            Some(SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT)
+        );
+        assert!(diagnostics
+            .hints
+            .iter()
+            .any(|hint| hint.contains("PowerShell Transcript")));
+
+        let plan = plan_from_config_with_environment(
+            &config,
+            SessionLogPlatform::Windows,
+            SessionLogClientCommands {
+                powershell: Some(PathBuf::from("powershell.exe")),
+                ssh: Some(PathBuf::from("ssh.exe")),
+                script: None,
+            },
+        );
+        match plan {
+            SessionLogPlan::PowerShellTranscript {
+                launch_failure_policy,
+                ..
+            } => assert_eq!(
+                launch_failure_policy,
+                SessionLogLaunchFailurePolicy::FailSession
+            ),
+            other => panic!("expected PowerShell transcript plan, got {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1539,9 +1766,61 @@ mod tests {
 
         assert_eq!(metadata.backend, SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT);
         assert_eq!(loaded.backend, SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT);
+        assert_eq!(
+            metadata.content_capture.as_deref(),
+            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+        );
+        assert_eq!(metadata.content_capture_reliable, Some(false));
+        assert_eq!(
+            metadata.backend_warning.as_deref(),
+            Some(SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT)
+        );
         assert!(!raw.contains("auth_args"));
         assert!(!raw.contains("command"));
         assert!(!raw.contains("private_key_path"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detects_host_only_powershell_transcript_metadata() {
+        let dir = temp_dir("powershell-host-only");
+        let files = allocate_session_files(&dir).unwrap();
+        fs::write(
+            &files.log_path,
+            "\
+**********************
+PowerShell transcript start
+Start time: 20260613000000
+Username: alice
+Host Application: powershell.exe -NoLogo -NoProfile -Command Start-Transcript ssh.EXE
+Process ID: 100
+PSVersion: 5.1.0
+**********************
+PowerShell transcript end
+End time: 20260613000100
+**********************
+",
+        )
+        .unwrap();
+        let target = sample_target();
+
+        let metadata =
+            complete_powershell_transcript_session(&files, &target, 1000, 42, Some(0)).unwrap();
+        let loaded = get_session_log_in_dir(&dir, &files.session_id).unwrap();
+
+        assert_eq!(
+            metadata.content_capture_status.as_deref(),
+            Some(SESSION_LOG_CAPTURE_STATUS_HOST_ONLY_OR_EMPTY)
+        );
+        assert_eq!(
+            metadata.content_capture_warning.as_deref(),
+            Some(SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT)
+        );
+        assert_eq!(
+            loaded.content_capture_status.as_deref(),
+            Some(SESSION_LOG_CAPTURE_STATUS_HOST_ONLY_OR_EMPTY)
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

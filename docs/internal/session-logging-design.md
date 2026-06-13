@@ -65,7 +65,8 @@ Cons:
 ### PowerShell Transcript backend
 
 Use PowerShell `Start-Transcript` / `Stop-Transcript` to run the existing `ssh`
-invocation and save the terminal transcript on Windows.
+invocation and save a host transcript on Windows. This backend is experimental
+best-effort only.
 
 Pros:
 - Small Windows implementation.
@@ -74,8 +75,13 @@ Pros:
 
 Cons:
 - Transcript format is PowerShell-dependent.
+- It may capture only the PowerShell host transcript and omit interactive
+  `ssh.exe` terminal input/output.
+- Logs can contain only the transcript start/end header when the SSH session
+  itself was not captured.
 - Terminal control sequences are not guaranteed to replay exactly.
-- Not every interactive prompt is guaranteed to behave like a ConPTY recorder.
+- Not every interactive prompt is guaranteed to be captured like a ConPTY
+  recorder.
 - Captures displayed sensitive output without masking.
 
 ### no-log backend
@@ -93,11 +99,18 @@ Cons:
 
 - Default: disabled.
 - Linux/macOS: use the `script` backend when `session.log.backend=auto` or `script`.
-- Windows: use the `powershell-transcript` backend when `session.log.backend=auto` or `powershell-transcript`.
-- Windows `auto` requires PowerShell, `ssh`, and a writable log directory. Missing PowerShell resolves to `no-log` with `powershell_not_found`; missing `ssh` resolves to `no-log` with `ssh_not_found`; an unwritable log directory resolves to `no-log` with `log_dir_not_writable`.
-- Explicit `powershell-transcript` is unsupported outside Windows. On Windows, explicit `powershell-transcript` reports not-ready errors instead of silently opening an unlogged SSH session.
+- Windows: `session.log.backend=auto` resolves to `no-log` with
+  `windows_terminal_content_logging_requires_conpty`.
+- Windows full SSH terminal-content logging requires a future ConPTY backend.
+- Explicit `powershell-transcript` is unsupported outside Windows. On Windows,
+  explicit `powershell-transcript` reports `degraded`, uses
+  `content_capture=best_effort`, and warns that SSH input/output may not be
+  captured.
+- Missing PowerShell or `ssh` for explicit `powershell-transcript` reports
+  not-ready errors instead of silently opening an unlogged SSH session.
 - If `script` is unavailable or setup fails under `auto`, continue the SSH session without logging when possible and record a no-log reason.
-- Do not introduce ConPTY, portable-pty, tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
+- Do not introduce ConPTY implementation, portable-pty, tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
+- Windows ConPTY design is tracked separately in [Windows ConPTY Session Logging Design](windows-conpty-session-logging-design.md).
 
 ## Data model
 
@@ -117,8 +130,33 @@ Session log metadata is a JSON sidecar file next to the terminal log:
 - `metadata_path`
 - `status`
 - `reason`
+- `content_capture`
+- `content_capture_reliable`
+- `backend_warning`
+- `content_capture_status`
+- `content_capture_warning`
 
 The metadata intentionally excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens.
+
+For explicit `powershell-transcript`, metadata includes:
+
+```json
+{
+  "content_capture": "best_effort",
+  "content_capture_reliable": false,
+  "backend_warning": "powershell_transcript_may_not_capture_interactive_ssh_io"
+}
+```
+
+If the saved transcript appears to contain only PowerShell host metadata or is
+otherwise empty of SSH terminal content, metadata also includes:
+
+```json
+{
+  "content_capture_status": "host_only_or_empty",
+  "content_capture_warning": "No SSH terminal content appears to have been captured."
+}
+```
 
 ## CLI/TUI UX
 
@@ -134,7 +172,7 @@ The metadata intentionally excludes SSH auth args, full command strings, private
 - TUI settings: pressing `c` opens the settings screen. Saving there writes global settings and affects subsequent SSH sessions.
 - CLI: `td connect <profile_id>` can use the same logging path for SSH profiles.
 - CLI settings: `td config ui` opens the same BIOS-style settings screen outside `td ui`.
-- Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, `script` availability, PowerShell availability, `ssh` availability, log directory state, newest saved session log, platform support, fallback reason, status, and hints.
+- Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, dependency availability, log directory state, newest saved session log, platform support, fallback reason, content-capture reliability, warning, status, and hints.
 - Reference commands:
   - `td session doctor`
   - `td config ui`
@@ -143,9 +181,9 @@ The metadata intentionally excludes SSH auth args, full command strings, private
   - `td session path <session_id>`
   - `td session show <session_id>`
 
-`td session show` should default to metadata-oriented output and only show log excerpts when the caller explicitly asks for a tail length.
+`td session show` should default to metadata-oriented output and only show log excerpts when the caller explicitly asks for a tail length. It must show capture status/warnings such as `host_only_or_empty` when metadata contains them.
 
-The settings screen includes a diagnostics panel with the same core report. It shows enabled state, backend setting, resolved backend, platform, platform support, PowerShell/ssh readiness, log directory writability, fallback reason, and status. It is intentionally focused on global Session Logging settings first; profile/env settings can still override the effective value and are shown as source warnings rather than being edited from this screen.
+The settings screen includes a diagnostics panel with the same core report. It shows enabled state, backend setting, resolved backend, platform, platform support, dependency readiness, log directory writability, fallback reason, content-capture reliability, warning, and status. It is intentionally focused on global Session Logging settings first; profile/env settings can still override the effective value and are shown as source warnings rather than being edited from this screen.
 
 ## op_logs integration
 

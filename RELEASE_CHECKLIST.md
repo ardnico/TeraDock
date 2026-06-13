@@ -113,17 +113,21 @@ td session list --json
 - `s` opens an SSH session for an SSH profile.
 - With `session.log.enabled=false`, `s` opens SSH without saving a terminal
   transcript.
-- `td session doctor` reports disabled/ready/fallback status, backend
+- `td session doctor` reports disabled/ready/degraded/not_ready status, backend
   resolution, `script`, PowerShell, and `ssh` availability, log directory
-  state, newest saved session log, platform support, and fallback reason.
+  state, newest saved session log, platform support, fallback reason, capture
+  reliability, and warning.
 - With `session.log.enabled=true` on Linux/macOS, `s` uses `script` when
   available and `td session list` shows the saved metadata after return.
-- On Windows, enabled `auto` session logging resolves to
-  `powershell-transcript` when PowerShell and `ssh` are available; missing
-  dependencies report `powershell_not_found` or `ssh_not_found`.
-- Windows PowerShell Transcript logs are accepted as best-effort transcripts;
-  exact terminal-control replay and every interactive prompt shape are not
-  guaranteed.
+- On Windows, enabled `auto` session logging resolves to `no-log` with
+  `windows_terminal_content_logging_requires_conpty`.
+- On Windows, explicit `powershell-transcript` reports `degraded`,
+  `content_capture=best_effort`, and warns that interactive SSH input/output
+  may not be captured. Missing PowerShell or `ssh` for that explicit backend
+  reports `powershell_not_found` or `ssh_not_found`.
+- Host-only or empty PowerShell transcripts add `content_capture_status` and
+  `content_capture_warning`, and `td session show <session_id>` displays the
+  warning.
 - A non-SSH profile does not open an SSH session.
 - A critical profile requires typed confirmation.
 - SSH session exit returns to the TUI and redraws the screen.
@@ -138,6 +142,8 @@ td session list --json
   full SSH command strings, passwords, secrets, and tokens.
 - Interactive terminal transcripts are treated as sensitive because terminal
   output displayed during SSH can be captured.
+- Windows PowerShell Transcript is not treated as reliable SSH terminal-content
+  logging; full Windows support requires a ConPTY backend.
 - `td recent --json` does not expose excessive credential or invocation data.
 - `td session show <session_id>` does not dump the full terminal log unless
   `--tail N` is explicitly provided.
@@ -156,6 +162,8 @@ td session list --json
 - `docs/security.md` reflects current logging and security policy.
 - `docs/internal/session-logging-design.md` reflects current session logging
   backend and security decisions.
+- `docs/internal/windows-conpty-session-logging-design.md` reflects the planned
+  Windows full terminal-content backend.
 - `docs/internal/ssh-invocation-boundary.md` reflects the current SSH boundary.
 - `docs/internal/commandset-execution-boundary.md` reflects the current
   CommandSet boundary.

@@ -14,7 +14,7 @@
 
 ## 1.1 candidates
 
-1. Interactive SSH session log saving with default-disabled `script` backend.
+1. Interactive SSH session log saving with default-disabled Linux/macOS `script` backend.
 2. Stability improvements after the session logging slice.
 3. TUI recent pane.
 4. Terminal emulator launch configuration.
@@ -26,8 +26,16 @@
 
 ## Not planned for 1.1
 
+- Reliable Windows full SSH terminal-content logging. PowerShell Transcript remains explicit best-effort/degraded only.
+- ConPTY session logging implementation.
 - Web UI.
 - Cloud sync.
 - Remote server management daemon.
 - Full Ansible replacement.
 - Credential sharing service.
+
+## Future session logging
+
+- 1.1.x: Keep Windows `auto` on `no-log`, keep `powershell-transcript` explicit best-effort, and surface capture warnings in doctor/show/config UI.
+- 1.2: Build a Windows ConPTY SSH logging proof of concept.
+- 1.3: Evaluate a production ConPTY backend for reliable Windows SSH terminal input/output capture.

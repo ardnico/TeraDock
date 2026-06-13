@@ -2043,6 +2043,12 @@ fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
     if let Some(reason) = &diagnostics.fallback_reason {
         println!("fallback reason: {reason}");
     }
+    if let Some(reliability) = &diagnostics.content_capture_reliability {
+        println!("content capture reliability: {reliability}");
+    }
+    if let Some(warning) = &diagnostics.warning {
+        println!("warning: {warning}");
+    }
     if diagnostics.status == "ready" {
         println!();
         println!("Status: ready");
@@ -2135,6 +2141,9 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
             .unwrap_or_else(|| "-".to_string())
     );
     println!("metadata_path: {}", metadata.metadata_path.display());
+    for line in session_capture_lines(&metadata) {
+        println!("{line}");
+    }
 
     if let Some(tail) = args.tail {
         if tail == 0 {
@@ -2146,6 +2155,26 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
         print_log_tail(log_path, tail)?;
     }
     Ok(())
+}
+
+fn session_capture_lines(metadata: &session_log::SessionLogMetadata) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(capture) = &metadata.content_capture {
+        lines.push(format!("content_capture: {capture}"));
+    }
+    if let Some(reliable) = metadata.content_capture_reliable {
+        lines.push(format!("content_capture_reliable: {reliable}"));
+    }
+    if let Some(warning) = &metadata.backend_warning {
+        lines.push(format!("backend_warning: {warning}"));
+    }
+    if let Some(status) = &metadata.content_capture_status {
+        lines.push(format!("Content capture: {status}"));
+    }
+    if let Some(warning) = &metadata.content_capture_warning {
+        lines.push(format!("Warning: {warning}"));
+    }
+    lines
 }
 
 fn print_log_tail(log_path: &Path, tail: usize) -> Result<()> {
@@ -3674,6 +3703,52 @@ mod tests {
             }
             _ => panic!("expected session path command"),
         }
+    }
+
+    #[test]
+    fn session_show_capture_lines_include_host_only_warning() {
+        let metadata = session_log::SessionLogMetadata {
+            session_id: "sl_abc123".to_string(),
+            profile_id: "p_test".to_string(),
+            user: "alice".to_string(),
+            host: "example.com".to_string(),
+            port: 22,
+            started_at: 1000,
+            ended_at: 2000,
+            duration_ms: 1000,
+            exit_code: Some(0),
+            backend: session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT.to_string(),
+            log_path: Some(PathBuf::from("sl_abc123.log")),
+            metadata_path: PathBuf::from("sl_abc123.json"),
+            status: "completed".to_string(),
+            reason: None,
+            content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
+            content_capture_reliable: Some(false),
+            backend_warning: Some(
+                session_log::SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT.to_string(),
+            ),
+            content_capture_status: Some(
+                session_log::SESSION_LOG_CAPTURE_STATUS_HOST_ONLY_OR_EMPTY.to_string(),
+            ),
+            content_capture_warning: Some(
+                session_log::SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT.to_string(),
+            ),
+        };
+
+        let lines = session_capture_lines(&metadata);
+
+        assert!(lines
+            .iter()
+            .any(|line| line == "content_capture: best_effort"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "content_capture_reliable: false"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "Content capture: host_only_or_empty"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "Warning: No SSH terminal content appears to have been captured."));
     }
 
     #[test]
