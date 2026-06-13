@@ -28,7 +28,8 @@ use tdcore::profile::{
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::session_log::{
     self, SessionLogFiles, SessionLogPlan, SessionLogReference,
-    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
+    SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
 };
 use tdcore::settings;
 use tdcore::settings::SettingScope;
@@ -285,12 +286,21 @@ struct InitArgs {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommands {
+    /// Diagnose interactive SSH session logging
+    Doctor(SessionDoctorArgs),
     /// List saved interactive SSH session logs
     List(SessionListArgs),
     /// Show metadata for a saved interactive SSH session log
     Show(SessionShowArgs),
     /// Print the terminal log path for a saved session
     Path { session_id: String },
+}
+
+#[derive(Debug, Args)]
+struct SessionDoctorArgs {
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -413,6 +423,8 @@ enum ConfigCommands {
     Get(ConfigGetArgs),
     /// Set a configuration value
     Set(ConfigSetArgs),
+    /// Open the interactive settings UI
+    Ui,
     /// Set or clear global client overrides (ssh/scp/sftp/ftp/telnet)
     SetClient(ClientOverrideArgs),
     /// Show current global client overrides
@@ -967,6 +979,10 @@ fn handle_config(cmd: ConfigCommands) -> Result<()> {
         ConfigCommands::Keys => handle_config_keys(),
         ConfigCommands::Get(args) => handle_config_get(&conn, args),
         ConfigCommands::Set(args) => handle_config_set(&conn, args),
+        ConfigCommands::Ui => {
+            tdtui::run_settings_ui()?;
+            Ok(())
+        }
         ConfigCommands::SetClient(args) => {
             let mut overrides = if args.clear_all {
                 ClientOverrides::default()
@@ -1202,18 +1218,7 @@ fn handle_config_get(conn: &Connection, args: ConfigGetArgs) -> Result<()> {
 }
 
 fn default_resolved_config_value(conn: &Connection, key: &str) -> Result<Option<String>> {
-    match key {
-        session_log::SESSION_LOG_ENABLED_KEY => Ok(Some("false".to_string())),
-        session_log::SESSION_LOG_BACKEND_KEY => {
-            Ok(Some(session_log::SESSION_LOG_BACKEND_AUTO.to_string()))
-        }
-        session_log::SESSION_LOG_DIR_KEY => Ok(Some(
-            session_log::configured_session_log_dir(conn)?
-                .display()
-                .to_string(),
-        )),
-        _ => Ok(None),
-    }
+    Ok(session_log::default_value_for_key(conn, key)?)
 }
 
 fn handle_config_set(conn: &Connection, args: ConfigSetArgs) -> Result<()> {
@@ -1963,6 +1968,7 @@ fn handle_recent(limit: usize, json: bool) -> Result<()> {
 fn handle_session(cmd: SessionCommands) -> Result<()> {
     let conn = db::init_connection()?;
     match cmd {
+        SessionCommands::Doctor(args) => handle_session_doctor(&conn, args),
         SessionCommands::List(args) => handle_session_list(&conn, args),
         SessionCommands::Show(args) => handle_session_show(&conn, args),
         SessionCommands::Path { session_id } => {
@@ -1972,6 +1978,83 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
             };
             println!("{}", log_path.display());
             Ok(())
+        }
+    }
+}
+
+fn handle_session_doctor(conn: &Connection, args: SessionDoctorArgs) -> Result<()> {
+    let diagnostics = session_log::diagnose(conn, None)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+        return Ok(());
+    }
+    print_session_diagnostics(&diagnostics);
+    Ok(())
+}
+
+fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
+    println!("Session logging diagnostics");
+    println!();
+    println!("enabled: {}", diagnostics.enabled);
+    println!("backend setting: {}", diagnostics.backend_setting);
+    println!("resolved backend: {}", diagnostics.resolved_backend);
+    println!(
+        "script command: {}",
+        diagnostics
+            .script_command
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .or_else(|| diagnostics.script_command_note.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "powershell command: {}",
+        diagnostics
+            .powershell_command
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .or_else(|| diagnostics.powershell_command_note.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "ssh command: {}",
+        diagnostics
+            .ssh_command
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .or_else(|| diagnostics.ssh_command_note.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!("log directory: {}", diagnostics.log_directory.display());
+    println!("log directory exists: {}", diagnostics.log_directory_exists);
+    println!(
+        "log directory writable: {}",
+        diagnostics
+            .log_directory_writable
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "last session log: {}",
+        diagnostics.last_session_log.as_deref().unwrap_or("none")
+    );
+    println!("platform: {}", diagnostics.platform);
+    println!("platform supported: {}", diagnostics.platform_supported);
+    if let Some(reason) = &diagnostics.fallback_reason {
+        println!("fallback reason: {reason}");
+    }
+    if diagnostics.status == "ready" {
+        println!();
+        println!("Status: ready");
+    } else if diagnostics.status != "disabled" {
+        println!();
+        println!("Status: {}", diagnostics.status);
+    }
+    if !diagnostics.hints.is_empty() {
+        println!();
+        println!("Hints:");
+        for hint in &diagnostics.hints {
+            println!("- {hint}");
         }
     }
 }
@@ -2593,12 +2676,33 @@ enum CliSshRunResult {
 }
 
 fn connect_ssh(store: &ProfileStore, invocation: SshInvocation) -> Result<()> {
-    let plan = session_log::plan_for_target(store.conn(), &invocation.target);
+    let plan = session_log::plan_for_target_with_ssh(
+        store.conn(),
+        &invocation.target,
+        &invocation.client_path,
+    );
     emit_session_log_notice(&plan);
     let result = match &plan {
-        SessionLogPlan::Script { script_path, files } => {
-            run_script_logged_cli_ssh(&invocation, script_path, files)
-        }
+        SessionLogPlan::Script {
+            script_path,
+            files,
+            launch_failure_policy,
+        } => run_script_logged_cli_ssh(&invocation, script_path, files, *launch_failure_policy),
+        SessionLogPlan::PowerShellTranscript {
+            powershell_path,
+            files,
+            launch_failure_policy,
+        } => run_powershell_transcript_cli_ssh(
+            &invocation,
+            powershell_path,
+            files,
+            *launch_failure_policy,
+        ),
+        SessionLogPlan::Error { reason } => CliSshRunResult::LaunchFailed {
+            error: anyhow!("session logging backend is not ready: {reason}"),
+            duration_ms: 0,
+            session_log: SessionLogReference::not_saved(reason.to_string()),
+        },
         SessionLogPlan::Disabled | SessionLogPlan::NoLog { .. } => {
             run_plain_cli_ssh(&invocation, plan.not_saved_reference())
         }
@@ -2679,6 +2783,7 @@ fn run_script_logged_cli_ssh(
     invocation: &SshInvocation,
     script_path: &Path,
     files: &SessionLogFiles,
+    launch_failure_policy: session_log::SessionLogLaunchFailurePolicy,
 ) -> CliSshRunResult {
     let script = session_log::build_script_invocation(
         script_path,
@@ -2717,13 +2822,97 @@ fn run_script_logged_cli_ssh(
             })
         }
         Err(error) => {
-            eprintln!(
-                "TeraDock session logging failed to start ({error}); continuing without logging."
-            );
-            run_plain_cli_ssh(
-                invocation,
-                SessionLogReference::not_saved(SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED),
-            )
+            if launch_failure_policy.fallback_to_plain() {
+                eprintln!(
+                    "TeraDock session logging failed to start ({error}); continuing without logging."
+                );
+                run_plain_cli_ssh(
+                    invocation,
+                    SessionLogReference::not_saved(SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED),
+                )
+            } else {
+                CliSshRunResult::LaunchFailed {
+                    error,
+                    duration_ms,
+                    session_log: SessionLogReference::not_saved(
+                        SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn run_powershell_transcript_cli_ssh(
+    invocation: &SshInvocation,
+    powershell_path: &Path,
+    files: &SessionLogFiles,
+    launch_failure_policy: session_log::SessionLogLaunchFailurePolicy,
+) -> CliSshRunResult {
+    let powershell = session_log::build_powershell_transcript_invocation(
+        powershell_path,
+        files,
+        &invocation.client_path,
+        &invocation.args,
+        launch_failure_policy,
+    );
+    let log_started_at = now_ms();
+    let started = Instant::now();
+    let status = Command::new(&powershell.executable)
+        .args(&powershell.args)
+        .status()
+        .context("failed to launch PowerShell");
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    match status {
+        Ok(status) => {
+            let exit_code = status.code();
+            let session_log = match session_log::complete_powershell_transcript_session(
+                files,
+                &invocation.target,
+                log_started_at,
+                duration_ms,
+                exit_code,
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) if !launch_failure_policy.fallback_to_plain() => {
+                    return CliSshRunResult::LaunchFailed {
+                        error: anyhow!("session logging failed: {err}"),
+                        duration_ms,
+                        session_log: SessionLogReference::not_saved(format!(
+                            "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                        )),
+                    };
+                }
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            CliSshRunResult::Completed(CliSshOutcome {
+                ok: status.success(),
+                exit_code,
+                duration_ms,
+                session_log,
+            })
+        }
+        Err(error) => {
+            if launch_failure_policy.fallback_to_plain() {
+                eprintln!(
+                    "TeraDock session logging failed to start ({error}); continuing without logging."
+                );
+                run_plain_cli_ssh(
+                    invocation,
+                    SessionLogReference::not_saved(SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED),
+                )
+            } else {
+                CliSshRunResult::LaunchFailed {
+                    error,
+                    duration_ms,
+                    session_log: SessionLogReference::not_saved(
+                        SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
+                    ),
+                }
+            }
         }
     }
 }
@@ -2731,7 +2920,10 @@ fn run_script_logged_cli_ssh(
 fn emit_session_log_notice(plan: &SessionLogPlan) {
     if let Some(notice) = plan.notice() {
         eprintln!("{notice}");
-        if matches!(plan, SessionLogPlan::Script { .. }) {
+        if matches!(
+            plan,
+            SessionLogPlan::Script { .. } | SessionLogPlan::PowerShellTranscript { .. }
+        ) {
             eprintln!(
                 "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
             );
@@ -3298,6 +3490,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_ui() {
+        let cli = Cli::try_parse_from(["td", "config", "ui"]).expect("parses config ui");
+
+        match cli.command {
+            Some(Commands::Config {
+                command: ConfigCommands::Ui,
+            }) => {}
+            _ => panic!("expected config ui command"),
+        }
+    }
+
+    #[test]
     fn parses_configset_add_with_file() {
         let cli = Cli::try_parse_from([
             "td",
@@ -3439,6 +3643,21 @@ mod tests {
                 assert!(args.json);
             }
             _ => panic!("expected session list command"),
+        }
+    }
+
+    #[test]
+    fn parses_session_doctor_command() {
+        let cli = Cli::try_parse_from(["td", "session", "doctor", "--json"])
+            .expect("parses session doctor");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::Doctor(args),
+            }) => {
+                assert!(args.json);
+            }
+            _ => panic!("expected session doctor command"),
         }
     }
 

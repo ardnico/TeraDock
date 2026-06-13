@@ -18,7 +18,15 @@ The left pane lists profiles. The right pane shows the selected profile, selecte
 - `D`: cycle danger filter.
 - `[` and `]`: move the tag cursor.
 - `x`: toggle the focused tag filter.
-- `c`: clear filters.
+- `C`: clear filters.
+
+## Settings
+
+- `c`: open the settings screen from `td ui`.
+
+The settings screen lists Session Logging settings first and shows the effective value source (`default`, `global`, `env`, or `profile`). It saves global settings only. If a profile or env override is winning, the screen warns that a global edit may not change the selected context.
+
+Use `Space` to toggle booleans, `Left`/`Right` to cycle enum values, `Enter` to edit strings and paths, `s` to save, `r` to reload and discard unsaved changes, `d` to refresh diagnostics, `?` for help, and `q`/`Esc` to exit. Unsaved changes are held in memory until `s` is pressed. After saving, session logging changes apply to the next SSH session opened with `s`.
 
 ## Running CommandSets
 
@@ -52,6 +60,8 @@ Interactive session logging saves the terminal transcript from an interactive SS
 Session logging is disabled by default:
 
 ```bash
+td session doctor
+td config ui
 td config get session.log.enabled --resolved
 td config set session.log.enabled true
 td config set session.log.backend auto
@@ -66,11 +76,14 @@ Defaults:
 
 When logging is enabled, pressing `s` still uses the same TUI suspend/resume lifecycle. TeraDock leaves raw mode and the alternate screen before starting the logged SSH session, then returns to the TUI after the session exits.
 
-Linux/macOS use the `script` backend when available. If `script` is missing or cannot be launched, TeraDock continues with a normal SSH session and records that no session log was saved. Windows session logging is unsupported in this initial implementation and also falls back to normal SSH.
+Linux/macOS use the `script` backend when available. Windows uses `powershell-transcript` when PowerShell and `ssh` are available. If `auto` cannot resolve the platform backend, TeraDock continues with a normal SSH session and records that no session log was saved. If an explicit backend such as `powershell-transcript` is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
+
+Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, `script` command availability, PowerShell availability, `ssh` availability, log directory existence and writability, platform support, fallback reason, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
 
 Saved sessions can be inspected from the CLI:
 
 ```bash
+td session doctor
 td session list
 td session list --json
 td session show <session_id>
@@ -82,7 +95,7 @@ td session path <session_id>
 
 Session metadata includes the session id, profile id, user, host, port, start/end times, duration, exit code, backend, status, log path, and metadata path. It does not include SSH auth arguments, full command strings, private key paths, passwords, secrets, or tokens.
 
-The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript.
+The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript. On Windows, the transcript format is PowerShell-dependent, terminal control sequences are not guaranteed to replay exactly, and not every interactive prompt is guaranteed to behave identically to a ConPTY recorder.
 
 When a TUI SSH session writes to `op_logs`, the row includes only `session_log_saved`, `session_log_id` when a log was saved, or `session_log_reason` when no log was saved. The log path is kept in the session metadata rather than copied into `op_logs`.
 
@@ -102,6 +115,6 @@ Single runs populate stdout, stderr, and parsed tabs. Bulk runs also populate th
 
 - Recent SSH sessions are available through `td recent`, not a TUI pane.
 - Interactive SSH opens in the current terminal only; terminal emulator launch is not implemented.
-- Windows interactive session logging is not implemented yet.
+- Windows interactive session logging uses PowerShell Transcript; ConPTY logging is not implemented yet.
 - tmux integration is not implemented.
 - The automated test suite does not connect to a real SSH server.

@@ -232,7 +232,9 @@ fn hints_line(state: &AppState) -> Line<'static> {
         ]),
         InputMode::Normal => Line::from(vec![
             Span::styled(state.action_hint(), Style::default().fg(Color::Yellow)),
-            Span::raw(" | / search, s ssh, r run, R bulk, Space mark, d details, ? help, q quit"),
+            Span::raw(
+                " | / search, s ssh, c settings, r run, R bulk, Space mark, d details, ? help, q quit",
+            ),
         ]),
     }
 }
@@ -447,6 +449,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from("Actions"),
         Line::from("  s           open interactive SSH session"),
+        Line::from("  c           open settings"),
         Line::from("  r / Enter   run CommandSet"),
         Line::from("  R           run CommandSet on marked profiles"),
         Line::from("  d           toggle resolved details"),
@@ -459,7 +462,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  D           cycle danger filter"),
         Line::from("  [ / ]       tag cursor"),
         Line::from("  x           toggle tag filter"),
-        Line::from("  c           clear filters"),
+        Line::from("  C           clear filters"),
         Line::from(""),
         Line::from("Results"),
         Line::from("  1/2/3/4     stdout/stderr/parsed/summary tabs"),

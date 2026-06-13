@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -19,10 +19,12 @@ use tdcore::db;
 use tdcore::profile::ProfileStore;
 use tdcore::session_log::{
     self, SessionLogFiles, SessionLogPlan, SessionLogReference,
-    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
+    SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
 };
 use tdcore::util::now_ms;
 
+use crate::settings_ui;
 use crate::state::{
     ActivePane, AppState, ConfirmedAction, InputMode, ResultTab, SshSessionCommand,
 };
@@ -79,6 +81,9 @@ fn run_loop(
                             UiAction::OpenSshSession => {
                                 handle_ssh_session_request(terminal, state)?;
                             }
+                            UiAction::OpenSettings => {
+                                handle_settings_request(terminal, state)?;
+                            }
                         },
                     }
                 }
@@ -107,6 +112,7 @@ enum UiAction {
     Continue,
     Quit,
     OpenSshSession,
+    OpenSettings,
 }
 
 fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<UiAction> {
@@ -119,7 +125,8 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<UiAction> {
         KeyCode::Char('T') => state.cycle_profile_type()?,
         KeyCode::Char('g') => state.cycle_group()?,
         KeyCode::Char('D') => state.cycle_danger()?,
-        KeyCode::Char('c') => state.clear_filters()?,
+        KeyCode::Char('c') => return Ok(UiAction::OpenSettings),
+        KeyCode::Char('C') => state.clear_filters()?,
         KeyCode::Char('[') => state.tag_cursor_prev(),
         KeyCode::Char(']') => state.tag_cursor_next(),
         KeyCode::Char('x') => state.toggle_tag()?,
@@ -167,6 +174,16 @@ fn handle_normal_key(state: &mut AppState, code: KeyCode) -> Result<UiAction> {
         _ => {}
     }
     Ok(UiAction::Continue)
+}
+
+fn handle_settings_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) -> Result<()> {
+    let profile_id = state.selected_profile_id();
+    let outcome = settings_ui::run_in_terminal(terminal, profile_id)?;
+    state.refresh_after_settings(outcome.saved, outcome.session_log_enabled)?;
+    Ok(())
 }
 
 fn handle_confirm_key(state: &mut AppState, code: KeyCode) -> Result<UiAction> {
@@ -256,7 +273,10 @@ fn run_interactive_ssh_session(
     suspend_tui_terminal(terminal)?;
     if let Some(notice) = session.session_log_plan.notice() {
         println!("{notice}");
-        if matches!(&session.session_log_plan, SessionLogPlan::Script { .. }) {
+        if matches!(
+            &session.session_log_plan,
+            SessionLogPlan::Script { .. } | SessionLogPlan::PowerShellTranscript { .. }
+        ) {
             println!(
                 "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
             );
@@ -264,9 +284,22 @@ fn run_interactive_ssh_session(
         io::stdout().flush()?;
     }
     let result = match &session.session_log_plan {
-        SessionLogPlan::Script { script_path, files } => {
-            run_script_logged_ssh_session(session, script_path, files)
-        }
+        SessionLogPlan::Script {
+            script_path,
+            files,
+            launch_failure_policy,
+        } => run_script_logged_ssh_session(session, script_path, files, *launch_failure_policy),
+        SessionLogPlan::PowerShellTranscript {
+            powershell_path,
+            files,
+            launch_failure_policy,
+        } => run_powershell_transcript_ssh_session(
+            session,
+            powershell_path,
+            files,
+            *launch_failure_policy,
+        ),
+        SessionLogPlan::Error { reason } => run_session_logging_setup_error(session, reason),
         SessionLogPlan::Disabled | SessionLogPlan::NoLog { .. } => {
             run_plain_ssh_session(session, session.session_log_plan.not_saved_reference())
         }
@@ -309,6 +342,7 @@ fn run_script_logged_ssh_session(
     session: &SshSessionCommand,
     script_path: &std::path::Path,
     files: &SessionLogFiles,
+    launch_failure_policy: session_log::SessionLogLaunchFailurePolicy,
 ) -> SshSessionRunResult {
     let invocation = session_log::build_script_invocation(
         script_path,
@@ -351,15 +385,116 @@ fn run_script_logged_ssh_session(
             })
         }
         Err(error) => {
-            println!(
-                "TeraDock session logging failed to start ({error}); continuing without logging."
-            );
-            let _ = io::stdout().flush();
-            run_plain_ssh_session(
-                session,
-                SessionLogReference::not_saved(SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED),
-            )
+            if launch_failure_policy.fallback_to_plain() {
+                println!(
+                    "TeraDock session logging failed to start ({error}); continuing without logging."
+                );
+                let _ = io::stdout().flush();
+                run_plain_ssh_session(
+                    session,
+                    SessionLogReference::not_saved(SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED),
+                )
+            } else {
+                SshSessionRunResult::LaunchFailed {
+                    error,
+                    duration_ms,
+                    session_log: SessionLogReference::not_saved(
+                        SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+                    ),
+                }
+            }
         }
+    }
+}
+
+fn run_powershell_transcript_ssh_session(
+    session: &SshSessionCommand,
+    powershell_path: &std::path::Path,
+    files: &SessionLogFiles,
+    launch_failure_policy: session_log::SessionLogLaunchFailurePolicy,
+) -> SshSessionRunResult {
+    let invocation = session_log::build_powershell_transcript_invocation(
+        powershell_path,
+        files,
+        &session.executable,
+        &session.args,
+        launch_failure_policy,
+    );
+    let log_started_at = now_ms();
+    let started = Instant::now();
+    let status = Command::new(&invocation.executable)
+        .args(&invocation.args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to launch PowerShell");
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    match status {
+        Ok(status) => {
+            let exit_code = status.code();
+            let target = session_log_target(session);
+            let session_log = match session_log::complete_powershell_transcript_session(
+                files,
+                &target,
+                log_started_at,
+                duration_ms,
+                exit_code,
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) if !launch_failure_policy.fallback_to_plain() => {
+                    return SshSessionRunResult::LaunchFailed {
+                        error: anyhow!("session logging failed: {err}"),
+                        duration_ms,
+                        session_log: SessionLogReference::not_saved(format!(
+                            "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                        )),
+                    };
+                }
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            SshSessionRunResult::Completed(SshSessionOutcome {
+                ok: status.success(),
+                exit_code,
+                duration_ms,
+                session_log,
+            })
+        }
+        Err(error) => {
+            if launch_failure_policy.fallback_to_plain() {
+                println!(
+                    "TeraDock session logging failed to start ({error}); continuing without logging."
+                );
+                let _ = io::stdout().flush();
+                run_plain_ssh_session(
+                    session,
+                    SessionLogReference::not_saved(SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED),
+                )
+            } else {
+                SshSessionRunResult::LaunchFailed {
+                    error,
+                    duration_ms,
+                    session_log: SessionLogReference::not_saved(
+                        SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn run_session_logging_setup_error(
+    session: &SshSessionCommand,
+    reason: &str,
+) -> SshSessionRunResult {
+    let _ = session;
+    SshSessionRunResult::LaunchFailed {
+        error: anyhow!("session logging backend is not ready: {reason}"),
+        duration_ms: 0,
+        session_log: SessionLogReference::not_saved(reason.to_string()),
     }
 }
 
@@ -446,5 +581,14 @@ mod tests {
         let action = handle_normal_key(&mut state, KeyCode::Char('s')).unwrap();
 
         assert_eq!(action, UiAction::OpenSshSession);
+    }
+
+    #[test]
+    fn c_key_requests_settings() {
+        let mut state = empty_state();
+
+        let action = handle_normal_key(&mut state, KeyCode::Char('c')).unwrap();
+
+        assert_eq!(action, UiAction::OpenSettings);
     }
 }

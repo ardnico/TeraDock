@@ -62,6 +62,22 @@ Cons:
 - Higher risk of breaking TUI terminal restore behavior.
 - Not needed for the v1.1 minimum.
 
+### PowerShell Transcript backend
+
+Use PowerShell `Start-Transcript` / `Stop-Transcript` to run the existing `ssh`
+invocation and save the terminal transcript on Windows.
+
+Pros:
+- Small Windows implementation.
+- Keeps the same inherited stdin/stdout/stderr interaction model.
+- Avoids a ConPTY dependency in this slice.
+
+Cons:
+- Transcript format is PowerShell-dependent.
+- Terminal control sequences are not guaranteed to replay exactly.
+- Not every interactive prompt is guaranteed to behave like a ConPTY recorder.
+- Captures displayed sensitive output without masking.
+
 ### no-log backend
 
 Run SSH normally and record metadata explaining that no terminal log was saved.
@@ -77,9 +93,11 @@ Cons:
 
 - Default: disabled.
 - Linux/macOS: use the `script` backend when `session.log.backend=auto` or `script`.
-- Windows: report unsupported and fall back to normal SSH without saving a session log.
-- If `script` is unavailable or setup fails, continue the SSH session without logging when possible and record a no-log reason.
-- Do not introduce portable-pty, tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
+- Windows: use the `powershell-transcript` backend when `session.log.backend=auto` or `powershell-transcript`.
+- Windows `auto` requires PowerShell, `ssh`, and a writable log directory. Missing PowerShell resolves to `no-log` with `powershell_not_found`; missing `ssh` resolves to `no-log` with `ssh_not_found`; an unwritable log directory resolves to `no-log` with `log_dir_not_writable`.
+- Explicit `powershell-transcript` is unsupported outside Windows. On Windows, explicit `powershell-transcript` reports not-ready errors instead of silently opening an unlogged SSH session.
+- If `script` is unavailable or setup fails under `auto`, continue the SSH session without logging when possible and record a no-log reason.
+- Do not introduce ConPTY, portable-pty, tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
 
 ## Data model
 
@@ -113,14 +131,21 @@ The metadata intentionally excludes SSH auth args, full command strings, private
   - `session.log.dir=<data_dir>/session-logs`
   - `session.log.backend=auto`
 - TUI: pressing `s` opens an SSH session as before. When logging is enabled and supported, TeraDock saves the transcript and reports the session id after return.
+- TUI settings: pressing `c` opens the settings screen. Saving there writes global settings and affects subsequent SSH sessions.
 - CLI: `td connect <profile_id>` can use the same logging path for SSH profiles.
+- CLI settings: `td config ui` opens the same BIOS-style settings screen outside `td ui`.
+- Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, `script` availability, PowerShell availability, `ssh` availability, log directory state, newest saved session log, platform support, fallback reason, status, and hints.
 - Reference commands:
+  - `td session doctor`
+  - `td config ui`
   - `td session list`
   - `td session list --json`
   - `td session path <session_id>`
   - `td session show <session_id>`
 
 `td session show` should default to metadata-oriented output and only show log excerpts when the caller explicitly asks for a tail length.
+
+The settings screen includes a diagnostics panel with the same core report. It shows enabled state, backend setting, resolved backend, platform, platform support, PowerShell/ssh readiness, log directory writability, fallback reason, and status. It is intentionally focused on global Session Logging settings first; profile/env settings can still override the effective value and are shown as source warnings rather than being edited from this screen.
 
 ## op_logs integration
 

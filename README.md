@@ -94,8 +94,10 @@ Run `td ui`.
 
 - `/` searches profiles.
 - `T`, `g`, `D`, `[`, `]`, and `x` filter by type, group, danger, and tags.
+- `C` clears filters.
 - `Space` marks profiles for bulk execution.
 - `s` opens an interactive SSH session for the selected SSH profile in the same terminal. TeraDock pauses the TUI, restores normal terminal mode while SSH runs, then returns to the TUI when the session exits.
+- `c` opens the settings screen. Save changes there with `s`; session logging changes apply to the next SSH session opened with `s`.
 - `r` runs the selected CommandSet on the selected profile.
 - `R` runs the selected CommandSet on marked profiles.
 - `1` to `4` switch stdout, stderr, parsed, and summary result tabs.
@@ -111,6 +113,8 @@ SSH sessions opened from the TUI are recorded in `op_logs` as `ssh_session` oper
 Interactive SSH terminal transcript logging is available for v1.1 preparation and is disabled by default:
 
 ```bash
+td session doctor
+td config ui
 td config set session.log.enabled true
 td config set session.log.backend auto
 td config get session.log.dir --resolved
@@ -119,7 +123,9 @@ td session show <session_id>
 td session path <session_id>
 ```
 
-When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured. Windows falls back to normal SSH without saving terminal logs in this initial implementation. Terminal output shown during the session may include passwords, tokens, or secrets and can be captured in the log file.
+Use `td session doctor` to see whether logging is enabled, which backend will be used, whether `script`, PowerShell, and `ssh` are available, whether the log directory looks writable, and which saved session log is newest. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
+
+When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured. On Windows, `auto` resolves to `powershell-transcript` when PowerShell and `ssh` are available. Terminal output shown during the session may include passwords, tokens, or secrets and can be captured in the log file. Saved settings affect SSH sessions started after the save.
 
 ## Safety Model
 
@@ -147,7 +153,7 @@ The export format includes profiles, CommandSets, parser definitions, config set
 
 TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
 
-Interactive session logging uses `script` on Linux/macOS. Windows session logging is currently unsupported and falls back to a normal interactive SSH session.
+Interactive session logging uses `script` on Linux/macOS and PowerShell Transcript on Windows. The Windows transcript format depends on PowerShell, does not guarantee complete terminal-control replay, and may not handle every interactive prompt exactly like a native ConPTY implementation.
 
 ## Project Operations
 
@@ -160,7 +166,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows session loggin
 
 - TUI recent-profile browsing is not implemented; use `td recent` or `td recent --json`.
 - Terminal emulator launch and tmux integration are not implemented.
-- Windows interactive session logging is not implemented in the v1.1 candidate path.
+- ConPTY-based logging is not implemented in the v1.1 candidate path.
 - CommandSet execution still receives SSH path and auth args separately inside `tdcore::cmdset_runner`.
 - Transfer and tunnel command shapes are not fully represented by `SshInvocation` yet.
 - Automated tests do not include real SSH server integration tests.

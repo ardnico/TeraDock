@@ -96,7 +96,9 @@ td doctor
 td init --with-samples
 td profile list
 td config keys
+td config ui
 td recent --json
+td session doctor
 td session list --json
 ```
 
@@ -106,13 +108,22 @@ td session list --json
 - `/` search works.
 - Type, group, danger, tag, and query filters work.
 - Details view opens.
+- `c` opens settings, `s` saves settings there, and returning to `td ui`
+  refreshes state.
 - `s` opens an SSH session for an SSH profile.
 - With `session.log.enabled=false`, `s` opens SSH without saving a terminal
   transcript.
+- `td session doctor` reports disabled/ready/fallback status, backend
+  resolution, `script`, PowerShell, and `ssh` availability, log directory
+  state, newest saved session log, platform support, and fallback reason.
 - With `session.log.enabled=true` on Linux/macOS, `s` uses `script` when
   available and `td session list` shows the saved metadata after return.
-- On Windows, enabled session logging reports unsupported and falls back to a
-  normal SSH session.
+- On Windows, enabled `auto` session logging resolves to
+  `powershell-transcript` when PowerShell and `ssh` are available; missing
+  dependencies report `powershell_not_found` or `ssh_not_found`.
+- Windows PowerShell Transcript logs are accepted as best-effort transcripts;
+  exact terminal-control replay and every interactive prompt shape are not
+  guaranteed.
 - A non-SSH profile does not open an SSH session.
 - A critical profile requires typed confirmation.
 - SSH session exit returns to the TUI and redraws the screen.

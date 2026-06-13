@@ -284,6 +284,11 @@ impl AppState {
         self.profile_cursor().and_then(|idx| self.filtered.get(idx))
     }
 
+    pub fn selected_profile_id(&self) -> Option<String> {
+        self.selected_profile()
+            .map(|profile| profile.profile_id.clone())
+    }
+
     pub fn selected_cmdset(&self) -> Option<&CmdSet> {
         self.cmdset_cursor().and_then(|idx| self.cmdsets.get(idx))
     }
@@ -302,7 +307,8 @@ impl AppState {
 
     pub fn action_hint(&self) -> String {
         if self.filtered.is_empty() {
-            return "No profiles match filters; press c to clear filters.".to_string();
+            return "No profiles match filters; press C to clear filters or c for settings."
+                .to_string();
         }
         let Some(profile) = self.selected_profile() else {
             return "No profile selected.".to_string();
@@ -315,24 +321,24 @@ impl AppState {
         }
         if self.cmdsets.is_empty() {
             return format!(
-                "Ready: s opens SSH session for '{}'; no CommandSets available.",
+                "Ready: s opens SSH session for '{}'; c opens settings; no CommandSets available.",
                 profile.profile_id
             );
         }
         let Some(cmdset) = self.selected_cmdset() else {
             return format!(
-                "Ready: s opens SSH session for '{}'; no CommandSet selected.",
+                "Ready: s opens SSH session for '{}'; c opens settings; no CommandSet selected.",
                 profile.profile_id
             );
         };
         if self.marked_profiles.is_empty() {
             format!(
-                "Ready: s opens SSH session; r runs '{}' on '{}'; Space marks profiles for bulk R.",
+                "Ready: s opens SSH session; c settings; r runs '{}' on '{}'; Space marks profiles for bulk R.",
                 cmdset.cmdset_id, profile.profile_id
             )
         } else {
             format!(
-                "Ready: s opens SSH session; r runs selected; R runs '{}' on {} marked profiles.",
+                "Ready: s opens SSH session; c settings; r runs selected; R runs '{}' on {} marked profiles.",
                 cmdset.cmdset_id,
                 self.marked_profiles.len()
             )
@@ -695,7 +701,11 @@ impl AppState {
                 return Ok(None);
             }
         };
-        let session_log_plan = session_log::plan_for_target(self.store.conn(), &invocation.target);
+        let session_log_plan = session_log::plan_for_target_with_ssh(
+            self.store.conn(),
+            &invocation.target,
+            &invocation.client_path,
+        );
         Ok(Some(SshSessionCommand {
             profile_id: invocation.target.profile_id,
             host: invocation.target.host,
@@ -759,6 +769,21 @@ impl AppState {
 
     pub fn set_status_message(&mut self, message: impl Into<String>) {
         self.status_message = Some(message.into());
+    }
+
+    pub fn refresh_after_settings(&mut self, saved: bool, session_log_enabled: bool) -> Result<()> {
+        self.refresh()?;
+        let session_status = if session_log_enabled {
+            "Session logging enabled."
+        } else {
+            "Session logging disabled."
+        };
+        self.status_message = Some(if saved {
+            format!("Settings saved. {session_status}")
+        } else {
+            format!("Returned from settings. {session_status}")
+        });
+        Ok(())
     }
 
     fn execute_cmdset_run(&mut self, profile_id: &str, cmdset_id: &str) -> Result<()> {

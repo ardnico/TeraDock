@@ -17,7 +17,7 @@ Shared SSH construction logic lives in `tdcore::ssh`:
 
 The shared builder returns an invocation object. It does not spawn external processes.
 
-Interactive terminal transcript logging lives in `tdcore::session_log`. It decides whether a session should use the default-disabled no-log path, the Linux/macOS `script` backend, or an unsupported fallback. It may build a wrapper command and metadata paths, but it does not own TUI raw mode or process spawning.
+Interactive terminal transcript logging lives in `tdcore::session_log`. It decides whether a session should use the default-disabled no-log path, the Linux/macOS `script` backend, the Windows `powershell-transcript` backend, or a no-log fallback. It may build a wrapper command and metadata paths, but it does not own TUI raw mode or process spawning.
 
 ## CLI Responsibilities
 

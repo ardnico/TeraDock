@@ -47,10 +47,14 @@ Interactive session logs are terminal transcripts for interactive SSH sessions. 
 Enable only when the operator accepts the risk:
 
 ```bash
+td session doctor
+td config ui
 td config set session.log.enabled true
 td config set session.log.backend auto
 td config get session.log.dir --resolved
 ```
+
+The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, or a no-log fallback, whether PowerShell and `ssh` are available on Windows, whether the log directory looks writable, and whether the current platform is supported.
 
 The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
 
@@ -63,11 +67,12 @@ Session log metadata is intentionally small. It may include the session id, prof
 
 The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
 
-Linux/macOS use the `script` backend when available. Windows session logging is unsupported in the initial implementation and falls back to a normal SSH session without saving a terminal transcript.
+Linux/macOS use the `script` backend when available. Windows uses the `powershell-transcript` backend when PowerShell and `ssh` are available. PowerShell Transcript output is PowerShell-dependent, terminal control sequences may not be fully reproducible, and TeraDock does not guarantee that every interactive prompt behaves exactly like a ConPTY-based recorder.
 
 Use these commands to inspect saved sessions:
 
 ```bash
+td session doctor
 td session list
 td session list --json
 td session show <session_id>
