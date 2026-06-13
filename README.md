@@ -4,6 +4,8 @@ TeraDock is a CLI/TUI tool for managing connection profiles and safely running r
 
 The main workflow is simple: keep connection profiles in one local database, mark risky targets with a danger level, run a CommandSet against one or more SSH profiles, then inspect stdout, stderr, parsed output, and operation logs.
 
+Current stable version: **1.0.3**.
+
 ## Use Cases
 
 - Check the state of multiple Linux servers with the same read-only commands.
@@ -16,12 +18,12 @@ The main workflow is simple: keep connection profiles in one local database, mar
 
 Install from a GitHub Release artifact when available:
 
-- Windows: `td-0.1.0-windows-x86_64-setup.exe`
-- Linux portable archive: `td-0.1.0-linux-x86_64.tar.gz`
-- Linux packages: `.deb` and `.rpm`
+- Windows: `td-1.0.3-windows-x86_64-setup.exe`
+- Linux portable archive: `td-1.0.3-linux-x86_64.tar.gz`
+- Linux packages: `.deb` and `.rpm` release assets
 - Checksums: `SHA256SUMS-linux-x86_64` and `SHA256SUMS-windows-x86_64`
 
-The v0.1 release candidate is prepared for GitHub Releases. crates.io publication is not part of this release path.
+The v1.0.3 release is distributed through GitHub Releases. crates.io publication is not part of this release path.
 Before broad use, validate downloaded artifacts with the [release artifact validation guide](docs/release-artifact-validation.md).
 
 To build from source:
@@ -127,6 +129,13 @@ The export format includes profiles, CommandSets, parser definitions, config set
 
 TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
 
+## Project Operations
+
+- Report bugs with the GitHub bug report template. Remove secrets, passwords, tokens, private keys, and mask SSH host/user values before posting logs.
+- Request features with the GitHub feature request template and check [Roadmap](ROADMAP.md) for the current 1.0.x and 1.1 scope.
+- Security-sensitive issues should not include public details. See [Security Policy](SECURITY.md).
+- Contributions should follow [Contributing](CONTRIBUTING.md).
+
 ## Known Limitations
 
 - TUI recent-profile browsing is not implemented; use `td recent` or `td recent --json`.
@@ -148,9 +157,13 @@ TeraDock is tested on Windows and Linux in CI. SSH actions require an external `
 - [CommandSets](docs/commandsets.md)
 - [TUI](docs/tui.md)
 - [Security](docs/security.md)
+- [Security Policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Roadmap](ROADMAP.md)
+- [Post-Release Audit 1.0.3](docs/post-release-audit-1.0.3.md)
 - [Release Artifact Validation](docs/release-artifact-validation.md)
 - [Release Checklist](RELEASE_CHECKLIST.md)
-- [Release Notes 0.1.0](RELEASE_NOTES_0.1.0.md)
+- [Historical Release Notes 0.1.0](RELEASE_NOTES_0.1.0.md)
 - [Changelog](CHANGELOG.md)
 - [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)
 - [Internal SSH Invocation Boundary](docs/internal/ssh-invocation-boundary.md)

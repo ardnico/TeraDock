@@ -1,0 +1,71 @@
+name: Feature request
+description: Suggest a scoped improvement for a future TeraDock release.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the workflow problem, not just a preferred implementation. Do not paste secrets, passwords, tokens, private keys, or unmasked SSH host/user values.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or workflow gap should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: What behavior would you like TeraDock to provide?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or smaller alternatives could solve the same problem?
+    validations:
+      required: false
+  - type: dropdown
+    id: target_user
+    attributes:
+      label: Target user
+      options:
+        - Operator
+        - Developer
+        - Lab or maintenance team
+        - Release maintainer
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Nice to have
+        - Important for regular use
+        - Blocks adoption
+        - Security or data-loss concern
+    validations:
+      required: true
+  - type: dropdown
+    id: release_scope
+    attributes:
+      label: Release scope
+      description: Should this fit a v1.x release, or wait for a future major version?
+      options:
+        - v1.x candidate
+        - Future major version
+        - Unsure
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I did not include secrets, passwords, tokens, private keys, or unmasked SSH host/user values.
+          required: true

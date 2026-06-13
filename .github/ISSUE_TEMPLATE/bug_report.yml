@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a reproducible TeraDock bug.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not paste secrets, passwords, tokens, private keys, or unredacted connection details.
+        If you include SSH connection details, mask host and user values, for example `host=example.internal` -> `host=<masked-host>` and `user=admin` -> `user=<masked-user>`.
+  - type: input
+    id: version
+    attributes:
+      label: TeraDock version
+      description: Run `td --version` or use the GitHub Release version you installed.
+      placeholder: "1.0.3"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: Include OS name, version, architecture, and terminal when relevant.
+      placeholder: "Windows 11 x86_64, PowerShell 7"
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - GitHub Release Windows installer
+        - GitHub Release Linux tar.gz
+        - GitHub Release deb package
+        - GitHub Release rpm package
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command executed
+      description: Paste the command, with secrets and sensitive host/user values removed or masked.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect TeraDock to do?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs/output
+      description: Paste only redacted output. Remove passwords, tokens, private keys, full SSH auth args, and unmasked host/user values.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I removed secrets, passwords, tokens, private keys, and unmasked SSH host/user details from this report.
+          required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: List the smallest steps that reproduce the issue. Use sanitized profile IDs and hosts.
+      placeholder: |
+        1. Install TeraDock 1.0.3 from ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
