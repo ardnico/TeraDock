@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    mpsc, Arc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -307,6 +307,9 @@ enum SessionCommands {
 #[derive(Debug, Args)]
 struct SessionConptyTestArgs {
     profile_id: String,
+    /// Seconds to wait for the first ConPTY output byte before aborting; 0 disables the timeout
+    #[arg(long, default_value_t = 10)]
+    startup_timeout_sec: u64,
     /// Print sanitized ConPTY PoC startup and bridge phase diagnostics
     #[arg(long)]
     debug: bool,
@@ -2076,7 +2079,7 @@ fn handle_session_conpty_test(store: &ProfileStore, args: SessionConptyTestArgs)
 
     let options = ConptyRunOptions {
         debug,
-        initial_output_timeout: Duration::from_secs(10),
+        startup_timeout: conpty_startup_timeout(args.startup_timeout_sec),
     };
     match run_conpty_logged_cli_ssh(&invocation, &files, options) {
         CliSshRunResult::Completed(outcome) => {
@@ -2159,6 +2162,10 @@ fn conpty_debug(enabled: bool, message: impl Display) {
     if enabled {
         eprintln!("debug: {message}");
     }
+}
+
+fn conpty_startup_timeout(seconds: u64) -> Option<Duration> {
+    (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
 fn handle_session_doctor(conn: &Connection, args: SessionDoctorArgs) -> Result<()> {
@@ -2272,19 +2279,15 @@ fn handle_session_list(conn: &Connection, args: SessionListArgs) -> Result<()> {
     );
     for item in sessions {
         let endpoint = format!("{}@{}:{}", item.user, item.host, item.port);
-        let log_path = item
-            .log_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let log_path = format_session_log_path(item.log_path.as_deref());
         println!(
             "{:<14} {:<16} {:<28} {:<20} {:<12} {:<18} {}",
-            item.session_id,
-            item.profile_id,
-            endpoint,
-            format_unix_ms_utc(item.started_at),
-            format_duration_ms(item.duration_ms),
-            format_session_status(&item),
+            table_cell(&item.session_id, 14),
+            table_cell(&item.profile_id, 16),
+            table_cell(&endpoint, 28),
+            table_cell(&format_unix_ms_utc(item.started_at), 20),
+            table_cell(&format_duration_ms(item.duration_ms), 12),
+            table_cell(&format_session_status(&item), 18),
             log_path
         );
     }
@@ -2327,11 +2330,7 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
     }
     println!(
         "log_path: {}",
-        metadata
-            .log_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "-".to_string())
+        format_session_log_path(metadata.log_path.as_deref())
     );
     println!("metadata_path: {}", metadata.metadata_path.display());
     for line in session_capture_lines(&metadata) {
@@ -2482,6 +2481,43 @@ fn format_session_status(metadata: &session_log::SessionLogMetadata) -> String {
         Some(code) => format!("{} exit {}", metadata.status, code),
         None => metadata.status.clone(),
     }
+}
+
+fn table_cell(value: &str, width: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut truncated = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('~');
+    truncated
+}
+
+fn format_session_log_path(path: Option<&Path>) -> String {
+    let Some(path) = path else {
+        return "-".to_string();
+    };
+    if !is_displayable_session_log_path(path) {
+        return "-".to_string();
+    }
+    path.display().to_string()
+}
+
+fn is_displayable_session_log_path(path: &Path) -> bool {
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.trim().is_empty() || raw.contains('\n') || raw.contains('\r') {
+        return false;
+    }
+    path.is_absolute()
+        || path
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("log"))
 }
 
 fn handle_test(profile_id: String, json: bool, include_ssh: bool) -> Result<()> {
@@ -3148,14 +3184,37 @@ fn run_powershell_transcript_cli_ssh(
 #[derive(Clone, Copy)]
 struct ConptyRunOptions {
     debug: bool,
-    initial_output_timeout: Duration,
+    startup_timeout: Option<Duration>,
 }
 
 #[cfg(windows)]
 struct ConptyChildReport {
     status: portable_pty::ExitStatus,
     first_output_received: bool,
-    initial_output_timed_out: bool,
+}
+
+#[cfg(windows)]
+struct ConptyOutputThread {
+    handle: thread::JoinHandle<()>,
+    result_rx: mpsc::Receiver<io::Result<u64>>,
+}
+
+#[cfg(windows)]
+struct ConptyInputThread {
+    handle: thread::JoinHandle<()>,
+    done_rx: mpsc::Receiver<()>,
+}
+
+#[cfg(windows)]
+struct ConptyWaitThread {
+    handle: thread::JoinHandle<()>,
+    result_rx: mpsc::Receiver<io::Result<portable_pty::ExitStatus>>,
+}
+
+#[cfg(windows)]
+enum ConptyControlEvent {
+    UserAbort,
+    InputBridgeFailed(anyhow::Error),
 }
 
 #[cfg(windows)]
@@ -3212,33 +3271,6 @@ fn run_conpty_logged_cli_ssh(
         Ok(report) => {
             let exit_code_value = conpty_exit_code(&report.status);
             let exit_code = Some(exit_code_value);
-            if report.initial_output_timed_out && !report.first_output_received {
-                conpty_debug(options.debug, "failure phase: waiting_initial_output");
-                let session_log = match session_log::complete_conpty_failure_session(
-                    files,
-                    &invocation.target,
-                    log_started_at,
-                    duration_ms,
-                    session_log::SessionLogFailureMetadata {
-                        status: session_log::SESSION_LOG_STATUS_FAILED,
-                        failure_phase:
-                            session_log::SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT,
-                        failure_reason:
-                            session_log::SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT,
-                        exit_code,
-                    },
-                ) {
-                    Ok(metadata) => SessionLogReference::saved(metadata.session_id),
-                    Err(err) => SessionLogReference::not_saved(format!(
-                        "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
-                    )),
-                };
-                return CliSshRunResult::LaunchFailed {
-                    error: anyhow!("ConPTY SSH ended without output after initial output timeout"),
-                    duration_ms,
-                    session_log,
-                };
-            }
             let session_log = match session_log::complete_conpty_session(
                 files,
                 &invocation.target,
@@ -3255,6 +3287,9 @@ fn run_conpty_logged_cli_ssh(
                 options.debug,
                 format_args!("exit phase: code {exit_code_value}"),
             );
+            if !report.first_output_received {
+                conpty_debug(options.debug, "first output byte count: 0");
+            }
             CliSshRunResult::Completed(CliSshOutcome {
                 ok: report.status.success(),
                 exit_code,
@@ -3263,10 +3298,14 @@ fn run_conpty_logged_cli_ssh(
             })
         }
         Err(failure) => {
+            let failure_status = failure.status;
             conpty_debug(
                 options.debug,
                 format_args!("failure phase: {} ({})", failure.phase, failure.reason),
             );
+            if failure_status == session_log::SESSION_LOG_STATUS_ABORTED {
+                conpty_debug(options.debug, "writing aborted metadata");
+            }
             let session_log = match session_log::complete_conpty_failure_session(
                 files,
                 &invocation.target,
@@ -3284,6 +3323,9 @@ fn run_conpty_logged_cli_ssh(
                     "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
                 )),
             };
+            if session_log.saved {
+                eprintln!("Session metadata saved with status={failure_status}.");
+            }
             CliSshRunResult::LaunchFailed {
                 error: failure.into_error(),
                 duration_ms,
@@ -3322,14 +3364,14 @@ fn run_conpty_ssh_child(
     })?;
     let master = pair.master;
     let slave = pair.slave;
-    let mut reader = master.try_clone_reader().map_err(|err| {
+    let reader = master.try_clone_reader().map_err(|err| {
         ConptyChildFailure::failed(
             session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
             session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
             err,
         )
     })?;
-    let mut writer = master.take_writer().map_err(|err| {
+    let writer = master.take_writer().map_err(|err| {
         ConptyChildFailure::failed(
             session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
             session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
@@ -3351,7 +3393,7 @@ fn run_conpty_ssh_child(
     let mut cmd = CommandBuilder::new(invocation.client_path.as_os_str());
     cmd.args(&invocation.args);
     conpty_debug(options.debug, "child spawn phase: spawn child");
-    let mut child = match slave.spawn_command(cmd) {
+    let child = match slave.spawn_command(cmd) {
         Ok(child) => child,
         Err(err) => {
             drop(raw_mode);
@@ -3363,117 +3405,136 @@ fn run_conpty_ssh_child(
             ));
         }
     };
+    conpty_debug(options.debug, "child spawned");
     drop(slave);
 
     let first_output_received = Arc::new(AtomicBool::new(false));
-    let output_first_byte = Arc::clone(&first_output_received);
-    let output_thread =
-        thread::spawn(move || tee_conpty_output(&mut reader, log_file, output_first_byte, options));
-
-    conpty_debug(options.debug, "input bridge started");
-    conpty_debug(options.debug, "child wait started");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let output_thread = spawn_conpty_output_thread(
+        reader,
+        log_file,
+        Arc::clone(&first_output_received),
+        options,
+    );
+    let mut child_killer = child.clone_killer();
+    let wait_thread = spawn_conpty_wait_thread(child, Arc::clone(&cancel), options);
+    let (control_tx, control_rx) = mpsc::channel();
+    let input_thread =
+        spawn_conpty_input_thread(writer, master, Arc::clone(&cancel), control_tx, options);
     let wait_started = Instant::now();
-    let mut initial_output_timed_out = false;
-    let status_result =
-        (|| -> std::result::Result<portable_pty::ExitStatus, ConptyChildFailure> {
-            loop {
-                if let Some(status) = child.try_wait().map_err(|err| {
-                    ConptyChildFailure::failed(
-                        session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
-                        session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
-                        err.into(),
-                    )
-                })? {
-                    return Ok(status);
-                }
-                if !first_output_received.load(Ordering::SeqCst)
-                    && !initial_output_timed_out
-                    && wait_started.elapsed() >= options.initial_output_timeout
-                {
-                    initial_output_timed_out = true;
-                    eprintln!();
-                    eprintln!(
-                        "Warning: no ConPTY output received for {} seconds.",
-                        options.initial_output_timeout.as_secs()
-                    );
-                    eprintln!(
-                        "SSH may be waiting for input, blocked, or the output bridge may be stuck."
-                    );
-                    eprintln!("Press Ctrl-C to abort.");
-                }
-                if event::poll(Duration::from_millis(20)).map_err(|err| {
-                    ConptyChildFailure::failed(
-                        session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
-                        session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
-                        err.into(),
-                    )
-                })? {
-                    match event::read().map_err(|err| {
-                        ConptyChildFailure::failed(
-                            session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
-                            session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
-                            err.into(),
-                        )
-                    })? {
-                        Event::Key(key) => {
-                            if initial_output_timed_out
-                                && !first_output_received.load(Ordering::SeqCst)
-                                && key_event_is_ctrl_c(key)
-                            {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                return Err(ConptyChildFailure::aborted(
-                                    session_log::SESSION_LOG_FAILURE_PHASE_USER_ABORT,
-                                    session_log::SESSION_LOG_FAILURE_REASON_CTRL_C,
-                                    anyhow!("aborted by Ctrl-C before initial ConPTY output"),
-                                ));
-                            }
-                            if let Some(bytes) = key_event_to_pty_bytes(key) {
-                                writer.write_all(&bytes).map_err(|err| {
-                                    ConptyChildFailure::failed(
-                                        session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
-                                        session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
-                                        err.into(),
-                                    )
-                                })?;
-                                writer.flush().map_err(|err| {
-                                    ConptyChildFailure::failed(
-                                        session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
-                                        session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
-                                        err.into(),
-                                    )
-                                })?;
-                            }
-                        }
-                        Event::Resize(cols, rows) => {
-                            master.resize(pty_size(cols, rows)).map_err(|err| {
-                                ConptyChildFailure::failed(
-                                    session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
-                                    session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
-                                    err,
-                                )
-                            })?;
-                        }
-                        _ => {}
-                    }
-                }
+    let loop_result = loop {
+        match wait_thread.result_rx.try_recv() {
+            Ok(Ok(status)) => break Ok(status),
+            Ok(Err(err)) => {
+                break Err(ConptyChildFailure::failed(
+                    session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
+                    session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
+                    err.into(),
+                ));
             }
-        })();
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err(ConptyChildFailure::failed(
+                    session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
+                    session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
+                    anyhow!("ConPTY child wait thread ended without status"),
+                ));
+            }
+        }
+
+        match control_rx.try_recv() {
+            Ok(ConptyControlEvent::UserAbort) => {
+                kill_conpty_child(&mut child_killer, options);
+                break Err(ConptyChildFailure::aborted(
+                    session_log::SESSION_LOG_FAILURE_PHASE_USER_ABORT,
+                    session_log::SESSION_LOG_FAILURE_REASON_CTRL_C,
+                    anyhow!("aborted by Ctrl-C"),
+                ));
+            }
+            Ok(ConptyControlEvent::InputBridgeFailed(err)) => {
+                kill_conpty_child(&mut child_killer, options);
+                break Err(ConptyChildFailure::failed(
+                    session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
+                    session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
+                    err,
+                ));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {}
+        }
+
+        if let Some(timeout) = options.startup_timeout {
+            if !first_output_received.load(Ordering::SeqCst) && wait_started.elapsed() >= timeout {
+                conpty_debug(
+                    options.debug,
+                    format_args!("startup timeout after {} seconds", timeout.as_secs()),
+                );
+                eprintln!();
+                eprintln!(
+                    "Error: no ConPTY output received within {} seconds.",
+                    timeout.as_secs()
+                );
+                eprintln!("Aborting ConPTY child...");
+                kill_conpty_child(&mut child_killer, options);
+                break Err(ConptyChildFailure::failed(
+                    session_log::SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT,
+                    session_log::SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT,
+                    anyhow!(
+                        "no ConPTY output received within {} seconds",
+                        timeout.as_secs()
+                    ),
+                ));
+            }
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    cancel.store(true, Ordering::SeqCst);
+    conpty_debug(options.debug, "closing pty handles");
+    let input_shutdown = join_conpty_input_thread(input_thread, Duration::from_millis(500));
+    conpty_debug(options.debug, "restoring terminal");
     drop(raw_mode);
-    let status = match status_result {
-        Ok(status) => status,
+    if let Err(err) = input_shutdown {
+        conpty_debug(
+            options.debug,
+            format_args!("input bridge shutdown incomplete: {err}"),
+        );
+    }
+
+    let status = match loop_result {
+        Ok(status) => {
+            join_conpty_wait_thread_after_status(wait_thread).map_err(|err| {
+                ConptyChildFailure::failed(
+                    session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
+                    session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
+                    err,
+                )
+            })?;
+            status
+        }
         Err(failure) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(writer);
-            drop(master);
-            let _ = join_conpty_output_thread(output_thread);
+            if let Err(err) =
+                join_conpty_wait_thread_best_effort(wait_thread, Duration::from_millis(1000))
+            {
+                conpty_debug(
+                    options.debug,
+                    format_args!("child wait shutdown incomplete: {err}"),
+                );
+            }
+            if let Err(err) =
+                join_conpty_output_thread_best_effort(output_thread, Duration::from_millis(1000))
+            {
+                conpty_debug(
+                    options.debug,
+                    format_args!("output reader shutdown incomplete: {err}"),
+                );
+            }
             return Err(failure);
         }
     };
-    drop(writer);
-    drop(master);
-    join_conpty_output_thread(output_thread).map_err(|err| {
+
+    join_conpty_output_thread(output_thread, Duration::from_millis(1000)).map_err(|err| {
         ConptyChildFailure::failed(
             session_log::SESSION_LOG_FAILURE_PHASE_OUTPUT_BRIDGE,
             session_log::SESSION_LOG_FAILURE_REASON_OUTPUT_BRIDGE_FAILED,
@@ -3483,8 +3544,215 @@ fn run_conpty_ssh_child(
     Ok(ConptyChildReport {
         status,
         first_output_received: first_output_received.load(Ordering::SeqCst),
-        initial_output_timed_out,
     })
+}
+
+#[cfg(windows)]
+fn spawn_conpty_output_thread(
+    mut reader: Box<dyn Read + Send>,
+    log_file: std::fs::File,
+    first_output_received: Arc<AtomicBool>,
+    options: ConptyRunOptions,
+) -> ConptyOutputThread {
+    let (result_tx, result_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = tee_conpty_output(&mut reader, log_file, first_output_received, options);
+        let _ = result_tx.send(result);
+    });
+    ConptyOutputThread { handle, result_rx }
+}
+
+#[cfg(windows)]
+fn spawn_conpty_input_thread(
+    mut writer: Box<dyn Write + Send>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    cancel: Arc<AtomicBool>,
+    control_tx: mpsc::Sender<ConptyControlEvent>,
+    options: ConptyRunOptions,
+) -> ConptyInputThread {
+    let (done_tx, done_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        conpty_debug(options.debug, "input bridge started");
+        let result =
+            run_conpty_input_bridge(&mut writer, master.as_ref(), &cancel, &control_tx, options);
+        if let Err(err) = result {
+            let _ = control_tx.send(ConptyControlEvent::InputBridgeFailed(err));
+        }
+        drop(writer);
+        drop(master);
+        let _ = done_tx.send(());
+    });
+    ConptyInputThread { handle, done_rx }
+}
+
+#[cfg(windows)]
+fn run_conpty_input_bridge(
+    writer: &mut Box<dyn Write + Send>,
+    master: &dyn portable_pty::MasterPty,
+    cancel: &Arc<AtomicBool>,
+    control_tx: &mpsc::Sender<ConptyControlEvent>,
+    options: ConptyRunOptions,
+) -> Result<()> {
+    while !cancel.load(Ordering::SeqCst) {
+        if !event::poll(Duration::from_millis(20))
+            .context("failed to poll terminal input for ConPTY")?
+        {
+            continue;
+        }
+        match event::read().context("failed to read terminal input for ConPTY")? {
+            Event::Key(key) => {
+                if key_event_is_ctrl_c(key) {
+                    conpty_debug(options.debug, "abort signal received");
+                    cancel.store(true, Ordering::SeqCst);
+                    let _ = control_tx.send(ConptyControlEvent::UserAbort);
+                    return Ok(());
+                }
+                if let Some(bytes) = key_event_to_pty_bytes(key) {
+                    writer
+                        .write_all(&bytes)
+                        .context("failed to write terminal input to ConPTY")?;
+                    writer
+                        .flush()
+                        .context("failed to flush terminal input to ConPTY")?;
+                }
+            }
+            Event::Resize(cols, rows) => {
+                master
+                    .resize(pty_size(cols, rows))
+                    .context("failed to resize ConPTY")?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_conpty_wait_thread(
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+    cancel: Arc<AtomicBool>,
+    options: ConptyRunOptions,
+) -> ConptyWaitThread {
+    let (result_tx, result_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        conpty_debug(options.debug, "child wait started");
+        let mut cancel_seen_at: Option<Instant> = None;
+        let result = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(err) => break Err(err),
+            }
+            if cancel.load(Ordering::SeqCst) {
+                let first_seen = cancel_seen_at.get_or_insert_with(Instant::now);
+                if first_seen.elapsed() >= Duration::from_secs(2) {
+                    break Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "ConPTY child did not exit after shutdown request",
+                    ));
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let _ = result_tx.send(result);
+    });
+    ConptyWaitThread { handle, result_rx }
+}
+
+#[cfg(windows)]
+fn kill_conpty_child(
+    child_killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    options: ConptyRunOptions,
+) {
+    conpty_debug(options.debug, "killing child");
+    if let Err(err) = child_killer.kill() {
+        conpty_debug(options.debug, format_args!("child kill failed: {err}"));
+    }
+}
+
+#[cfg(windows)]
+fn join_conpty_input_thread(thread: ConptyInputThread, timeout: Duration) -> Result<()> {
+    match thread.done_rx.recv_timeout(timeout) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => match thread.handle.join() {
+            Ok(()) => Ok(()),
+            Err(_) => Err(anyhow!("ConPTY input bridge thread panicked")),
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "ConPTY input bridge did not stop within {} ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn join_conpty_wait_thread_after_status(thread: ConptyWaitThread) -> Result<()> {
+    match thread.handle.join() {
+        Ok(()) => Ok(()),
+        Err(_) => Err(anyhow!("ConPTY child wait thread panicked")),
+    }
+}
+
+#[cfg(windows)]
+fn join_conpty_wait_thread_best_effort(
+    thread: ConptyWaitThread,
+    timeout: Duration,
+) -> Result<Option<portable_pty::ExitStatus>> {
+    match thread.result_rx.recv_timeout(timeout) {
+        Ok(Ok(status)) => {
+            match thread.handle.join() {
+                Ok(()) => {}
+                Err(_) => return Err(anyhow!("ConPTY child wait thread panicked")),
+            }
+            Ok(Some(status))
+        }
+        Ok(Err(err)) => {
+            match thread.handle.join() {
+                Ok(()) => {}
+                Err(_) => return Err(anyhow!("ConPTY child wait thread panicked")),
+            }
+            Err(anyhow!(err).context("ConPTY child wait failed during shutdown"))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => match thread.handle.join() {
+            Ok(()) => Ok(None),
+            Err(_) => Err(anyhow!("ConPTY child wait thread panicked")),
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "ConPTY child wait did not stop within {} ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn join_conpty_output_thread(output_thread: ConptyOutputThread, timeout: Duration) -> Result<u64> {
+    match output_thread.result_rx.recv_timeout(timeout) {
+        Ok(result) => {
+            match output_thread.handle.join() {
+                Ok(()) => {}
+                Err(_) => return Err(anyhow!("ConPTY output thread panicked")),
+            }
+            result.context("ConPTY output tee failed")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => match output_thread.handle.join() {
+            Ok(()) => Ok(0),
+            Err(_) => Err(anyhow!("ConPTY output thread panicked")),
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "ConPTY output reader did not stop within {} ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn join_conpty_output_thread_best_effort(
+    output_thread: ConptyOutputThread,
+    timeout: Duration,
+) -> Result<Option<u64>> {
+    match join_conpty_output_thread(output_thread, timeout) {
+        Ok(total) => Ok(Some(total)),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(windows)]
@@ -3504,10 +3772,7 @@ fn tee_conpty_output(
             Ok(n) => {
                 total_bytes += n as u64;
                 if !first_output_received.swap(true, Ordering::SeqCst) {
-                    conpty_debug(
-                        options.debug,
-                        format_args!("first output received: {n} bytes"),
-                    );
+                    conpty_debug(options.debug, format_args!("first output byte count: {n}"));
                 }
                 log_file.write_all(&buffer[..n])?;
                 log_file.flush()?;
@@ -3548,14 +3813,6 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
         cols: cols.max(1),
         pixel_width: 0,
         pixel_height: 0,
-    }
-}
-
-#[cfg(windows)]
-fn join_conpty_output_thread(output_thread: thread::JoinHandle<io::Result<u64>>) -> Result<u64> {
-    match output_thread.join() {
-        Ok(result) => result.context("ConPTY output tee failed"),
-        Err(_) => Err(anyhow!("ConPTY output thread panicked")),
     }
 }
 
@@ -4396,6 +4653,7 @@ mod tests {
                 command: SessionCommands::ConptyTest(args),
             }) => {
                 assert_eq!(args.profile_id, "p_test");
+                assert_eq!(args.startup_timeout_sec, 10);
                 assert!(!args.debug);
             }
             _ => panic!("expected session conpty-test command"),
@@ -4412,7 +4670,32 @@ mod tests {
                 command: SessionCommands::ConptyTest(args),
             }) => {
                 assert_eq!(args.profile_id, "p_test");
+                assert_eq!(args.startup_timeout_sec, 10);
                 assert!(args.debug);
+            }
+            _ => panic!("expected session conpty-test command"),
+        }
+    }
+
+    #[test]
+    fn parses_session_conpty_test_startup_timeout_command() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "session",
+            "conpty-test",
+            "p_test",
+            "--startup-timeout-sec",
+            "0",
+        ])
+        .expect("parses session conpty-test --startup-timeout-sec");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::ConptyTest(args),
+            }) => {
+                assert_eq!(args.profile_id, "p_test");
+                assert_eq!(args.startup_timeout_sec, 0);
+                assert_eq!(conpty_startup_timeout(args.startup_timeout_sec), None);
             }
             _ => panic!("expected session conpty-test command"),
         }
@@ -4452,6 +4735,7 @@ mod tests {
             &store,
             SessionConptyTestArgs {
                 profile_id: "p_test".to_string(),
+                startup_timeout_sec: 10,
                 debug: false,
             },
         )
@@ -4605,6 +4889,27 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "backend_warning: conpty_backend_is_experimental_poc"));
+    }
+
+    #[test]
+    fn session_log_path_display_ignores_warning_text() {
+        assert_eq!(
+            format_session_log_path(Some(Path::new(
+                "not selected by auto and is not integrated with the TUI."
+            ))),
+            "-"
+        );
+        assert_eq!(
+            format_session_log_path(Some(Path::new("sl_abc123.log"))),
+            "sl_abc123.log"
+        );
+        assert_eq!(format_session_log_path(None), "-");
+    }
+
+    #[test]
+    fn session_list_table_cells_are_bounded() {
+        assert_eq!(table_cell("completed exit 0", 18), "completed exit 0");
+        assert_eq!(table_cell("abcdefghijklmnopqrstuvwxyz", 8), "abcdefg~");
     }
 
     #[test]

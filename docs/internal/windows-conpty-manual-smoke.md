@@ -12,6 +12,14 @@ For sanitized startup diagnostics:
 .\target\release\td.exe session conpty-test <profile_id> --debug
 ```
 
+The startup timeout defaults to 10 seconds. Use this only for controlled
+timeout/abort checks:
+
+```powershell
+.\target\release\td.exe session conpty-test <profile_id> --startup-timeout-sec 10
+.\target\release\td.exe session conpty-test <profile_id> --debug --startup-timeout-sec 0
+```
+
 Do not use this checklist to promote ConPTY to `auto`, default session logging,
 or the TUI `s` path. The goal is to collect enough manual evidence to decide
 whether the PoC can continue.
@@ -77,10 +85,17 @@ Record only these debug categories if they appear:
 - backend
 - log path
 - child spawn phase
+- child spawned
 - output reader started
 - input bridge started
 - child wait started
 - first output byte count
+- startup timeout
+- abort signal received
+- killing child
+- closing pty handles
+- writing aborted metadata
+- restoring terminal
 - exit phase or failure phase
 
 Confirm debug output still does not include SSH auth args, a full command
@@ -89,12 +104,14 @@ dump.
 
 ## Initial Output Timeout Check
 
-If no ConPTY output appears for 10 seconds, TeraDock should print:
+If no ConPTY output appears for the configured startup timeout, TeraDock should
+abort the child rather than waiting forever. With the default 10 seconds,
+TeraDock should print:
 
 ```text
-Warning: no ConPTY output received for 10 seconds.
-SSH may be waiting for input, blocked, or the output bridge may be stuck.
-Press Ctrl-C to abort.
+Error: no ConPTY output received within 10 seconds.
+Aborting ConPTY child...
+Session metadata saved with status=failed.
 ```
 
 If this happens, paste into the smoke report:
@@ -102,12 +119,13 @@ If this happens, paste into the smoke report:
 - The startup phase lines.
 - Whether debug had reached `output reader started`, `input bridge started`,
   and `child wait started`.
-- Whether any `first output received: N bytes` debug line appeared.
+- Whether any `first output byte count: N` debug line appeared.
 - Whether `ssh.exe` remained running after abort or exit.
+- Whether PowerShell accepts input immediately after the abort.
+- Whether the terminal mode is restored.
 - The saved metadata JSON.
 
-If the child exits after the timeout without any ConPTY output, metadata should
-include:
+Metadata should include:
 
 - `status=failed`
 - `failure_phase=waiting_initial_output`
@@ -151,6 +169,10 @@ Confirm:
 - Typed commands appear in the log only when the remote side echoes them.
 - ANSI escape sequences are acceptable as preserved terminal bytes.
 - `td session list`, `show`, and `path` work for the saved session.
+- `td session list` keeps the `log_path` column to a log path only; backend
+  warnings or notes do not appear in that column.
+- `td session show <session_id>` displays backend warnings and capture notes.
+- Sessions without a log path show `-` in the list/show log path field.
 - Metadata has `backend=conpty`.
 - Metadata has the expected `exit_code`.
 - Metadata has `content_capture=best_effort`.
@@ -161,7 +183,9 @@ Confirm:
 
 ## Ctrl-C Check
 
-Run a harmless remote command that can be interrupted:
+For this PoC, Ctrl-C is TeraDock emergency abort, not a key to forward to the
+SSH child. Run a command that can safely be killed or use a test profile that
+stalls before first output:
 
 ```sh
 sleep 30
@@ -171,19 +195,24 @@ Press `Ctrl-C`.
 
 Confirm:
 
-- After SSH output has appeared, the remote command is interrupted or the SSH
-  session exits in an understandable way.
-- The SSH session remains usable or exits in an understandable way.
+- TeraDock prints abort/shutdown diagnostics in `--debug` mode.
+- The ConPTY child is killed.
+- PowerShell returns without needing to close the terminal window.
 - The local terminal accepts input after the test.
 - The local terminal is not left in raw mode.
-- A later `exit` returns to PowerShell.
+- `td session list` and `td session show <session_id>` can inspect the aborted
+  session metadata.
 
-For the initial-output-timeout path, press `Ctrl-C` after the warning.
 Metadata should include:
 
 - `status=aborted`
 - `failure_phase=user_abort`
 - `failure_reason=ctrl_c`
+- `content_capture=best_effort`
+- `content_capture_reliable=false`
+- `backend_warning=conpty_backend_is_experimental_poc`
+
+If `exit_code` is unavailable after abort, `null` is acceptable.
 
 ## Resize Check
 
@@ -240,6 +269,8 @@ Confirm:
 - Failure metadata includes `failure_phase` and `failure_reason`.
 - The terminal is usable after failure.
 - No child `ssh.exe` process or output thread remains after exit.
+- Thread shutdown failures are reported only as sanitized debug/status text and
+  do not prevent terminal restoration.
 - Metadata does not include auth args, full command strings, private key paths,
   passwords, secrets, tokens, or a full environment dump.
 
