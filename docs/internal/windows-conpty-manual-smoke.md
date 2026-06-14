@@ -17,6 +17,7 @@ timeout/abort checks:
 
 ```powershell
 .\target\release\td.exe session conpty-test <profile_id> --startup-timeout-sec 10
+.\target\release\td.exe session conpty-test <profile_id> --debug --startup-timeout-sec 10
 .\target\release\td.exe session conpty-test <profile_id> --debug --startup-timeout-sec 0
 ```
 
@@ -76,6 +77,7 @@ Run the sanitized debug path:
 
 ```powershell
 .\target\release\td.exe session conpty-test <profile_id> --debug
+.\target\release\td.exe session conpty-test <profile_id> --debug --startup-timeout-sec 10
 ```
 
 Record only these debug categories if they appear:
@@ -89,13 +91,18 @@ Record only these debug categories if they appear:
 - output reader started
 - input bridge started
 - child wait started
-- first output byte count
-- startup timeout
-- abort signal received
+- startup timeout armed
+- first output received or not
+- user abort received
 - killing child
-- closing pty handles
+- child killed
+- child exited
+- dropping pty handles
+- joining threads best-effort
+- thread shutdown status
 - writing aborted metadata
-- restoring terminal
+- metadata write result
+- terminal restored
 - exit phase or failure phase
 
 Confirm debug output still does not include SSH auth args, a full command
@@ -114,12 +121,16 @@ Aborting ConPTY child...
 Session metadata saved with status=failed.
 ```
 
+The command must return to PowerShell in about 10 seconds when no first output
+byte is received. Treat a run that stays at `Waiting for SSH output...` longer
+than the configured timeout as a failure.
+
 If this happens, paste into the smoke report:
 
 - The startup phase lines.
 - Whether debug had reached `output reader started`, `input bridge started`,
   and `child wait started`.
-- Whether any `first output byte count: N` debug line appeared.
+- Whether any `first output received: N bytes` debug line appeared.
 - Whether `ssh.exe` remained running after abort or exit.
 - Whether PowerShell accepts input immediately after the abort.
 - Whether the terminal mode is restored.
@@ -158,6 +169,7 @@ After the session exits:
 .\target\release\td.exe session show <session_id>
 .\target\release\td.exe session show <session_id> --tail 50
 .\target\release\td.exe session path <session_id>
+Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
 Get-Content <log_path>
 Get-Content <metadata_path>
 ```
@@ -172,7 +184,7 @@ Confirm:
 - `td session list` keeps the `log_path` column to a log path only; backend
   warnings or notes do not appear in that column.
 - `td session show <session_id>` displays backend warnings and capture notes.
-- Sessions without a log path show `-` in the list/show log path field.
+- Sessions without a log path show `<none>` in the list/show log path field.
 - Metadata has `backend=conpty`.
 - Metadata has the expected `exit_code`.
 - Metadata has `content_capture=best_effort`.
@@ -202,6 +214,9 @@ Confirm:
 - The local terminal is not left in raw mode.
 - `td session list` and `td session show <session_id>` can inspect the aborted
   session metadata.
+- `Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue` does not
+  show a leftover `td.exe` or `ssh.exe` from the aborted ConPTY run. Existing
+  parent PowerShell processes are expected.
 
 Metadata should include:
 
