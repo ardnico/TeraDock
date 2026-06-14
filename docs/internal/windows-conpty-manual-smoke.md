@@ -6,6 +6,12 @@ This checklist is for the explicit Windows-only ConPTY proof of concept:
 .\target\release\td.exe session conpty-test <profile_id>
 ```
 
+For sanitized startup diagnostics:
+
+```powershell
+.\target\release\td.exe session conpty-test <profile_id> --debug
+```
+
 Do not use this checklist to promote ConPTY to `auto`, default session logging,
 or the TUI `s` path. The goal is to collect enough manual evidence to decide
 whether the PoC can continue.
@@ -51,8 +57,64 @@ Record:
 - Full command used.
 - Whether the warning about experimental ConPTY logging is shown.
 - The printed log path.
+- The startup phase lines through `Waiting for SSH output...`.
 - Whether login succeeds.
 - Any auth prompt behavior.
+- Confirm normal output does not include `TRACE adding SYS env`, full
+  environment variables, PATH dumps, auth arguments, full command strings,
+  private key paths, passwords, tokens, or secrets.
+
+Run the sanitized debug path:
+
+```powershell
+.\target\release\td.exe session conpty-test <profile_id> --debug
+```
+
+Record only these debug categories if they appear:
+
+- selected profile id
+- resolved SSH client path
+- backend
+- log path
+- child spawn phase
+- output reader started
+- input bridge started
+- child wait started
+- first output byte count
+- exit phase or failure phase
+
+Confirm debug output still does not include SSH auth args, a full command
+string, private key paths, passwords, tokens, secrets, or a full environment
+dump.
+
+## Initial Output Timeout Check
+
+If no ConPTY output appears for 10 seconds, TeraDock should print:
+
+```text
+Warning: no ConPTY output received for 10 seconds.
+SSH may be waiting for input, blocked, or the output bridge may be stuck.
+Press Ctrl-C to abort.
+```
+
+If this happens, paste into the smoke report:
+
+- The startup phase lines.
+- Whether debug had reached `output reader started`, `input bridge started`,
+  and `child wait started`.
+- Whether any `first output received: N bytes` debug line appeared.
+- Whether `ssh.exe` remained running after abort or exit.
+- The saved metadata JSON.
+
+If the child exits after the timeout without any ConPTY output, metadata should
+include:
+
+- `status=failed`
+- `failure_phase=waiting_initial_output`
+- `failure_reason=initial_output_timeout`
+- `content_capture=best_effort`
+- `content_capture_reliable=false`
+- `backend_warning=conpty_backend_is_experimental_poc`
 
 ## Commands To Type On The SSH Host
 
@@ -109,11 +171,19 @@ Press `Ctrl-C`.
 
 Confirm:
 
-- The remote command is interrupted.
+- After SSH output has appeared, the remote command is interrupted or the SSH
+  session exits in an understandable way.
 - The SSH session remains usable or exits in an understandable way.
 - The local terminal accepts input after the test.
 - The local terminal is not left in raw mode.
 - A later `exit` returns to PowerShell.
+
+For the initial-output-timeout path, press `Ctrl-C` after the warning.
+Metadata should include:
+
+- `status=aborted`
+- `failure_phase=user_abort`
+- `failure_reason=ctrl_c`
 
 ## Resize Check
 
@@ -165,10 +235,13 @@ Confirm:
 
 - The error is visible.
 - The process exits or can be exited cleanly.
-- Metadata is saved only when the ConPTY child ran far enough to create a
-  session log.
+- Metadata is saved for spawn, timeout, and abort failures when the metadata
+  sidecar can be written.
+- Failure metadata includes `failure_phase` and `failure_reason`.
 - The terminal is usable after failure.
 - No child `ssh.exe` process or output thread remains after exit.
+- Metadata does not include auth args, full command strings, private key paths,
+  passwords, secrets, tokens, or a full environment dump.
 
 ## GO / NO-GO Criteria
 
@@ -198,3 +271,5 @@ No-Go:
 - `Ctrl-C` makes the terminal unrecoverable.
 - Metadata contains secrets, auth args, full command strings, or private key
   paths.
+- Normal or debug output includes `TRACE adding SYS env` or a full environment
+  dump.

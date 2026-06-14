@@ -6,6 +6,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 #[cfg(windows)]
 use portable_pty::{CommandBuilder, PtySize};
 use rusqlite::Connection;
+use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,8 +33,8 @@ use tdcore::profile::{
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::session_log::{
     self, SessionLogFiles, SessionLogPlan, SessionLogReference, SESSION_LOG_BACKEND_CONPTY,
-    SESSION_LOG_REASON_CONPTY_LAUNCH_FAILED, SESSION_LOG_REASON_METADATA_WRITE_FAILED,
-    SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED, SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
+    SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
 };
 use tdcore::settings;
 use tdcore::settings::SettingScope;
@@ -45,6 +46,7 @@ use tdcore::tunnel::{ForwardKind, ForwardStore, NewSession, SessionKind, Session
 use tdcore::util::now_ms;
 use time::OffsetDateTime;
 use tracing::{info, warn};
+use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tui as tdtui;
 use wait_timeout::ChildExt;
@@ -293,13 +295,21 @@ enum SessionCommands {
     /// Diagnose interactive SSH session logging
     Doctor(SessionDoctorArgs),
     /// Run an experimental Windows ConPTY SSH logging proof of concept
-    ConptyTest { profile_id: String },
+    ConptyTest(SessionConptyTestArgs),
     /// List saved interactive SSH session logs
     List(SessionListArgs),
     /// Show metadata for a saved interactive SSH session log
     Show(SessionShowArgs),
     /// Print the terminal log path for a saved session
     Path { session_id: String },
+}
+
+#[derive(Debug, Args)]
+struct SessionConptyTestArgs {
+    profile_id: String,
+    /// Print sanitized ConPTY PoC startup and bridge phase diagnostics
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1973,9 +1983,9 @@ fn handle_recent(limit: usize, json: bool) -> Result<()> {
 
 fn handle_session(cmd: SessionCommands) -> Result<()> {
     match cmd {
-        SessionCommands::ConptyTest { profile_id } => {
+        SessionCommands::ConptyTest(args) => {
             let store = ProfileStore::new(db::init_connection()?);
-            handle_session_conpty_test(&store, profile_id)
+            handle_session_conpty_test(&store, args)
         }
         SessionCommands::Doctor(args) => {
             let conn = db::init_connection()?;
@@ -2002,14 +2012,16 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn handle_session_conpty_test(_store: &ProfileStore, _profile_id: String) -> Result<()> {
+fn handle_session_conpty_test(_store: &ProfileStore, _args: SessionConptyTestArgs) -> Result<()> {
     Err(anyhow!(
         "unsupported: ConPTY session logging is only available on Windows"
     ))
 }
 
 #[cfg(windows)]
-fn handle_session_conpty_test(store: &ProfileStore, profile_id: String) -> Result<()> {
+fn handle_session_conpty_test(store: &ProfileStore, args: SessionConptyTestArgs) -> Result<()> {
+    let debug = args.debug || teradock_debug_enabled();
+    let profile_id = args.profile_id;
     let profile = store
         .get(&profile_id)?
         .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
@@ -2020,15 +2032,53 @@ fn handle_session_conpty_test(store: &ProfileStore, profile_id: String) -> Resul
     }
     let invocation = build_conpty_test_invocation(store, &profile_id)?;
     emit_ssh_auth_messages(&invocation.auth_context);
-    println!("ConPTY session logging PoC is experimental and not selected by auto.");
+    println!("ConPTY session logging PoC is experimental.");
+    println!("ConPTY is not selected by auto and is not integrated with the TUI.");
     println!(
         "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
     );
+    println!("Starting ConPTY SSH session...");
+    println!(
+        "Profile: {} ({}@{}:{})",
+        invocation.target.profile_id,
+        invocation.target.user,
+        invocation.target.host,
+        invocation.target.port
+    );
     let files = session_log::prepare_conpty_session_files(store.conn())?;
     println!("Log path: {}", files.log_path.display());
+    conpty_debug(
+        debug,
+        format_args!("selected profile id: {}", invocation.target.profile_id),
+    );
+    conpty_debug(
+        debug,
+        format_args!(
+            "resolved ssh client path: {}",
+            invocation.client_path.display()
+        ),
+    );
+    conpty_debug(debug, "backend: conpty");
+    conpty_debug(
+        debug,
+        format_args!("log path: {}", files.log_path.display()),
+    );
+    println!(
+        "Spawning {}...",
+        invocation
+            .client_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ssh.exe")
+    );
+    println!("Waiting for SSH output...");
     io::stdout().flush()?;
 
-    match run_conpty_logged_cli_ssh(&invocation, &files) {
+    let options = ConptyRunOptions {
+        debug,
+        initial_output_timeout: Duration::from_secs(10),
+    };
+    match run_conpty_logged_cli_ssh(&invocation, &files, options) {
         CliSshRunResult::Completed(outcome) => {
             store.touch_last_used(&invocation.target.profile_id)?;
             let entry = oplog::OpLogEntry {
@@ -2093,6 +2143,22 @@ fn build_conpty_test_invocation(store: &ProfileStore, profile_id: &str) -> Resul
         },
     )
     .map_err(Into::into)
+}
+
+fn teradock_debug_enabled() -> bool {
+    match std::env::var("TERADOCK_DEBUG") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn conpty_debug(enabled: bool, message: impl Display) {
+    if enabled {
+        eprintln!("debug: {message}");
+    }
 }
 
 fn handle_session_doctor(conn: &Connection, args: SessionDoctorArgs) -> Result<()> {
@@ -2252,6 +2318,12 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
     println!("status: {}", metadata.status);
     if let Some(reason) = &metadata.reason {
         println!("reason: {reason}");
+    }
+    if let Some(phase) = &metadata.failure_phase {
+        println!("failure_phase: {phase}");
+    }
+    if let Some(reason) = &metadata.failure_reason {
+        println!("failure_reason: {reason}");
     }
     println!(
         "log_path: {}",
@@ -3073,18 +3145,100 @@ fn run_powershell_transcript_cli_ssh(
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy)]
+struct ConptyRunOptions {
+    debug: bool,
+    initial_output_timeout: Duration,
+}
+
+#[cfg(windows)]
+struct ConptyChildReport {
+    status: portable_pty::ExitStatus,
+    first_output_received: bool,
+    initial_output_timed_out: bool,
+}
+
+#[cfg(windows)]
+struct ConptyChildFailure {
+    status: &'static str,
+    phase: &'static str,
+    reason: &'static str,
+    error: anyhow::Error,
+}
+
+#[cfg(windows)]
+impl ConptyChildFailure {
+    fn failed(phase: &'static str, reason: &'static str, error: anyhow::Error) -> Self {
+        Self {
+            status: session_log::SESSION_LOG_STATUS_FAILED,
+            phase,
+            reason,
+            error,
+        }
+    }
+
+    fn aborted(phase: &'static str, reason: &'static str, error: anyhow::Error) -> Self {
+        Self {
+            status: session_log::SESSION_LOG_STATUS_ABORTED,
+            phase,
+            reason,
+            error,
+        }
+    }
+
+    fn into_error(self) -> anyhow::Error {
+        anyhow!(
+            "ConPTY SSH {status} during {phase}: {reason}: {error}",
+            status = self.status,
+            phase = self.phase,
+            reason = self.reason,
+            error = self.error
+        )
+    }
+}
+
+#[cfg(windows)]
 fn run_conpty_logged_cli_ssh(
     invocation: &SshInvocation,
     files: &SessionLogFiles,
+    options: ConptyRunOptions,
 ) -> CliSshRunResult {
     let log_started_at = now_ms();
     let started = Instant::now();
-    let status = run_conpty_ssh_child(invocation, files).context("failed to run ConPTY SSH");
+    let status = run_conpty_ssh_child(invocation, files, options);
     let duration_ms = started.elapsed().as_millis() as i64;
 
     match status {
-        Ok(status) => {
-            let exit_code = Some(conpty_exit_code(&status));
+        Ok(report) => {
+            let exit_code_value = conpty_exit_code(&report.status);
+            let exit_code = Some(exit_code_value);
+            if report.initial_output_timed_out && !report.first_output_received {
+                conpty_debug(options.debug, "failure phase: waiting_initial_output");
+                let session_log = match session_log::complete_conpty_failure_session(
+                    files,
+                    &invocation.target,
+                    log_started_at,
+                    duration_ms,
+                    session_log::SessionLogFailureMetadata {
+                        status: session_log::SESSION_LOG_STATUS_FAILED,
+                        failure_phase:
+                            session_log::SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT,
+                        failure_reason:
+                            session_log::SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT,
+                        exit_code,
+                    },
+                ) {
+                    Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                    Err(err) => SessionLogReference::not_saved(format!(
+                        "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                    )),
+                };
+                return CliSshRunResult::LaunchFailed {
+                    error: anyhow!("ConPTY SSH ended without output after initial output timeout"),
+                    duration_ms,
+                    session_log,
+                };
+            }
             let session_log = match session_log::complete_conpty_session(
                 files,
                 &invocation.target,
@@ -3097,18 +3251,45 @@ fn run_conpty_logged_cli_ssh(
                     "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
                 )),
             };
+            conpty_debug(
+                options.debug,
+                format_args!("exit phase: code {exit_code_value}"),
+            );
             CliSshRunResult::Completed(CliSshOutcome {
-                ok: status.success(),
+                ok: report.status.success(),
                 exit_code,
                 duration_ms,
                 session_log,
             })
         }
-        Err(error) => CliSshRunResult::LaunchFailed {
-            error,
-            duration_ms,
-            session_log: SessionLogReference::not_saved(SESSION_LOG_REASON_CONPTY_LAUNCH_FAILED),
-        },
+        Err(failure) => {
+            conpty_debug(
+                options.debug,
+                format_args!("failure phase: {} ({})", failure.phase, failure.reason),
+            );
+            let session_log = match session_log::complete_conpty_failure_session(
+                files,
+                &invocation.target,
+                log_started_at,
+                duration_ms,
+                session_log::SessionLogFailureMetadata {
+                    status: failure.status,
+                    failure_phase: failure.phase,
+                    failure_reason: failure.reason,
+                    exit_code: None,
+                },
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            CliSshRunResult::LaunchFailed {
+                error: failure.into_error(),
+                duration_ms,
+                session_log,
+            }
+        }
     }
 }
 
@@ -3116,101 +3297,242 @@ fn run_conpty_logged_cli_ssh(
 fn run_conpty_ssh_child(
     invocation: &SshInvocation,
     files: &SessionLogFiles,
-) -> Result<portable_pty::ExitStatus> {
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system.openpty(current_pty_size())?;
-    let master = pair.master;
-    let slave = pair.slave;
-    let mut reader = master.try_clone_reader()?;
-    let mut writer = master.take_writer()?;
+    options: ConptyRunOptions,
+) -> std::result::Result<ConptyChildReport, ConptyChildFailure> {
+    conpty_debug(options.debug, "child spawn phase: create log");
     let log_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&files.log_path)
-        .with_context(|| format!("failed to create session log {}", files.log_path.display()))?;
+        .map_err(|err| {
+            ConptyChildFailure::failed(
+                session_log::SESSION_LOG_FAILURE_PHASE_CREATE_LOG,
+                session_log::SESSION_LOG_FAILURE_REASON_CREATE_LOG_FAILED,
+                err.into(),
+            )
+        })?;
+    conpty_debug(options.debug, "child spawn phase: open pty");
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system.openpty(current_pty_size()).map_err(|err| {
+        ConptyChildFailure::failed(
+            session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
+            session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
+            err,
+        )
+    })?;
+    let master = pair.master;
+    let slave = pair.slave;
+    let mut reader = master.try_clone_reader().map_err(|err| {
+        ConptyChildFailure::failed(
+            session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
+            session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
+            err,
+        )
+    })?;
+    let mut writer = master.take_writer().map_err(|err| {
+        ConptyChildFailure::failed(
+            session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
+            session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
+            err,
+        )
+    })?;
+    conpty_debug(options.debug, "child spawn phase: enter raw mode");
     let raw_mode = match RawModeGuard::enter() {
         Ok(guard) => guard,
         Err(err) => {
             drop(log_file);
-            let _ = std::fs::remove_file(&files.log_path);
-            return Err(err);
+            return Err(ConptyChildFailure::failed(
+                session_log::SESSION_LOG_FAILURE_PHASE_ENTER_RAW_MODE,
+                session_log::SESSION_LOG_FAILURE_REASON_RAW_MODE_FAILED,
+                err,
+            ));
         }
     };
     let mut cmd = CommandBuilder::new(invocation.client_path.as_os_str());
     cmd.args(&invocation.args);
+    conpty_debug(options.debug, "child spawn phase: spawn child");
     let mut child = match slave.spawn_command(cmd) {
         Ok(child) => child,
         Err(err) => {
             drop(raw_mode);
             drop(log_file);
-            let _ = std::fs::remove_file(&files.log_path);
-            return Err(err);
+            return Err(ConptyChildFailure::failed(
+                session_log::SESSION_LOG_FAILURE_PHASE_SPAWN_CHILD,
+                session_log::SESSION_LOG_FAILURE_REASON_SPAWN_CHILD_FAILED,
+                err,
+            ));
         }
     };
     drop(slave);
 
-    let output_thread = thread::spawn(move || tee_conpty_output(&mut reader, log_file));
+    let first_output_received = Arc::new(AtomicBool::new(false));
+    let output_first_byte = Arc::clone(&first_output_received);
+    let output_thread =
+        thread::spawn(move || tee_conpty_output(&mut reader, log_file, output_first_byte, options));
 
-    let status_result = (|| -> Result<portable_pty::ExitStatus> {
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Ok(status);
-            }
-            if event::poll(Duration::from_millis(20))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if let Some(bytes) = key_event_to_pty_bytes(key) {
-                            writer.write_all(&bytes)?;
-                            writer.flush()?;
+    conpty_debug(options.debug, "input bridge started");
+    conpty_debug(options.debug, "child wait started");
+    let wait_started = Instant::now();
+    let mut initial_output_timed_out = false;
+    let status_result =
+        (|| -> std::result::Result<portable_pty::ExitStatus, ConptyChildFailure> {
+            loop {
+                if let Some(status) = child.try_wait().map_err(|err| {
+                    ConptyChildFailure::failed(
+                        session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
+                        session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
+                        err.into(),
+                    )
+                })? {
+                    return Ok(status);
+                }
+                if !first_output_received.load(Ordering::SeqCst)
+                    && !initial_output_timed_out
+                    && wait_started.elapsed() >= options.initial_output_timeout
+                {
+                    initial_output_timed_out = true;
+                    eprintln!();
+                    eprintln!(
+                        "Warning: no ConPTY output received for {} seconds.",
+                        options.initial_output_timeout.as_secs()
+                    );
+                    eprintln!(
+                        "SSH may be waiting for input, blocked, or the output bridge may be stuck."
+                    );
+                    eprintln!("Press Ctrl-C to abort.");
+                }
+                if event::poll(Duration::from_millis(20)).map_err(|err| {
+                    ConptyChildFailure::failed(
+                        session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
+                        session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
+                        err.into(),
+                    )
+                })? {
+                    match event::read().map_err(|err| {
+                        ConptyChildFailure::failed(
+                            session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
+                            session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
+                            err.into(),
+                        )
+                    })? {
+                        Event::Key(key) => {
+                            if initial_output_timed_out
+                                && !first_output_received.load(Ordering::SeqCst)
+                                && key_event_is_ctrl_c(key)
+                            {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(ConptyChildFailure::aborted(
+                                    session_log::SESSION_LOG_FAILURE_PHASE_USER_ABORT,
+                                    session_log::SESSION_LOG_FAILURE_REASON_CTRL_C,
+                                    anyhow!("aborted by Ctrl-C before initial ConPTY output"),
+                                ));
+                            }
+                            if let Some(bytes) = key_event_to_pty_bytes(key) {
+                                writer.write_all(&bytes).map_err(|err| {
+                                    ConptyChildFailure::failed(
+                                        session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
+                                        session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
+                                        err.into(),
+                                    )
+                                })?;
+                                writer.flush().map_err(|err| {
+                                    ConptyChildFailure::failed(
+                                        session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
+                                        session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
+                                        err.into(),
+                                    )
+                                })?;
+                            }
                         }
+                        Event::Resize(cols, rows) => {
+                            master.resize(pty_size(cols, rows)).map_err(|err| {
+                                ConptyChildFailure::failed(
+                                    session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
+                                    session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
+                                    err,
+                                )
+                            })?;
+                        }
+                        _ => {}
                     }
-                    Event::Resize(cols, rows) => {
-                        master.resize(pty_size(cols, rows))?;
-                    }
-                    _ => {}
                 }
             }
-        }
-    })();
+        })();
     drop(raw_mode);
     let status = match status_result {
         Ok(status) => status,
-        Err(err) => {
+        Err(failure) => {
             let _ = child.kill();
             let _ = child.wait();
             drop(writer);
             drop(master);
             let _ = join_conpty_output_thread(output_thread);
-            return Err(err.context("ConPTY input bridge failed"));
+            return Err(failure);
         }
     };
     drop(writer);
     drop(master);
-    join_conpty_output_thread(output_thread)?;
-    Ok(status)
+    join_conpty_output_thread(output_thread).map_err(|err| {
+        ConptyChildFailure::failed(
+            session_log::SESSION_LOG_FAILURE_PHASE_OUTPUT_BRIDGE,
+            session_log::SESSION_LOG_FAILURE_REASON_OUTPUT_BRIDGE_FAILED,
+            err,
+        )
+    })?;
+    Ok(ConptyChildReport {
+        status,
+        first_output_received: first_output_received.load(Ordering::SeqCst),
+        initial_output_timed_out,
+    })
 }
 
 #[cfg(windows)]
 fn tee_conpty_output(
     reader: &mut Box<dyn Read + Send>,
     mut log_file: std::fs::File,
-) -> io::Result<()> {
+    first_output_received: Arc<AtomicBool>,
+    options: ConptyRunOptions,
+) -> io::Result<u64> {
+    conpty_debug(options.debug, "output reader started");
     let mut stdout = io::stdout();
     let mut buffer = [0_u8; 8192];
+    let mut total_bytes = 0_u64;
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
+                total_bytes += n as u64;
+                if !first_output_received.swap(true, Ordering::SeqCst) {
+                    conpty_debug(
+                        options.debug,
+                        format_args!("first output received: {n} bytes"),
+                    );
+                }
                 log_file.write_all(&buffer[..n])?;
                 log_file.flush()?;
                 stdout.write_all(&buffer[..n])?;
                 stdout.flush()?;
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                break
+            }
             Err(err) => return Err(err),
         }
     }
-    Ok(())
+    conpty_debug(
+        options.debug,
+        format_args!("output reader ended: {total_bytes} bytes"),
+    );
+    Ok(total_bytes)
 }
 
 #[cfg(windows)]
@@ -3230,7 +3552,7 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
 }
 
 #[cfg(windows)]
-fn join_conpty_output_thread(output_thread: thread::JoinHandle<io::Result<()>>) -> Result<()> {
+fn join_conpty_output_thread(output_thread: thread::JoinHandle<io::Result<u64>>) -> Result<u64> {
     match output_thread.join() {
         Ok(result) => result.context("ConPTY output tee failed"),
         Err(_) => Err(anyhow!("ConPTY output thread panicked")),
@@ -3271,6 +3593,13 @@ fn key_event_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
         _ => None,
     }
+}
+
+#[cfg(windows)]
+fn key_event_is_ctrl_c(key: KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 #[cfg(windows)]
@@ -3682,14 +4011,17 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
     let logs_dir = paths::logs_dir()?;
     let file_appender = tracing_appender::rolling::never(logs_dir, "teradock.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let debug_enabled = teradock_debug_enabled();
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_target(true)
-        .with_writer(non_blocking);
+        .with_writer(non_blocking)
+        .with_filter(teradock_log_filter(debug_enabled, false)?);
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
-        .with_writer(std::io::stderr);
+        .with_writer(std::io::stderr)
+        .with_filter(teradock_log_filter(debug_enabled, true)?);
 
     tracing_subscriber::registry()
         .with(stdout_layer)
@@ -3698,6 +4030,16 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .context("failed to initialize logging")?;
 
     Ok(guard)
+}
+
+fn teradock_log_filter(debug_enabled: bool, console: bool) -> Result<EnvFilter> {
+    let directive = match (debug_enabled, console) {
+        (true, true) => "warn,td=debug,tdcore=debug",
+        (true, false) => "warn,td=debug,tdcore=debug",
+        (false, true) => "warn",
+        (false, false) => "warn,td=info,tdcore=info",
+    };
+    EnvFilter::try_new(directive).context("failed to configure tracing filter")
 }
 
 fn prompt_password(prompt: &str) -> Result<String> {
@@ -4051,9 +4393,26 @@ mod tests {
 
         match cli.command {
             Some(Commands::Session {
-                command: SessionCommands::ConptyTest { profile_id },
+                command: SessionCommands::ConptyTest(args),
             }) => {
-                assert_eq!(profile_id, "p_test");
+                assert_eq!(args.profile_id, "p_test");
+                assert!(!args.debug);
+            }
+            _ => panic!("expected session conpty-test command"),
+        }
+    }
+
+    #[test]
+    fn parses_session_conpty_test_debug_command() {
+        let cli = Cli::try_parse_from(["td", "session", "conpty-test", "p_test", "--debug"])
+            .expect("parses session conpty-test --debug");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::ConptyTest(args),
+            }) => {
+                assert_eq!(args.profile_id, "p_test");
+                assert!(args.debug);
             }
             _ => panic!("expected session conpty-test command"),
         }
@@ -4089,7 +4448,14 @@ mod tests {
     fn conpty_test_is_unsupported_on_non_windows() {
         let store = ProfileStore::new(db::init_in_memory().unwrap());
 
-        let err = handle_session_conpty_test(&store, "p_test".to_string()).unwrap_err();
+        let err = handle_session_conpty_test(
+            &store,
+            SessionConptyTestArgs {
+                profile_id: "p_test".to_string(),
+                debug: false,
+            },
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("unsupported"));
     }
@@ -4173,6 +4539,8 @@ mod tests {
             metadata_path: PathBuf::from("sl_abc123.json"),
             status: "completed".to_string(),
             reason: None,
+            failure_phase: None,
+            failure_reason: None,
             content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
             content_capture_reliable: Some(false),
             backend_warning: Some(
@@ -4220,6 +4588,8 @@ mod tests {
             metadata_path: PathBuf::from("sl_abc123.json"),
             status: "completed".to_string(),
             reason: None,
+            failure_phase: None,
+            failure_reason: None,
             content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
             content_capture_reliable: Some(false),
             backend_warning: Some(

@@ -41,6 +41,26 @@ pub const SESSION_LOG_REASON_METADATA_WRITE_FAILED: &str = "metadata_write_faile
 pub const SESSION_LOG_REASON_CONPTY_POC_ONLY: &str = "conpty_backend_poc_only";
 pub const SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY: &str =
     "windows_terminal_content_logging_requires_conpty";
+pub const SESSION_LOG_STATUS_FAILED: &str = "failed";
+pub const SESSION_LOG_STATUS_ABORTED: &str = "aborted";
+pub const SESSION_LOG_FAILURE_PHASE_CREATE_LOG: &str = "create_log";
+pub const SESSION_LOG_FAILURE_PHASE_OPEN_PTY: &str = "open_pty";
+pub const SESSION_LOG_FAILURE_PHASE_ENTER_RAW_MODE: &str = "enter_raw_mode";
+pub const SESSION_LOG_FAILURE_PHASE_SPAWN_CHILD: &str = "spawn_child";
+pub const SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE: &str = "input_bridge";
+pub const SESSION_LOG_FAILURE_PHASE_OUTPUT_BRIDGE: &str = "output_bridge";
+pub const SESSION_LOG_FAILURE_PHASE_CHILD_WAIT: &str = "child_wait";
+pub const SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT: &str = "waiting_initial_output";
+pub const SESSION_LOG_FAILURE_PHASE_USER_ABORT: &str = "user_abort";
+pub const SESSION_LOG_FAILURE_REASON_CREATE_LOG_FAILED: &str = "create_log_failed";
+pub const SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED: &str = "open_pty_failed";
+pub const SESSION_LOG_FAILURE_REASON_RAW_MODE_FAILED: &str = "raw_mode_failed";
+pub const SESSION_LOG_FAILURE_REASON_SPAWN_CHILD_FAILED: &str = "spawn_child_failed";
+pub const SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED: &str = "input_bridge_failed";
+pub const SESSION_LOG_FAILURE_REASON_OUTPUT_BRIDGE_FAILED: &str = "output_bridge_failed";
+pub const SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED: &str = "child_wait_failed";
+pub const SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT: &str = "initial_output_timeout";
+pub const SESSION_LOG_FAILURE_REASON_CTRL_C: &str = "ctrl_c";
 pub const SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT: &str = "best_effort";
 pub const SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "powershell_transcript_may_not_capture_interactive_ssh_io";
@@ -125,6 +145,14 @@ pub struct SessionLogFiles {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionLogFailureMetadata<'a> {
+    pub status: &'a str,
+    pub failure_phase: &'a str,
+    pub failure_reason: &'a str,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLogLaunchFailurePolicy {
     FallbackToPlain,
     FailSession,
@@ -206,6 +234,10 @@ pub struct SessionLogMetadata {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_capture: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -776,6 +808,39 @@ pub fn complete_conpty_session(
     )
 }
 
+pub fn complete_conpty_failure_session(
+    files: &SessionLogFiles,
+    target: &SshTarget,
+    started_at: i64,
+    duration_ms: i64,
+    failure: SessionLogFailureMetadata<'_>,
+) -> Result<SessionLogMetadata> {
+    complete_logged_session_with_status(
+        files,
+        target,
+        started_at,
+        duration_ms,
+        SESSION_LOG_BACKEND_CONPTY,
+        SessionLogCompletion {
+            exit_code: failure.exit_code,
+            status: failure.status.to_string(),
+            reason: Some(failure.failure_reason.to_string()),
+            failure_phase: Some(failure.failure_phase.to_string()),
+            failure_reason: Some(failure.failure_reason.to_string()),
+            require_log_file: false,
+        },
+    )
+}
+
+struct SessionLogCompletion {
+    exit_code: Option<i32>,
+    status: String,
+    reason: Option<String>,
+    failure_phase: Option<String>,
+    failure_reason: Option<String>,
+    require_log_file: bool,
+}
+
 fn complete_logged_session(
     files: &SessionLogFiles,
     target: &SshTarget,
@@ -784,13 +849,41 @@ fn complete_logged_session(
     exit_code: Option<i32>,
     backend: &str,
 ) -> Result<SessionLogMetadata> {
+    complete_logged_session_with_status(
+        files,
+        target,
+        started_at,
+        duration_ms,
+        backend,
+        SessionLogCompletion {
+            exit_code,
+            status: status_for_exit(exit_code),
+            reason: None,
+            failure_phase: None,
+            failure_reason: None,
+            require_log_file: true,
+        },
+    )
+}
+
+fn complete_logged_session_with_status(
+    files: &SessionLogFiles,
+    target: &SshTarget,
+    started_at: i64,
+    duration_ms: i64,
+    backend: &str,
+    completion: SessionLogCompletion,
+) -> Result<SessionLogMetadata> {
     if !files.log_path.is_file() {
-        return Err(CoreError::NotFound(format!(
-            "session log not found: {}",
-            files.log_path.display()
-        )));
+        if completion.require_log_file {
+            return Err(CoreError::NotFound(format!(
+                "session log not found: {}",
+                files.log_path.display()
+            )));
+        }
+    } else {
+        set_user_only_file_permissions(&files.log_path)?;
     }
-    set_user_only_file_permissions(&files.log_path)?;
     let mut metadata = SessionLogMetadata {
         session_id: files.session_id.clone(),
         profile_id: target.profile_id.clone(),
@@ -800,12 +893,14 @@ fn complete_logged_session(
         started_at,
         ended_at: now_ms(),
         duration_ms,
-        exit_code,
+        exit_code: completion.exit_code,
         backend: backend.to_string(),
-        log_path: Some(files.log_path.clone()),
+        log_path: files.log_path.is_file().then(|| files.log_path.clone()),
         metadata_path: files.metadata_path.clone(),
-        status: status_for_exit(exit_code),
-        reason: None,
+        status: completion.status,
+        reason: completion.reason,
+        failure_phase: completion.failure_phase,
+        failure_reason: completion.failure_reason,
         content_capture: None,
         content_capture_reliable: None,
         backend_warning: None,
@@ -1945,6 +2040,8 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(loaded.session_id, files.session_id);
         assert_eq!(metadata.status, "completed");
+        assert_eq!(metadata.failure_phase, None);
+        assert_eq!(metadata.failure_reason, None);
         assert!(metadata.log_path.is_some());
         assert!(!raw.contains("password"));
         assert!(!raw.contains("secret"));
@@ -2010,6 +2107,138 @@ mod tests {
             metadata.backend_warning.as_deref(),
             Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPERIMENTAL)
         );
+        assert_eq!(metadata.failure_phase, None);
+        assert_eq!(metadata.failure_reason, None);
+        assert!(!raw.contains("auth_args"));
+        assert!(!raw.contains("command"));
+        assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writes_conpty_initial_timeout_metadata_without_secret_fields() {
+        let dir = temp_dir("conpty-timeout-metadata");
+        let files = allocate_session_files(&dir).unwrap();
+        fs::write(&files.log_path, "").unwrap();
+        let target = sample_target();
+
+        let metadata = complete_conpty_failure_session(
+            &files,
+            &target,
+            1000,
+            10_000,
+            SessionLogFailureMetadata {
+                status: SESSION_LOG_STATUS_FAILED,
+                failure_phase: SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT,
+                failure_reason: SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT,
+                exit_code: None,
+            },
+        )
+        .unwrap();
+        let loaded = get_session_log_in_dir(&dir, &files.session_id).unwrap();
+        let raw = fs::read_to_string(&files.metadata_path).unwrap();
+
+        assert_eq!(metadata.status, SESSION_LOG_STATUS_FAILED);
+        assert_eq!(loaded.status, SESSION_LOG_STATUS_FAILED);
+        assert_eq!(
+            metadata.failure_phase.as_deref(),
+            Some(SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT)
+        );
+        assert_eq!(
+            metadata.failure_reason.as_deref(),
+            Some(SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT)
+        );
+        assert_eq!(
+            metadata.content_capture.as_deref(),
+            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+        );
+        assert_eq!(metadata.content_capture_reliable, Some(false));
+        assert!(!raw.contains("auth_args"));
+        assert!(!raw.contains("command"));
+        assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writes_conpty_abort_metadata_without_log_file() {
+        let dir = temp_dir("conpty-abort-metadata");
+        let files = allocate_session_files(&dir).unwrap();
+        let target = sample_target();
+
+        let metadata = complete_conpty_failure_session(
+            &files,
+            &target,
+            1000,
+            100,
+            SessionLogFailureMetadata {
+                status: SESSION_LOG_STATUS_ABORTED,
+                failure_phase: SESSION_LOG_FAILURE_PHASE_USER_ABORT,
+                failure_reason: SESSION_LOG_FAILURE_REASON_CTRL_C,
+                exit_code: None,
+            },
+        )
+        .unwrap();
+        let raw = fs::read_to_string(&files.metadata_path).unwrap();
+
+        assert_eq!(metadata.status, SESSION_LOG_STATUS_ABORTED);
+        assert_eq!(
+            metadata.failure_phase.as_deref(),
+            Some(SESSION_LOG_FAILURE_PHASE_USER_ABORT)
+        );
+        assert_eq!(
+            metadata.failure_reason.as_deref(),
+            Some(SESSION_LOG_FAILURE_REASON_CTRL_C)
+        );
+        assert_eq!(metadata.log_path, None);
+        assert!(!raw.contains("auth_args"));
+        assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writes_conpty_spawn_failure_metadata_without_secret_fields() {
+        let dir = temp_dir("conpty-spawn-failure-metadata");
+        let files = allocate_session_files(&dir).unwrap();
+        fs::write(&files.log_path, "").unwrap();
+        let target = sample_target();
+
+        let metadata = complete_conpty_failure_session(
+            &files,
+            &target,
+            1000,
+            50,
+            SessionLogFailureMetadata {
+                status: SESSION_LOG_STATUS_FAILED,
+                failure_phase: SESSION_LOG_FAILURE_PHASE_SPAWN_CHILD,
+                failure_reason: SESSION_LOG_FAILURE_REASON_SPAWN_CHILD_FAILED,
+                exit_code: None,
+            },
+        )
+        .unwrap();
+        let raw = fs::read_to_string(&files.metadata_path).unwrap();
+
+        assert_eq!(metadata.status, SESSION_LOG_STATUS_FAILED);
+        assert_eq!(
+            metadata.failure_phase.as_deref(),
+            Some(SESSION_LOG_FAILURE_PHASE_SPAWN_CHILD)
+        );
+        assert_eq!(
+            metadata.failure_reason.as_deref(),
+            Some(SESSION_LOG_FAILURE_REASON_SPAWN_CHILD_FAILED)
+        );
+        assert!(metadata.log_path.is_some());
         assert!(!raw.contains("auth_args"));
         assert!(!raw.contains("command"));
         assert!(!raw.contains("private_key_path"));
