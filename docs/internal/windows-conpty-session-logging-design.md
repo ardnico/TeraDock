@@ -34,6 +34,27 @@ Current PoC implementation pieces:
 - Write initial logs as UTF-8 best-effort text; ANSI escape sequences may be preserved.
 - Keep TUI integration out of scope until the PoC succeeds in manual smoke.
 
+## Stabilization Status
+
+The 2026-06-14 stabilization pass did not include pasted manual smoke output.
+The implementation was therefore hardened only where source inspection showed
+low-risk PoC improvements:
+
+- Raw mode is entered before launching the ConPTY child so setup failures do not
+  leave a running child with an unprepared input bridge.
+- Input-loop errors now restore raw mode, terminate/wait for the child, close
+  PTY handles, and join the output tee thread before returning.
+- Output tee writes and flushes the log before writing to the local display for
+  each chunk, so a display write failure does not discard bytes that were
+  already read from ConPTY.
+- Resize dimensions are clamped to at least `1x1` before forwarding to ConPTY.
+- Windows ConPTY exit codes are converted into the current metadata `i32`
+  range without wrapping large `u32` values negative.
+
+Manual evidence is still required before treating ConPTY as more than an
+explicit PoC. Use `docs/internal/windows-conpty-manual-smoke.md` to collect the
+next run.
+
 ## Phase 1 Findings
 
 - PowerShell Transcript does not capture the missing content: SSH-side typed commands, remote shell output, interactive prompt I/O, and other terminal content after `ssh.exe` takes over can be absent. The saved file can contain only PowerShell transcript start/end metadata.
@@ -51,6 +72,11 @@ Current PoC implementation pieces:
 - Ctrl-C does not leave the terminal broken.
 - Resize handling is documented and the PoC forwards resize events when crossterm reports them.
 - UTF-8/Japanese output is not obviously corrupted.
+
+No success criterion is considered satisfied by source inspection alone. The
+criteria require a manual Windows run transcript that includes the command,
+typed remote commands, `td session show`, metadata JSON, log text, Ctrl-C,
+resize, UTF-8, and controlled failure-case observations.
 
 ## PoC No-Go Criteria
 
@@ -85,6 +111,9 @@ PowerShell Transcript remains `degraded`. The ConPTY PoC is also treated as expe
 - Ctrl-C and control-sequence behavior can diverge from direct `ssh.exe`.
 - Secrets, passwords, tokens, prompt responses, pasted text, and remote command output displayed in the terminal can be logged.
 - Automated tests are difficult because a real interactive SSH server should not be required.
+- The PoC log is a byte transcript, not a full terminal replay. ANSI escape
+  sequences may remain in the file and resize does not rewrite earlier screen
+  state.
 
 ## Non-goals
 

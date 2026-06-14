@@ -67,7 +67,11 @@ Session log metadata is intentionally small. It may include the session id, prof
 
 The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
 
-Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output. `td session conpty-test <profile_id>` is an explicit Windows-only ConPTY PoC and is not selected by `auto`; it writes the terminal output stream to a log file and the same metadata model, but it does not mask secrets displayed in the terminal.
+Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output.
+
+`td session conpty-test <profile_id>` is an explicit Windows-only ConPTY PoC and is not selected by `auto`. It writes the ConPTY output stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and ANSI escape sequences. Typed input appears in the log when the remote terminal or program echoes it.
+
+The ConPTY PoC remains degraded until manual smoke evidence proves SSH login, terminal output teeing, exit-code metadata, Ctrl-C recovery, resize behavior, UTF-8 behavior, and controlled failure cases. It is not integrated into the TUI `s` path and must not be promoted to `auto` before that evidence is reviewed.
 
 Use these commands to inspect saved sessions:
 

@@ -102,6 +102,22 @@ td session doctor
 td session list --json
 ```
 
+Windows ConPTY PoC smoke, only on a controlled Windows SSH profile and only when
+collecting explicit PoC evidence:
+
+```powershell
+.\target\release\td.exe session conpty-test <profile_id>
+.\target\release\td.exe session list
+.\target\release\td.exe session show <session_id>
+.\target\release\td.exe session path <session_id>
+```
+
+Follow [Windows ConPTY Manual Smoke](docs/internal/windows-conpty-manual-smoke.md).
+Confirm SSH login, terminal output display, output capture in the log,
+`exit_code` in metadata, Ctrl-C recovery, resize behavior, UTF-8 behavior, and
+controlled failure behavior. This check does not promote ConPTY to `auto` and
+does not cover the TUI `s` path.
+
 ## 5. TUI smoke tests
 
 - `td ui` starts in an interactive TTY.
@@ -125,6 +141,8 @@ td session list --json
   `content_capture=best_effort`, and warns that interactive SSH input/output
   may not be captured. Missing PowerShell or `ssh` for that explicit backend
   reports `powershell_not_found` or `ssh_not_found`.
+- On Windows, ConPTY remains an explicit `td session conpty-test <profile_id>`
+  PoC. It is not selected by `auto` and is not used by the TUI `s` path.
 - Host-only or empty PowerShell transcripts add `content_capture_status` and
   `content_capture_warning`, and `td session show <session_id>` displays the
   warning.
@@ -144,6 +162,10 @@ td session list --json
   output displayed during SSH can be captured.
 - Windows PowerShell Transcript is not treated as reliable SSH terminal-content
   logging; full Windows support requires a ConPTY backend.
+- Windows ConPTY PoC metadata excludes SSH auth args, private key paths, full
+  SSH command strings, passwords, secrets, and tokens. Treat ConPTY log files as
+  sensitive terminal transcripts because displayed output and echoed input can
+  be captured.
 - `td recent --json` does not expose excessive credential or invocation data.
 - `td session show <session_id>` does not dump the full terminal log unless
   `--tail N` is explicitly provided.
@@ -164,6 +186,8 @@ td session list --json
   backend and security decisions.
 - `docs/internal/windows-conpty-session-logging-design.md` reflects the planned
   Windows full terminal-content backend.
+- `docs/internal/windows-conpty-manual-smoke.md` reflects current ConPTY PoC
+  GO/NO-GO criteria and known constraints.
 - `docs/internal/ssh-invocation-boundary.md` reflects the current SSH boundary.
 - `docs/internal/commandset-execution-boundary.md` reflects the current
   CommandSet boundary.

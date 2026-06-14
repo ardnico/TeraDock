@@ -3084,7 +3084,7 @@ fn run_conpty_logged_cli_ssh(
 
     match status {
         Ok(status) => {
-            let exit_code = Some(status.exit_code() as i32);
+            let exit_code = Some(conpty_exit_code(&status));
             let session_log = match session_log::complete_conpty_session(
                 files,
                 &invocation.target,
@@ -3121,11 +3121,6 @@ fn run_conpty_ssh_child(
     let pair = pty_system.openpty(current_pty_size())?;
     let master = pair.master;
     let slave = pair.slave;
-    let mut cmd = CommandBuilder::new(invocation.client_path.as_os_str());
-    cmd.args(&invocation.args);
-    let mut child = slave.spawn_command(cmd)?;
-    drop(slave);
-
     let mut reader = master.try_clone_reader()?;
     let mut writer = master.take_writer()?;
     let log_file = OpenOptions::new()
@@ -3133,39 +3128,65 @@ fn run_conpty_ssh_child(
         .create_new(true)
         .open(&files.log_path)
         .with_context(|| format!("failed to create session log {}", files.log_path.display()))?;
+    let raw_mode = match RawModeGuard::enter() {
+        Ok(guard) => guard,
+        Err(err) => {
+            drop(log_file);
+            let _ = std::fs::remove_file(&files.log_path);
+            return Err(err);
+        }
+    };
+    let mut cmd = CommandBuilder::new(invocation.client_path.as_os_str());
+    cmd.args(&invocation.args);
+    let mut child = match slave.spawn_command(cmd) {
+        Ok(child) => child,
+        Err(err) => {
+            drop(raw_mode);
+            drop(log_file);
+            let _ = std::fs::remove_file(&files.log_path);
+            return Err(err);
+        }
+    };
+    drop(slave);
+
     let output_thread = thread::spawn(move || tee_conpty_output(&mut reader, log_file));
 
-    let _raw_mode = RawModeGuard::enter()?;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if event::poll(Duration::from_millis(20))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if let Some(bytes) = key_event_to_pty_bytes(key) {
-                        writer.write_all(&bytes)?;
-                        writer.flush()?;
-                    }
-                }
-                Event::Resize(cols, rows) => {
-                    master.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })?;
-                }
-                _ => {}
+    let status_result = (|| -> Result<portable_pty::ExitStatus> {
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
             }
+            if event::poll(Duration::from_millis(20))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if let Some(bytes) = key_event_to_pty_bytes(key) {
+                            writer.write_all(&bytes)?;
+                            writer.flush()?;
+                        }
+                    }
+                    Event::Resize(cols, rows) => {
+                        master.resize(pty_size(cols, rows))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+    drop(raw_mode);
+    let status = match status_result {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(writer);
+            drop(master);
+            let _ = join_conpty_output_thread(output_thread);
+            return Err(err.context("ConPTY input bridge failed"));
         }
     };
     drop(writer);
     drop(master);
-    match output_thread.join() {
-        Ok(result) => result?,
-        Err(_) => return Err(anyhow!("ConPTY output thread panicked")),
-    }
+    join_conpty_output_thread(output_thread)?;
     Ok(status)
 }
 
@@ -3180,10 +3201,10 @@ fn tee_conpty_output(
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                stdout.write_all(&buffer[..n])?;
-                stdout.flush()?;
                 log_file.write_all(&buffer[..n])?;
                 log_file.flush()?;
+                stdout.write_all(&buffer[..n])?;
+                stdout.flush()?;
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err),
@@ -3195,12 +3216,30 @@ fn tee_conpty_output(
 #[cfg(windows)]
 fn current_pty_size() -> PtySize {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    pty_size(cols, rows)
+}
+
+#[cfg(windows)]
+fn pty_size(cols: u16, rows: u16) -> PtySize {
     PtySize {
-        rows,
-        cols,
+        rows: rows.max(1),
+        cols: cols.max(1),
         pixel_width: 0,
         pixel_height: 0,
     }
+}
+
+#[cfg(windows)]
+fn join_conpty_output_thread(output_thread: thread::JoinHandle<io::Result<()>>) -> Result<()> {
+    match output_thread.join() {
+        Ok(result) => result.context("ConPTY output tee failed"),
+        Err(_) => Err(anyhow!("ConPTY output thread panicked")),
+    }
+}
+
+#[cfg(windows)]
+fn conpty_exit_code(status: &portable_pty::ExitStatus) -> i32 {
+    i32::try_from(status.exit_code()).unwrap_or(i32::MAX)
 }
 
 #[cfg(windows)]
@@ -4086,6 +4125,34 @@ mod tests {
                 state: KeyEventState::NONE,
             }),
             Some(b"\x1b[D".to_vec())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_pty_size_clamps_zero_dimensions() {
+        let size = pty_size(0, 0);
+
+        assert_eq!(size.cols, 1);
+        assert_eq!(size.rows, 1);
+        assert_eq!(size.pixel_width, 0);
+        assert_eq!(size.pixel_height, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_exit_code_saturates_to_metadata_range() {
+        assert_eq!(
+            conpty_exit_code(&portable_pty::ExitStatus::with_exit_code(0)),
+            0
+        );
+        assert_eq!(
+            conpty_exit_code(&portable_pty::ExitStatus::with_exit_code(255)),
+            255
+        );
+        assert_eq!(
+            conpty_exit_code(&portable_pty::ExitStatus::with_exit_code(u32::MAX)),
+            i32::MAX
         );
     }
 
