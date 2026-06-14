@@ -20,7 +20,7 @@
   - `backend_warning=powershell_transcript_may_not_capture_interactive_ssh_io`
 - Added host-only/empty transcript detection for PowerShell logs.
 - Added `content_capture_status=host_only_or_empty` and `content_capture_warning` when no SSH terminal content appears to have been captured.
-- Updated `td session show` to print capture fields and the host-only warning.
+- Updated `td session show` to print `backend_status=degraded`, capture fields, and the host-only warning for PowerShell Transcript logs.
 - Updated the BIOS-style settings diagnostics panel with status, capture reliability, warning, and a human-readable ConPTY reason.
 
 ## PowerShell Transcript Re-evaluation
@@ -66,8 +66,9 @@ Focused coverage added:
 - Explicit PowerShell Transcript reports `degraded` and `best_effort`.
 - PowerShell metadata records `content_capture_reliable=false`.
 - Host-only PowerShell transcripts get `content_capture_status=host_only_or_empty`.
-- `td session show` capture lines include the host-only warning.
+- `td session show` capture lines include `backend_status=degraded` and the host-only warning.
 - Config UI displays the ConPTY fallback reason in human-readable form.
+- Config UI diagnostics rows cover Windows `auto` not_ready and explicit PowerShell Transcript degraded states.
 
 ## Not Implemented
 

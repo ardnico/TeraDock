@@ -1778,6 +1778,9 @@ mod tests {
         assert!(!raw.contains("auth_args"));
         assert!(!raw.contains("command"));
         assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
 
         let _ = fs::remove_dir_all(dir);
     }

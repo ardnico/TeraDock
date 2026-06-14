@@ -2159,6 +2159,9 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
 
 fn session_capture_lines(metadata: &session_log::SessionLogMetadata) -> Vec<String> {
     let mut lines = Vec::new();
+    if metadata.backend == session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT {
+        lines.push("backend_status: degraded".to_string());
+    }
     if let Some(capture) = &metadata.content_capture {
         lines.push(format!("content_capture: {capture}"));
     }
@@ -3737,6 +3740,7 @@ mod tests {
 
         let lines = session_capture_lines(&metadata);
 
+        assert!(lines.iter().any(|line| line == "backend_status: degraded"));
         assert!(lines
             .iter()
             .any(|line| line == "content_capture: best_effort"));

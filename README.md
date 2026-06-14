@@ -113,12 +113,12 @@ SSH sessions opened from the TUI are recorded in `op_logs` as `ssh_session` oper
 Interactive SSH terminal transcript logging is available for v1.1 preparation and is disabled by default:
 
 ```bash
-td session doctor
-td config ui
-td config set session.log.enabled true
-td config set session.log.backend auto
-td config get session.log.dir --resolved
-td session list
+./td session doctor
+./td config ui
+./td config set session.log.enabled true
+./td config set session.log.backend auto
+./td config get session.log.dir --resolved
+./td session list
 td session show <session_id>
 td session path <session_id>
 ```

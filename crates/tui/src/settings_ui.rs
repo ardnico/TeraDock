@@ -635,64 +635,10 @@ fn setting_list_item(item: &SettingsItem) -> ListItem<'static> {
 
 fn render_diagnostics(frame: &mut Frame<'_>, state: &SettingsUiState, area: Rect) {
     let diagnostics = &state.diagnostics;
-    let mut lines = vec![
-        diag_line("Enabled", &diagnostics.enabled.to_string()),
-        diag_line("Backend setting", &diagnostics.backend_setting),
-        diag_line("Resolved backend", &diagnostics.resolved_backend),
-        diag_line("Platform", &diagnostics.platform),
-        diag_line(
-            "Platform support",
-            &diagnostics.platform_supported.to_string(),
-        ),
-        diag_line(
-            "PowerShell",
-            &command_found(
-                diagnostics.powershell_command.as_ref(),
-                diagnostics.powershell_command_note.as_deref(),
-            ),
-        ),
-        diag_line(
-            "ssh",
-            &command_found(
-                diagnostics.ssh_command.as_ref(),
-                diagnostics.ssh_command_note.as_deref(),
-            ),
-        ),
-        diag_line(
-            "script",
-            &diagnostics
-                .script_command
-                .as_ref()
-                .map(|_| "found".to_string())
-                .or_else(|| diagnostics.script_command_note.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
-        diag_line(
-            "Log directory",
-            &diagnostics.log_directory.display().to_string(),
-        ),
-        diag_line(
-            "Writable",
-            &diagnostics
-                .log_directory_writable
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
-        diag_line(
-            "Last session log",
-            diagnostics.last_session_log.as_deref().unwrap_or("none"),
-        ),
-        diag_line("Status", &diagnostics.status),
-    ];
-    if let Some(reason) = &diagnostics.fallback_reason {
-        lines.push(diag_line("Reason", &display_fallback_reason(reason)));
-    }
-    if let Some(reliability) = &diagnostics.content_capture_reliability {
-        lines.push(diag_line("Capture reliability", reliability));
-    }
-    if let Some(warning) = &diagnostics.warning {
-        lines.push(diag_line("Warning", warning));
-    }
+    let mut lines = diagnostic_rows(diagnostics)
+        .into_iter()
+        .map(|(label, value)| diag_line(label, &value))
+        .collect::<Vec<_>>();
     if !diagnostics.hints.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -707,6 +653,73 @@ fn render_diagnostics(frame: &mut Frame<'_>, state: &SettingsUiState, area: Rect
         .block(Block::default().borders(Borders::ALL).title("Diagnostics"))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn diagnostic_rows(
+    diagnostics: &session_log::SessionLogDiagnostics,
+) -> Vec<(&'static str, String)> {
+    let mut rows = vec![
+        ("Enabled", diagnostics.enabled.to_string()),
+        ("Backend setting", diagnostics.backend_setting.clone()),
+        ("Resolved backend", diagnostics.resolved_backend.clone()),
+        ("Platform", diagnostics.platform.clone()),
+        (
+            "Platform support",
+            diagnostics.platform_supported.to_string(),
+        ),
+        (
+            "PowerShell",
+            command_found(
+                diagnostics.powershell_command.as_ref(),
+                diagnostics.powershell_command_note.as_deref(),
+            ),
+        ),
+        (
+            "ssh",
+            command_found(
+                diagnostics.ssh_command.as_ref(),
+                diagnostics.ssh_command_note.as_deref(),
+            ),
+        ),
+        (
+            "script",
+            diagnostics
+                .script_command
+                .as_ref()
+                .map(|_| "found".to_string())
+                .or_else(|| diagnostics.script_command_note.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+        (
+            "Log directory",
+            diagnostics.log_directory.display().to_string(),
+        ),
+        (
+            "Writable",
+            diagnostics
+                .log_directory_writable
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+        (
+            "Last session log",
+            diagnostics
+                .last_session_log
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        ),
+        ("Status", diagnostics.status.clone()),
+    ];
+    if let Some(reason) = &diagnostics.fallback_reason {
+        rows.push(("Reason", display_fallback_reason(reason)));
+    }
+    if let Some(reliability) = &diagnostics.content_capture_reliability {
+        rows.push(("Capture reliability", reliability.clone()));
+    }
+    if let Some(warning) = &diagnostics.warning {
+        rows.push(("Warning", warning.clone()));
+    }
+    rows
 }
 
 fn command_found(path: Option<&PathBuf>, note: Option<&str>) -> String {
@@ -908,5 +921,92 @@ mod tests {
             display_fallback_reason(session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY),
             "conpty backend required for full SSH logging"
         );
+    }
+
+    #[test]
+    fn diagnostics_rows_show_windows_auto_not_ready() {
+        let mut diagnostics = diagnostics_fixture();
+        diagnostics.backend_setting = session_log::SESSION_LOG_BACKEND_AUTO.to_string();
+        diagnostics.resolved_backend = session_log::SESSION_LOG_BACKEND_NO_LOG.to_string();
+        diagnostics.platform = "windows".to_string();
+        diagnostics.platform_supported = false;
+        diagnostics.fallback_reason =
+            Some(session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY.to_string());
+        diagnostics.status = "not_ready".to_string();
+
+        let rows = diagnostic_rows(&diagnostics);
+
+        assert_eq!(
+            row_value(&rows, "Resolved backend"),
+            Some(session_log::SESSION_LOG_BACKEND_NO_LOG)
+        );
+        assert_eq!(row_value(&rows, "Status"), Some("not_ready"));
+        assert_eq!(
+            row_value(&rows, "Reason"),
+            Some("conpty backend required for full SSH logging")
+        );
+    }
+
+    #[test]
+    fn diagnostics_rows_show_explicit_powershell_degraded() {
+        let mut diagnostics = diagnostics_fixture();
+        diagnostics.backend_setting =
+            session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT.to_string();
+        diagnostics.resolved_backend =
+            session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT.to_string();
+        diagnostics.platform = "windows".to_string();
+        diagnostics.platform_supported = true;
+        diagnostics.content_capture_reliability =
+            Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string());
+        diagnostics.warning =
+            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT.to_string());
+        diagnostics.status = "degraded".to_string();
+
+        let rows = diagnostic_rows(&diagnostics);
+
+        assert_eq!(
+            row_value(&rows, "Resolved backend"),
+            Some(session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT)
+        );
+        assert_eq!(row_value(&rows, "Status"), Some("degraded"));
+        assert_eq!(
+            row_value(&rows, "Capture reliability"),
+            Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+        );
+        assert_eq!(
+            row_value(&rows, "Warning"),
+            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT)
+        );
+    }
+
+    fn diagnostics_fixture() -> session_log::SessionLogDiagnostics {
+        session_log::SessionLogDiagnostics {
+            enabled: true,
+            backend_setting: session_log::SESSION_LOG_BACKEND_AUTO.to_string(),
+            resolved_backend: session_log::SESSION_LOG_BACKEND_SCRIPT.to_string(),
+            script_command: Some(PathBuf::from("script")),
+            script_command_note: None,
+            powershell_command: None,
+            powershell_command_note: Some("not checked".to_string()),
+            ssh_command: Some(PathBuf::from("ssh")),
+            ssh_command_note: None,
+            log_directory: PathBuf::from("session-logs"),
+            log_directory_exists: true,
+            log_directory_writable: Some(true),
+            last_session_log: None,
+            platform: "unix".to_string(),
+            platform_supported: true,
+            fallback_reason: None,
+            content_capture_reliability: None,
+            warning: None,
+            status: "ready".to_string(),
+            hints: Vec::new(),
+        }
+    }
+
+    fn row_value<'a>(rows: &'a [(&'static str, String)], label: &str) -> Option<&'a str> {
+        rows.iter()
+            .find(|(row_label, _)| *row_label == label)
+            .map(|(_, value)| value.as_str())
     }
 }
