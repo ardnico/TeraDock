@@ -54,7 +54,7 @@ td config set session.log.backend auto
 td config get session.log.dir --resolved
 ```
 
-The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, or a no-log fallback, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort, whether dependencies are available, and whether the log directory looks writable.
+The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit experimental ConPTY PoC command.
 
 The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
 
@@ -67,12 +67,13 @@ Session log metadata is intentionally small. It may include the session id, prof
 
 The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
 
-Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging is not available in the current stable backend. On Windows, `session.log.backend=auto` resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output. A ConPTY backend is required for reliable Windows SSH terminal-content logging.
+Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output. `td session conpty-test <profile_id>` is an explicit Windows-only ConPTY PoC and is not selected by `auto`; it writes the terminal output stream to a log file and the same metadata model, but it does not mask secrets displayed in the terminal.
 
 Use these commands to inspect saved sessions:
 
 ```bash
 td session doctor
+td session conpty-test <profile_id>
 td session list
 td session list --json
 td session show <session_id>

@@ -21,19 +21,61 @@ For this reason, `powershell-transcript` must remain an explicit best-effort/deg
 
 ## Candidate Implementation
 
-Use the Windows ConPTY / Pseudo Console API to run `ssh.exe` under a pseudo console controlled by TeraDock.
+Use the Windows ConPTY / Pseudo Console API to run `ssh.exe` under a pseudo console controlled by TeraDock. The current PoC chooses `portable-pty` because it gives the smallest maintained Rust API for spawning `ssh.exe` under the native Windows ConPTY implementation, taking a reader/writer for terminal I/O, resizing the pseudo console, and waiting for the child exit status.
 
-Likely implementation pieces:
+Current PoC implementation pieces:
 
-- Evaluate Rust crate options such as `portable-pty`, `conpty`, or a small direct Windows API wrapper.
-- Spawn `ssh.exe` as a ConPTY child process.
-- Pump stdin from the user's terminal into the pseudo console.
+- Spawn `ssh.exe` as a ConPTY child process through `portable-pty`.
+- Read key events from the user's current terminal in raw mode and write a minimal byte translation into ConPTY.
 - Pump pseudo console output back to the user's terminal and tee the same bytes to the session log file.
 - Preserve exit code propagation from `ssh.exe`.
-- Handle terminal resize events and call the ConPTY resize API.
-- Handle Ctrl-C and other control input without breaking the user's terminal state.
-- Define UTF-8 / Windows encoding behavior and document what bytes are written to the log.
-- Keep raw terminal restore and alternate-screen behavior owned by the CLI/TUI launch layer.
+- Handle terminal resize events by calling the ConPTY resize API when crossterm reports a resize.
+- Handle Ctrl-C as a raw `0x03` byte sent to the child and rely on a raw-mode guard to restore the local terminal.
+- Write initial logs as UTF-8 best-effort text; ANSI escape sequences may be preserved.
+- Keep TUI integration out of scope until the PoC succeeds in manual smoke.
+
+## Phase 1 Findings
+
+- PowerShell Transcript does not capture the missing content: SSH-side typed commands, remote shell output, interactive prompt I/O, and other terminal content after `ssh.exe` takes over can be absent. The saved file can contain only PowerShell transcript start/end metadata.
+- Existing metadata warning behavior is correct: explicit `powershell-transcript` is marked best-effort/degraded, `content_capture_reliable=false`, and host-only/empty logs are annotated with `host_only_or_empty`.
+- The ConPTY PoC implementation scope is a Windows-only explicit CLI, SSH invocation reuse from profile id, ConPTY child spawn, terminal input/output bridge, output tee to the session log file, metadata completion, exit-code propagation, and `td session list/show/path` compatibility.
+- TUI integration is avoided because the existing TUI owns raw-mode, alternate-screen, mouse capture, and same-terminal suspend/restore behavior. Mixing that with an unproven PTY bridge would increase the blast radius before the Windows terminal behavior is manually proven.
+
+## PoC Success Criteria
+
+- `ssh.exe` can be launched under ConPTY.
+- User can type commands interactively.
+- Remote shell output is visible in the current terminal.
+- The same terminal output is written to a session log file.
+- SSH exit code is propagated.
+- Ctrl-C does not leave the terminal broken.
+- Resize handling is documented and the PoC forwards resize events when crossterm reports them.
+- UTF-8/Japanese output is not obviously corrupted.
+
+## PoC No-Go Criteria
+
+- Input/output is unreliable.
+- Ctrl-C breaks the terminal.
+- SSH authentication prompt becomes unusable.
+- Captured output is only host/process metadata.
+- Implementation requires a full terminal emulator layer.
+- Metadata requires storing secret/auth/full command data.
+
+## Backend Status Model
+
+- `disabled`: session logging is off.
+- `not_ready`: the selected backend cannot run on the current platform or is missing required dependencies.
+- `degraded`: the backend is available but best-effort, experimental, or not reliable enough to treat as the production terminal-content path.
+- `ready`: the backend is available and considered suitable for the supported platform.
+
+PowerShell Transcript remains `degraded`. The ConPTY PoC is also treated as experimental/degraded. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
+
+## Log Format
+
+- Initial ConPTY logs are UTF-8 best-effort text.
+- ANSI escape sequences may be preserved.
+- Perfect replay is not guaranteed.
+- Future versions may consider asciinema-compatible output.
 
 ## Risks
 
@@ -46,14 +88,16 @@ Likely implementation pieces:
 
 ## Non-goals
 
-- v1.1 immediate implementation.
+- Production/default backend promotion during the PoC.
 - Full terminal emulator.
 - Perfect replay format.
 - Secret masking.
 - Storing SSH auth args, full command strings, or private key paths in metadata.
+- Automatic `auto -> conpty` selection.
+- TUI integration before manual smoke evidence.
 
 ## Suggested Roadmap
 
-- v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Build a ConPTY proof of concept for `ssh.exe` with terminal I/O teeing, resize handling, Ctrl-C behavior, exit code propagation, and log metadata.
+- v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY only as `td session conpty-test <profile_id>`; surface metadata, doctor, show, and config UI warnings.
+- v1.2: Stabilize the ConPTY proof of concept for `ssh.exe` with manual smoke evidence for terminal I/O teeing, resize handling, Ctrl-C behavior, exit code propagation, UTF-8/Japanese output, and log metadata.
 - v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend.

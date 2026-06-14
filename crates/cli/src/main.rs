@@ -1,6 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+#[cfg(windows)]
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+#[cfg(windows)]
+use portable_pty::{CommandBuilder, PtySize};
 use rusqlite::Connection;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -27,9 +31,9 @@ use tdcore::profile::{
 };
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::session_log::{
-    self, SessionLogFiles, SessionLogPlan, SessionLogReference,
-    SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
-    SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
+    self, SessionLogFiles, SessionLogPlan, SessionLogReference, SESSION_LOG_BACKEND_CONPTY,
+    SESSION_LOG_REASON_CONPTY_LAUNCH_FAILED, SESSION_LOG_REASON_METADATA_WRITE_FAILED,
+    SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED, SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
 };
 use tdcore::settings;
 use tdcore::settings::SettingScope;
@@ -288,6 +292,8 @@ struct InitArgs {
 enum SessionCommands {
     /// Diagnose interactive SSH session logging
     Doctor(SessionDoctorArgs),
+    /// Run an experimental Windows ConPTY SSH logging proof of concept
+    ConptyTest { profile_id: String },
     /// List saved interactive SSH session logs
     List(SessionListArgs),
     /// Show metadata for a saved interactive SSH session log
@@ -1966,12 +1972,25 @@ fn handle_recent(limit: usize, json: bool) -> Result<()> {
 }
 
 fn handle_session(cmd: SessionCommands) -> Result<()> {
-    let conn = db::init_connection()?;
     match cmd {
-        SessionCommands::Doctor(args) => handle_session_doctor(&conn, args),
-        SessionCommands::List(args) => handle_session_list(&conn, args),
-        SessionCommands::Show(args) => handle_session_show(&conn, args),
+        SessionCommands::ConptyTest { profile_id } => {
+            let store = ProfileStore::new(db::init_connection()?);
+            handle_session_conpty_test(&store, profile_id)
+        }
+        SessionCommands::Doctor(args) => {
+            let conn = db::init_connection()?;
+            handle_session_doctor(&conn, args)
+        }
+        SessionCommands::List(args) => {
+            let conn = db::init_connection()?;
+            handle_session_list(&conn, args)
+        }
+        SessionCommands::Show(args) => {
+            let conn = db::init_connection()?;
+            handle_session_show(&conn, args)
+        }
         SessionCommands::Path { session_id } => {
+            let conn = db::init_connection()?;
             let metadata = session_log::get_session_log(&conn, &session_id)?;
             let Some(log_path) = metadata.log_path else {
                 return Err(anyhow!("session has no terminal log path: {session_id}"));
@@ -1980,6 +1999,100 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+#[cfg(not(windows))]
+fn handle_session_conpty_test(_store: &ProfileStore, _profile_id: String) -> Result<()> {
+    Err(anyhow!(
+        "unsupported: ConPTY session logging is only available on Windows"
+    ))
+}
+
+#[cfg(windows)]
+fn handle_session_conpty_test(store: &ProfileStore, profile_id: String) -> Result<()> {
+    let profile = store
+        .get(&profile_id)?
+        .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
+    ensure_ssh_profile(&profile, "session conpty-test")?;
+    if profile.danger_level == DangerLevel::Critical && !confirm_danger(&profile)? {
+        println!("Aborted by user.");
+        return Ok(());
+    }
+    let invocation = build_conpty_test_invocation(store, &profile_id)?;
+    emit_ssh_auth_messages(&invocation.auth_context);
+    println!("ConPTY session logging PoC is experimental and not selected by auto.");
+    println!(
+        "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
+    );
+    let files = session_log::prepare_conpty_session_files(store.conn())?;
+    println!("Log path: {}", files.log_path.display());
+    io::stdout().flush()?;
+
+    match run_conpty_logged_cli_ssh(&invocation, &files) {
+        CliSshRunResult::Completed(outcome) => {
+            store.touch_last_used(&invocation.target.profile_id)?;
+            let entry = oplog::OpLogEntry {
+                op: oplog::SSH_SESSION_OP.into(),
+                profile_id: Some(invocation.target.profile_id.clone()),
+                client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
+                ok: outcome.ok,
+                exit_code: outcome.exit_code,
+                duration_ms: Some(outcome.duration_ms),
+                meta_json: Some(ssh_connect_meta(&invocation, None, &outcome.session_log)),
+            };
+            oplog::log_operation(store.conn(), entry)?;
+            println!();
+            if let Some(session_id) = &outcome.session_log.session_id {
+                println!("Saved ConPTY session log: {session_id}");
+            }
+            match outcome.exit_code {
+                Some(code) => println!("SSH exit code: {code}"),
+                None => println!("SSH exit code: unavailable"),
+            }
+            if outcome.ok {
+                Ok(())
+            } else if let Some(code) = outcome.exit_code {
+                Err(anyhow!("ssh exited with code {code}"))
+            } else {
+                Err(anyhow!("ssh ended without exit code"))
+            }
+        }
+        CliSshRunResult::LaunchFailed {
+            error,
+            duration_ms,
+            session_log,
+        } => {
+            let error_message = error.to_string();
+            store.touch_last_used(&invocation.target.profile_id)?;
+            let entry = oplog::OpLogEntry {
+                op: oplog::SSH_SESSION_OP.into(),
+                profile_id: Some(invocation.target.profile_id.clone()),
+                client_used: Some(invocation.client_path.to_string_lossy().into_owned()),
+                ok: false,
+                exit_code: None,
+                duration_ms: Some(duration_ms),
+                meta_json: Some(ssh_connect_meta(
+                    &invocation,
+                    Some(&error_message),
+                    &session_log,
+                )),
+            };
+            oplog::log_operation(store.conn(), entry)?;
+            Err(error)
+        }
+    }
+}
+
+fn build_conpty_test_invocation(store: &ProfileStore, profile_id: &str) -> Result<SshInvocation> {
+    ssh::build_ssh_invocation(
+        store,
+        SshInvocationRequest {
+            profile_id,
+            source: "cli-conpty-test",
+            mode: SshInvocationMode::Interactive,
+        },
+    )
+    .map_err(Into::into)
 }
 
 fn handle_session_doctor(conn: &Connection, args: SessionDoctorArgs) -> Result<()> {
@@ -2049,9 +2162,17 @@ fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
     if let Some(warning) = &diagnostics.warning {
         println!("warning: {warning}");
     }
+    if diagnostics.platform == "windows" {
+        println!();
+        println!("ConPTY backend: experimental");
+        println!("ConPTY PoC command: td session conpty-test <profile_id>");
+    }
     if diagnostics.status == "ready" {
         println!();
         println!("Status: ready");
+    } else if diagnostics.resolved_backend == SESSION_LOG_BACKEND_CONPTY {
+        println!();
+        println!("Status: experimental");
     } else if diagnostics.status != "disabled" {
         println!();
         println!("Status: {}", diagnostics.status);
@@ -2159,7 +2280,9 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
 
 fn session_capture_lines(metadata: &session_log::SessionLogMetadata) -> Vec<String> {
     let mut lines = Vec::new();
-    if metadata.backend == session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT {
+    if metadata.backend == session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+        || metadata.backend == session_log::SESSION_LOG_BACKEND_CONPTY
+    {
         lines.push("backend_status: degraded".to_string());
     }
     if let Some(capture) = &metadata.content_capture {
@@ -2949,6 +3072,180 @@ fn run_powershell_transcript_cli_ssh(
     }
 }
 
+#[cfg(windows)]
+fn run_conpty_logged_cli_ssh(
+    invocation: &SshInvocation,
+    files: &SessionLogFiles,
+) -> CliSshRunResult {
+    let log_started_at = now_ms();
+    let started = Instant::now();
+    let status = run_conpty_ssh_child(invocation, files).context("failed to run ConPTY SSH");
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    match status {
+        Ok(status) => {
+            let exit_code = Some(status.exit_code() as i32);
+            let session_log = match session_log::complete_conpty_session(
+                files,
+                &invocation.target,
+                log_started_at,
+                duration_ms,
+                exit_code,
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            CliSshRunResult::Completed(CliSshOutcome {
+                ok: status.success(),
+                exit_code,
+                duration_ms,
+                session_log,
+            })
+        }
+        Err(error) => CliSshRunResult::LaunchFailed {
+            error,
+            duration_ms,
+            session_log: SessionLogReference::not_saved(SESSION_LOG_REASON_CONPTY_LAUNCH_FAILED),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn run_conpty_ssh_child(
+    invocation: &SshInvocation,
+    files: &SessionLogFiles,
+) -> Result<portable_pty::ExitStatus> {
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system.openpty(current_pty_size())?;
+    let master = pair.master;
+    let slave = pair.slave;
+    let mut cmd = CommandBuilder::new(invocation.client_path.as_os_str());
+    cmd.args(&invocation.args);
+    let mut child = slave.spawn_command(cmd)?;
+    drop(slave);
+
+    let mut reader = master.try_clone_reader()?;
+    let mut writer = master.take_writer()?;
+    let log_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&files.log_path)
+        .with_context(|| format!("failed to create session log {}", files.log_path.display()))?;
+    let output_thread = thread::spawn(move || tee_conpty_output(&mut reader, log_file));
+
+    let _raw_mode = RawModeGuard::enter()?;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if event::poll(Duration::from_millis(20))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if let Some(bytes) = key_event_to_pty_bytes(key) {
+                        writer.write_all(&bytes)?;
+                        writer.flush()?;
+                    }
+                }
+                Event::Resize(cols, rows) => {
+                    master.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })?;
+                }
+                _ => {}
+            }
+        }
+    };
+    drop(writer);
+    drop(master);
+    match output_thread.join() {
+        Ok(result) => result?,
+        Err(_) => return Err(anyhow!("ConPTY output thread panicked")),
+    }
+    Ok(status)
+}
+
+#[cfg(windows)]
+fn tee_conpty_output(
+    reader: &mut Box<dyn Read + Send>,
+    mut log_file: std::fs::File,
+) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                stdout.write_all(&buffer[..n])?;
+                stdout.flush()?;
+                log_file.write_all(&buffer[..n])?;
+                log_file.flush()?;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn current_pty_size() -> PtySize {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+#[cfg(windows)]
+fn key_event_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ctrl_char_to_byte(ch).map(|byte| vec![byte])
+        }
+        KeyCode::Char(ch) => {
+            let mut encoded = [0_u8; 4];
+            Some(ch.encode_utf8(&mut encoded).as_bytes().to_vec())
+        }
+        KeyCode::Enter => Some(b"\r".to_vec()),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Tab => Some(b"\t".to_vec()),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
+        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn ctrl_char_to_byte(ch: char) -> Option<u8> {
+    let upper = ch.to_ascii_uppercase();
+    if upper.is_ascii_uppercase() {
+        Some((upper as u8) - b'A' + 1)
+    } else if ch == ' ' {
+        Some(0)
+    } else {
+        None
+    }
+}
+
 fn emit_session_log_notice(plan: &SessionLogPlan) {
     if let Some(notice) = plan.notice() {
         eprintln!("{notice}");
@@ -3709,6 +4006,90 @@ mod tests {
     }
 
     #[test]
+    fn parses_session_conpty_test_command() {
+        let cli = Cli::try_parse_from(["td", "session", "conpty-test", "p_test"])
+            .expect("parses session conpty-test");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::ConptyTest { profile_id },
+            }) => {
+                assert_eq!(profile_id, "p_test");
+            }
+            _ => panic!("expected session conpty-test command"),
+        }
+    }
+
+    #[test]
+    fn conpty_test_invocation_rejects_non_ssh_profile() {
+        let store = ProfileStore::new(db::init_in_memory().unwrap());
+        store
+            .insert(NewProfile {
+                profile_id: Some("p_telnet".to_string()),
+                name: "Telnet".to_string(),
+                profile_type: ProfileType::Telnet,
+                host: "example.com".to_string(),
+                port: 23,
+                user: "alice".to_string(),
+                danger_level: DangerLevel::Normal,
+                group: None,
+                tags: Vec::new(),
+                note: None,
+                initial_send: None,
+                client_overrides: None,
+            })
+            .unwrap();
+
+        let err = build_conpty_test_invocation(&store, "p_telnet").unwrap_err();
+
+        assert!(err.to_string().contains("SSH requires an SSH profile"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn conpty_test_is_unsupported_on_non_windows() {
+        let store = ProfileStore::new(db::init_in_memory().unwrap());
+
+        let err = handle_session_conpty_test(&store, "p_test".to_string()).unwrap_err();
+
+        assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_key_mapping_handles_text_arrows_and_ctrl_c() {
+        use crossterm::event::KeyEventState;
+
+        assert_eq!(
+            key_event_to_pty_bytes(KeyEvent {
+                code: KeyCode::Char('x'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            Some(b"x".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            Some(vec![0x03])
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(KeyEvent {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            Some(b"\x1b[D".to_vec())
+        );
+    }
+
+    #[test]
     fn session_show_capture_lines_include_host_only_warning() {
         let metadata = session_log::SessionLogMetadata {
             session_id: "sl_abc123".to_string(),
@@ -3753,6 +4134,40 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "Warning: No SSH terminal content appears to have been captured."));
+    }
+
+    #[test]
+    fn session_show_capture_lines_include_conpty_degraded_warning() {
+        let metadata = session_log::SessionLogMetadata {
+            session_id: "sl_abc123".to_string(),
+            profile_id: "p_test".to_string(),
+            user: "alice".to_string(),
+            host: "example.com".to_string(),
+            port: 22,
+            started_at: 100,
+            ended_at: 200,
+            duration_ms: 100,
+            exit_code: Some(0),
+            backend: session_log::SESSION_LOG_BACKEND_CONPTY.to_string(),
+            log_path: Some(PathBuf::from("sl_abc123.log")),
+            metadata_path: PathBuf::from("sl_abc123.json"),
+            status: "completed".to_string(),
+            reason: None,
+            content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
+            content_capture_reliable: Some(false),
+            backend_warning: Some(
+                session_log::SESSION_LOG_BACKEND_WARNING_CONPTY_EXPERIMENTAL.to_string(),
+            ),
+            content_capture_status: None,
+            content_capture_warning: None,
+        };
+
+        let lines = session_capture_lines(&metadata);
+
+        assert!(lines.iter().any(|line| line == "backend_status: degraded"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "backend_warning: conpty_backend_is_experimental_poc"));
     }
 
     #[test]

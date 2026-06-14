@@ -16,18 +16,19 @@
 
 1. Interactive SSH session log saving with default-disabled Linux/macOS `script` backend.
 2. Stability improvements after the session logging slice.
-3. TUI recent pane.
-4. Terminal emulator launch configuration.
-5. tmux integration design.
-6. Transfer/tunnel SSH invocation cleanup.
-7. CommandSet runner boundary cleanup.
-8. Better smoke test script.
-9. Screenshots/GIF documentation.
+3. Windows ConPTY session logging PoC behind an explicit `td session conpty-test <profile_id>` command.
+4. TUI recent pane.
+5. Terminal emulator launch configuration.
+6. tmux integration design.
+7. Transfer/tunnel SSH invocation cleanup.
+8. CommandSet runner boundary cleanup.
+9. Better smoke test script.
+10. Screenshots/GIF documentation.
 
 ## Not planned for 1.1
 
-- Reliable Windows full SSH terminal-content logging. PowerShell Transcript remains explicit best-effort/degraded only.
-- ConPTY session logging implementation.
+- Reliable/default Windows full SSH terminal-content logging. PowerShell Transcript remains explicit best-effort/degraded only.
+- Automatic ConPTY backend selection or TUI integration before the PoC is manually proven.
 - Web UI.
 - Cloud sync.
 - Remote server management daemon.
@@ -36,6 +37,6 @@
 
 ## Future session logging
 
-- 1.1.x: Keep Windows `auto` on `no-log`, keep `powershell-transcript` explicit best-effort, and surface capture warnings in doctor/show/config UI.
-- 1.2: Build a Windows ConPTY SSH logging proof of concept.
+- 1.1.x: Keep Windows `auto` on `no-log`, keep `powershell-transcript` explicit best-effort, surface capture warnings in doctor/show/config UI, and keep the ConPTY path explicit as `td session conpty-test <profile_id>`.
+- 1.2: Stabilize the Windows ConPTY SSH logging proof of concept after manual smoke evidence.
 - 1.3: Evaluate a production ConPTY backend for reliable Windows SSH terminal input/output capture.

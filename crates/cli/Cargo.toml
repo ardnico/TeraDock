@@ -48,3 +48,6 @@ wait-timeout = { workspace = true }
 serialport = { workspace = true }
 crossterm = { workspace = true }
 time = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+portable-pty = { workspace = true }

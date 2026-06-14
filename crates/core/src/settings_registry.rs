@@ -43,7 +43,13 @@ impl SettingDefinition {
 }
 
 const SSH_AUTH_ALLOWED: [&str; 3] = ["agent", "keys", "password"];
-const SESSION_LOG_BACKENDS: [&str; 4] = ["auto", "script", "powershell-transcript", "no-log"];
+const SESSION_LOG_BACKENDS: [&str; 5] = [
+    "auto",
+    "script",
+    "powershell-transcript",
+    "conpty",
+    "no-log",
+];
 const ALLOW_INSECURE_EXAMPLES: [&str; 2] = ["true", "false"];
 const SSH_AUTH_EXAMPLES: [&str; 2] = ["agent,keys,password", "keys,password"];
 const CLIENT_OVERRIDE_EXAMPLES: [&str; 1] = [r#"{"ssh":"/usr/bin/ssh","scp":"/usr/bin/scp"}"#];
@@ -145,7 +151,7 @@ static SETTINGS: &[SettingDefinition] = &[
     SettingDefinition {
         schema: SettingSchema {
             key: "session.log.backend",
-            description: "Backend for interactive SSH session logging (auto, script, powershell-transcript, or no-log).",
+            description: "Backend for interactive SSH session logging (auto, script, powershell-transcript, conpty experimental, or no-log).",
             value_type: SettingValueType::String,
             allowed_values: &SESSION_LOG_BACKENDS,
             examples: &SESSION_LOG_BACKENDS,
@@ -294,6 +300,10 @@ mod tests {
         assert_eq!(
             validate_setting_value("session.log.backend", "POWERSHELL-TRANSCRIPT").unwrap(),
             "powershell-transcript"
+        );
+        assert_eq!(
+            validate_setting_value("session.log.backend", "CONPTY").unwrap(),
+            "conpty"
         );
         assert!(validate_setting_value("session.log.backend", "pty").is_err());
         assert!(validate_setting_value("session.log.dir", " ").is_err());

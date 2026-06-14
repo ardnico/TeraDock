@@ -49,18 +49,20 @@ Cons:
 - Usually unavailable on Windows.
 - Captures displayed sensitive output without masking.
 
-### portable-pty backend
+### ConPTY / portable-pty PoC backend
 
-Use a Rust PTY library and copy bytes between the user terminal and child process.
+Use `portable-pty` on Windows to place `ssh.exe` under ConPTY, copy user input into the pseudo console, copy pseudo console output back to the current terminal, and tee that same output to a session log file.
 
 Pros:
 - More control over capture and metadata.
-- Potential route to Windows support later.
+- Direct route to Windows SSH terminal-content logging.
+- Provides exit-code propagation and the same session metadata model.
 
 Cons:
 - Larger implementation and test surface.
 - Higher risk of breaking TUI terminal restore behavior.
-- Not needed for the v1.1 minimum.
+- Still experimental. It is exposed only through `td session conpty-test <profile_id>`.
+- The initial CLI input bridge is intentionally small and is not a full terminal emulator layer.
 
 ### PowerShell Transcript backend
 
@@ -101,15 +103,18 @@ Cons:
 - Linux/macOS: use the `script` backend when `session.log.backend=auto` or `script`.
 - Windows: `session.log.backend=auto` resolves to `no-log` with
   `windows_terminal_content_logging_requires_conpty`.
-- Windows full SSH terminal-content logging requires a future ConPTY backend.
+- Windows full SSH terminal-content logging requires ConPTY.
 - Explicit `powershell-transcript` is unsupported outside Windows. On Windows,
   explicit `powershell-transcript` reports `degraded`, uses
   `content_capture=best_effort`, and warns that SSH input/output may not be
   captured.
+- Explicit `conpty` is recognized as an experimental backend setting, but
+  standard `td connect` and TUI `s` do not use it yet. Use the PoC command
+  `td session conpty-test <profile_id>` instead.
 - Missing PowerShell or `ssh` for explicit `powershell-transcript` reports
   not-ready errors instead of silently opening an unlogged SSH session.
 - If `script` is unavailable or setup fails under `auto`, continue the SSH session without logging when possible and record a no-log reason.
-- Do not introduce ConPTY implementation, portable-pty, tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
+- Do not auto-select ConPTY, wire it into TUI, add tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
 - Windows ConPTY design is tracked separately in [Windows ConPTY Session Logging Design](windows-conpty-session-logging-design.md).
 
 ## Data model
@@ -158,6 +163,19 @@ otherwise empty of SSH terminal content, metadata also includes:
 }
 ```
 
+For the ConPTY PoC, metadata includes:
+
+```json
+{
+  "backend": "conpty",
+  "content_capture": "best_effort",
+  "content_capture_reliable": false,
+  "backend_warning": "conpty_backend_is_experimental_poc"
+}
+```
+
+ConPTY metadata uses the same exclusion policy: no SSH auth args, full command strings, private key paths, passwords, secrets, or tokens.
+
 ## CLI/TUI UX
 
 - Configuration keys:
@@ -171,6 +189,7 @@ otherwise empty of SSH terminal content, metadata also includes:
 - TUI: pressing `s` opens an SSH session as before. When logging is enabled and supported, TeraDock saves the transcript and reports the session id after return.
 - TUI settings: pressing `c` opens the settings screen. Saving there writes global settings and affects subsequent SSH sessions.
 - CLI: `td connect <profile_id>` can use the same logging path for SSH profiles.
+- CLI PoC: `td session conpty-test <profile_id>` runs a Windows-only ConPTY experiment and writes session metadata/log files readable through `td session list`, `td session show`, and `td session path`.
 - CLI settings: `td config ui` opens the same BIOS-style settings screen outside `td ui`.
 - Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, dependency availability, log directory state, newest saved session log, platform support, fallback reason, content-capture reliability, warning, status, and hints.
 - Reference commands:
