@@ -14,6 +14,30 @@ td session conpty-test <profile_id> --debug --startup-timeout-sec 10
 This pass did not promote ConPTY to `auto`, did not make it a default backend,
 and did not integrate it with the TUI.
 
+## 2026-06-15 Follow-Up
+
+The real stalled run wrote only four bytes to the log before hanging:
+`ESC [ 6 n`. This is a cursor-position terminal query, not an SSH banner or
+prompt. The previous event loop treated any first byte as first output, so this
+control-only sequence disabled startup timeout. The child then waited for a
+terminal response that TeraDock was not forwarding through the crossterm event
+input path.
+
+Fixes added in this follow-up:
+
+- Detect startup-visible output separately from terminal control-only output.
+- Keep startup timeout armed when the only output is `ESC[6n` or similar
+  control traffic.
+- Detect `ESC[6n` and send a synthetic cursor-position response back into the
+  PTY.
+- Detect `ESC[5n` and send a synthetic device-status-ok response.
+- Make the startup timer a watchdog that kills the child directly if no
+  startup-visible output arrives before the deadline.
+- Add a main-loop `recv_timeout` fallback so an empty event stream cannot wait
+  forever.
+- Add tests for cursor-position query detection, split query parsing, and
+  visible prompt detection.
+
 ## Phase 1 Findings
 
 - The previous main loop could wait on three independent paths: child wait
@@ -144,6 +168,16 @@ cargo build -p td --release --locked
 
 The local non-SSH list smoke showed the `log_path` column containing only the
 saved log path for the latest ConPTY metadata row. Real SSH smoke was not run.
+
+2026-06-15 follow-up validation:
+
+- Rebuilt `target\release\td.exe`.
+- Reproduced the stale stuck process/log pattern from the reported command.
+- Confirmed the original stalled log contained only `ESC[6n`.
+- Confirmed the fixed build responds to the cursor-position query and captures
+  Ubuntu MOTD plus a remote shell prompt in the ConPTY log.
+- The automated/non-interactive smoke was then stopped manually because it had
+  reached the remote shell prompt and was waiting for input.
 
 ## Not Done
 

@@ -3218,6 +3218,35 @@ struct ConptyTimerThread {
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConptySyntheticResponse {
+    CursorPosition,
+    DeviceStatusOk,
+}
+
+#[cfg(windows)]
+impl ConptySyntheticResponse {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::CursorPosition => b"\x1b[1;1R",
+            Self::DeviceStatusOk => b"\x1b[0n",
+        }
+    }
+
+    fn debug_label(self) -> &'static str {
+        match self {
+            Self::CursorPosition => "cursor_position",
+            Self::DeviceStatusOk => "device_status_ok",
+        }
+    }
+}
+
+#[cfg(windows)]
+enum ConptyInputCommand {
+    WriteSynthetic { response: ConptySyntheticResponse },
+}
+
+#[cfg(windows)]
 #[derive(Debug)]
 enum ConptyEvent {
     FirstOutput { bytes: usize },
@@ -3461,20 +3490,24 @@ fn run_conpty_ssh_child(
     let first_output_received = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
     let (event_tx, event_rx) = mpsc::channel();
+    let (input_command_tx, input_command_rx) = mpsc::channel();
     let output_thread = spawn_conpty_output_thread(
         reader,
         log_file,
         Arc::clone(&first_output_received),
         event_tx.clone(),
+        input_command_tx,
         options,
     );
     let mut child_killer = child.clone_killer();
+    let timeout_child_killer = child_killer.clone_killer();
     let wait_thread =
         spawn_conpty_wait_thread(child, Arc::clone(&cancel), event_tx.clone(), options);
     let input_thread = spawn_conpty_input_thread(
         writer,
         master,
         Arc::clone(&cancel),
+        input_command_rx,
         event_tx.clone(),
         options,
     );
@@ -3483,23 +3516,36 @@ fn run_conpty_ssh_child(
         Arc::clone(&first_output_received),
         Arc::clone(&cancel),
         event_tx.clone(),
+        timeout_child_killer,
         options,
     );
     drop(event_tx);
 
     let mut output_bytes = 0_u64;
+    let startup_deadline = options
+        .startup_timeout
+        .and_then(|timeout| Instant::now().checked_add(timeout));
     let loop_result = loop {
-        match event_rx.recv() {
-            Ok(ConptyLoopMessage::Event(ConptyEvent::FirstOutput { bytes })) => {
+        let Some(message) =
+            recv_conpty_loop_message(&event_rx, &first_output_received, startup_deadline)
+        else {
+            break Err(ConptyChildFailure::failed(
+                session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
+                session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
+                anyhow!("ConPTY event loop ended without child status"),
+            ));
+        };
+        match message {
+            ConptyLoopMessage::Event(ConptyEvent::FirstOutput { bytes }) => {
                 conpty_debug(
                     options.debug,
                     format_args!("first output received: {bytes} bytes"),
                 );
             }
-            Ok(ConptyLoopMessage::Event(ConptyEvent::OutputChunk { bytes })) => {
+            ConptyLoopMessage::Event(ConptyEvent::OutputChunk { bytes }) => {
                 output_bytes += bytes as u64;
             }
-            Ok(ConptyLoopMessage::Event(ConptyEvent::ChildExited { exit_code })) => {
+            ConptyLoopMessage::Event(ConptyEvent::ChildExited { exit_code }) => {
                 let exit_code_text = exit_code
                     .map(|code| code.to_string())
                     .unwrap_or_else(|| "unavailable".to_string());
@@ -3509,7 +3555,7 @@ fn run_conpty_ssh_child(
                 );
                 break Ok(exit_code);
             }
-            Ok(ConptyLoopMessage::Event(ConptyEvent::StartupTimeout)) => {
+            ConptyLoopMessage::Event(ConptyEvent::StartupTimeout) => {
                 if first_output_received.load(Ordering::SeqCst) {
                     conpty_debug(options.debug, "startup timeout ignored after first output");
                     continue;
@@ -3536,7 +3582,7 @@ fn run_conpty_ssh_child(
                     ),
                 ));
             }
-            Ok(ConptyLoopMessage::Event(ConptyEvent::UserAbort)) => {
+            ConptyLoopMessage::Event(ConptyEvent::UserAbort) => {
                 conpty_debug(options.debug, "user abort received");
                 kill_conpty_child(&mut child_killer, options);
                 break Err(ConptyChildFailure::aborted(
@@ -3545,7 +3591,7 @@ fn run_conpty_ssh_child(
                     anyhow!("aborted by Ctrl-C"),
                 ));
             }
-            Ok(ConptyLoopMessage::Event(ConptyEvent::OutputError { message })) => {
+            ConptyLoopMessage::Event(ConptyEvent::OutputError { message }) => {
                 kill_conpty_child(&mut child_killer, options);
                 break Err(ConptyChildFailure::failed(
                     session_log::SESSION_LOG_FAILURE_PHASE_OUTPUT_BRIDGE,
@@ -3553,7 +3599,7 @@ fn run_conpty_ssh_child(
                     anyhow!(message),
                 ));
             }
-            Ok(ConptyLoopMessage::Event(ConptyEvent::InputError { message })) => {
+            ConptyLoopMessage::Event(ConptyEvent::InputError { message }) => {
                 kill_conpty_child(&mut child_killer, options);
                 break Err(ConptyChildFailure::failed(
                     session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
@@ -3561,20 +3607,13 @@ fn run_conpty_ssh_child(
                     anyhow!(message),
                 ));
             }
-            Ok(ConptyLoopMessage::ChildWaitError { message }) => {
+            ConptyLoopMessage::ChildWaitError { message } => {
                 kill_conpty_child(&mut child_killer, options);
                 eprintln!("Warning: ConPTY child process exit could not be confirmed.");
                 break Err(ConptyChildFailure::failed(
                     session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
                     session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
                     anyhow!(message),
-                ));
-            }
-            Err(_) => {
-                break Err(ConptyChildFailure::failed(
-                    session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
-                    session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
-                    anyhow!("ConPTY event loop ended without child status"),
                 ));
             }
         }
@@ -3674,11 +3713,37 @@ fn run_conpty_ssh_child(
 }
 
 #[cfg(windows)]
+fn recv_conpty_loop_message(
+    event_rx: &mpsc::Receiver<ConptyLoopMessage>,
+    first_output_received: &AtomicBool,
+    startup_deadline: Option<Instant>,
+) -> Option<ConptyLoopMessage> {
+    if first_output_received.load(Ordering::SeqCst) {
+        return event_rx.recv().ok();
+    }
+    let Some(deadline) = startup_deadline else {
+        return event_rx.recv().ok();
+    };
+    let now = Instant::now();
+    if now >= deadline {
+        return Some(ConptyLoopMessage::Event(ConptyEvent::StartupTimeout));
+    }
+    match event_rx.recv_timeout(deadline.duration_since(now)) {
+        Ok(message) => Some(message),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Some(ConptyLoopMessage::Event(ConptyEvent::StartupTimeout))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+    }
+}
+
+#[cfg(windows)]
 fn spawn_conpty_output_thread(
     mut reader: Box<dyn Read + Send>,
     log_file: std::fs::File,
     first_output_received: Arc<AtomicBool>,
     event_tx: mpsc::Sender<ConptyLoopMessage>,
+    input_command_tx: mpsc::Sender<ConptyInputCommand>,
     options: ConptyRunOptions,
 ) -> ConptyOutputThread {
     let (result_tx, result_rx) = mpsc::channel();
@@ -3688,6 +3753,7 @@ fn spawn_conpty_output_thread(
             log_file,
             first_output_received,
             &event_tx,
+            &input_command_tx,
             options,
         );
         if let Err(err) = &result {
@@ -3708,14 +3774,21 @@ fn spawn_conpty_input_thread(
     mut writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     cancel: Arc<AtomicBool>,
+    input_command_rx: mpsc::Receiver<ConptyInputCommand>,
     event_tx: mpsc::Sender<ConptyLoopMessage>,
     options: ConptyRunOptions,
 ) -> ConptyInputThread {
     let (done_tx, done_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
         conpty_debug(options.debug, "input bridge started");
-        let result =
-            run_conpty_input_bridge(&mut writer, master.as_ref(), &cancel, &event_tx, options);
+        let result = run_conpty_input_bridge(
+            &mut writer,
+            master.as_ref(),
+            &cancel,
+            &input_command_rx,
+            &event_tx,
+            options,
+        );
         if let Err(err) = result {
             send_conpty_event(
                 &event_tx,
@@ -3736,10 +3809,12 @@ fn run_conpty_input_bridge(
     writer: &mut Box<dyn Write + Send>,
     master: &dyn portable_pty::MasterPty,
     cancel: &Arc<AtomicBool>,
+    input_command_rx: &mpsc::Receiver<ConptyInputCommand>,
     event_tx: &mpsc::Sender<ConptyLoopMessage>,
     options: ConptyRunOptions,
 ) -> Result<()> {
     while !cancel.load(Ordering::SeqCst) {
+        drain_conpty_input_commands(writer, input_command_rx, options)?;
         if !event::poll(Duration::from_millis(20))
             .context("failed to poll terminal input for ConPTY")?
         {
@@ -3769,6 +3844,30 @@ fn run_conpty_input_bridge(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn drain_conpty_input_commands(
+    writer: &mut Box<dyn Write + Send>,
+    input_command_rx: &mpsc::Receiver<ConptyInputCommand>,
+    options: ConptyRunOptions,
+) -> Result<()> {
+    while let Ok(ConptyInputCommand::WriteSynthetic { response }) = input_command_rx.try_recv() {
+        writer
+            .write_all(response.bytes())
+            .context("failed to write synthetic terminal response to ConPTY")?;
+        writer
+            .flush()
+            .context("failed to flush synthetic terminal response to ConPTY")?;
+        conpty_debug(
+            options.debug,
+            format_args!(
+                "synthetic terminal response sent: {}",
+                response.debug_label()
+            ),
+        );
     }
     Ok(())
 }
@@ -3826,6 +3925,7 @@ fn spawn_conpty_startup_timeout_thread(
     first_output_received: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     event_tx: mpsc::Sender<ConptyLoopMessage>,
+    mut child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     options: ConptyRunOptions,
 ) -> Option<ConptyTimerThread> {
     let Some(timeout) = timeout else {
@@ -3847,6 +3947,13 @@ fn spawn_conpty_startup_timeout_thread(
             thread::sleep(Duration::from_millis(20));
         }
         if !cancel.load(Ordering::SeqCst) && !first_output_received.load(Ordering::SeqCst) {
+            conpty_debug(options.debug, "startup watchdog killing child");
+            if let Err(err) = child_killer.kill() {
+                conpty_debug(
+                    options.debug,
+                    format_args!("startup watchdog child kill failed: {err}"),
+                );
+            }
             send_conpty_event(&event_tx, ConptyEvent::StartupTimeout);
         }
         let _ = done_tx.send(());
@@ -3948,24 +4055,142 @@ fn join_conpty_output_thread_best_effort(
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConptyOutputParseState {
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConptyOutputInspection {
+    has_visible_output: bool,
+    synthetic_responses: Vec<ConptySyntheticResponse>,
+}
+
+#[cfg(windows)]
+struct ConptyOutputInspector {
+    state: ConptyOutputParseState,
+    csi_body: Vec<u8>,
+}
+
+#[cfg(windows)]
+impl Default for ConptyOutputInspector {
+    fn default() -> Self {
+        Self {
+            state: ConptyOutputParseState::Ground,
+            csi_body: Vec::new(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ConptyOutputInspector {
+    fn inspect(&mut self, bytes: &[u8]) -> ConptyOutputInspection {
+        let mut inspection = ConptyOutputInspection::default();
+        for &byte in bytes {
+            match self.state {
+                ConptyOutputParseState::Ground => match byte {
+                    0x1b => self.state = ConptyOutputParseState::Escape,
+                    0x9b => {
+                        self.csi_body.clear();
+                        self.state = ConptyOutputParseState::Csi;
+                    }
+                    0x9d => self.state = ConptyOutputParseState::Osc,
+                    0x00..=0x1f | 0x7f | 0x80..=0x9f => {}
+                    _ => inspection.has_visible_output = true,
+                },
+                ConptyOutputParseState::Escape => match byte {
+                    b'[' => {
+                        self.csi_body.clear();
+                        self.state = ConptyOutputParseState::Csi;
+                    }
+                    b']' => self.state = ConptyOutputParseState::Osc,
+                    0x1b => self.state = ConptyOutputParseState::Escape,
+                    _ => self.state = ConptyOutputParseState::Ground,
+                },
+                ConptyOutputParseState::Csi => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        if let Some(response) =
+                            conpty_synthetic_response_for_csi(&self.csi_body, byte)
+                        {
+                            inspection.synthetic_responses.push(response);
+                        }
+                        self.csi_body.clear();
+                        self.state = ConptyOutputParseState::Ground;
+                    } else if self.csi_body.len() < 64 {
+                        self.csi_body.push(byte);
+                    }
+                }
+                ConptyOutputParseState::Osc => match byte {
+                    0x07 => self.state = ConptyOutputParseState::Ground,
+                    0x1b => self.state = ConptyOutputParseState::OscEscape,
+                    _ => {}
+                },
+                ConptyOutputParseState::OscEscape => match byte {
+                    b'\\' => self.state = ConptyOutputParseState::Ground,
+                    0x1b => self.state = ConptyOutputParseState::OscEscape,
+                    _ => self.state = ConptyOutputParseState::Osc,
+                },
+            }
+        }
+        inspection
+    }
+}
+
+#[cfg(windows)]
+fn conpty_synthetic_response_for_csi(
+    body: &[u8],
+    final_byte: u8,
+) -> Option<ConptySyntheticResponse> {
+    match (body, final_byte) {
+        (b"6", b'n') => Some(ConptySyntheticResponse::CursorPosition),
+        (b"5", b'n') => Some(ConptySyntheticResponse::DeviceStatusOk),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
 fn tee_conpty_output(
     reader: &mut Box<dyn Read + Send>,
     mut log_file: std::fs::File,
     first_output_received: Arc<AtomicBool>,
     event_tx: &mpsc::Sender<ConptyLoopMessage>,
+    input_command_tx: &mpsc::Sender<ConptyInputCommand>,
     options: ConptyRunOptions,
 ) -> io::Result<u64> {
     conpty_debug(options.debug, "output reader started");
     let mut stdout = io::stdout();
     let mut buffer = [0_u8; 8192];
     let mut total_bytes = 0_u64;
+    let mut inspector = ConptyOutputInspector::default();
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
                 total_bytes += n as u64;
-                if !first_output_received.swap(true, Ordering::SeqCst) {
+                let inspection = inspector.inspect(&buffer[..n]);
+                for response in inspection.synthetic_responses {
+                    conpty_debug(
+                        options.debug,
+                        format_args!("terminal query detected: {}", response.debug_label()),
+                    );
+                    let _ = input_command_tx.send(ConptyInputCommand::WriteSynthetic { response });
+                }
+                if inspection.has_visible_output
+                    && !first_output_received.swap(true, Ordering::SeqCst)
+                {
                     send_conpty_event(event_tx, ConptyEvent::FirstOutput { bytes: n });
+                } else if !inspection.has_visible_output
+                    && !first_output_received.load(Ordering::SeqCst)
+                {
+                    conpty_debug(
+                        options.debug,
+                        format_args!("startup control output ignored: {n} bytes"),
+                    );
                 }
                 send_conpty_event(event_tx, ConptyEvent::OutputChunk { bytes: n });
                 log_file.write_all(&buffer[..n])?;
@@ -4998,6 +5223,67 @@ mod tests {
             conpty_exit_code(&portable_pty::ExitStatus::with_exit_code(u32::MAX)),
             i32::MAX
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_output_inspector_ignores_cursor_position_query_as_startup_output() {
+        let mut inspector = ConptyOutputInspector::default();
+
+        let inspection = inspector.inspect(b"\x1b[6n");
+
+        assert!(!inspection.has_visible_output);
+        assert_eq!(
+            inspection.synthetic_responses,
+            vec![ConptySyntheticResponse::CursorPosition]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_output_inspector_handles_split_cursor_position_query() {
+        let mut inspector = ConptyOutputInspector::default();
+
+        let first = inspector.inspect(b"\x1b[");
+        let second = inspector.inspect(b"6n");
+
+        assert!(!first.has_visible_output);
+        assert!(first.synthetic_responses.is_empty());
+        assert!(!second.has_visible_output);
+        assert_eq!(
+            second.synthetic_responses,
+            vec![ConptySyntheticResponse::CursorPosition]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_output_inspector_treats_prompt_text_as_startup_output() {
+        let mut inspector = ConptyOutputInspector::default();
+
+        let inspection = inspector.inspect(b"\x1b[?2004hPassword: ");
+
+        assert!(inspection.has_visible_output);
+        assert!(inspection.synthetic_responses.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_loop_receive_synthesizes_startup_timeout_without_worker_event() {
+        let (_tx, rx) = mpsc::channel();
+        let first_output_received = AtomicBool::new(false);
+
+        let message = recv_conpty_loop_message(
+            &rx,
+            &first_output_received,
+            Some(Instant::now() + Duration::from_millis(1)),
+        )
+        .expect("startup timeout message");
+
+        assert!(matches!(
+            message,
+            ConptyLoopMessage::Event(ConptyEvent::StartupTimeout)
+        ));
     }
 
     #[test]

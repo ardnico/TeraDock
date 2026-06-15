@@ -92,7 +92,10 @@ Record only these debug categories if they appear:
 - input bridge started
 - child wait started
 - startup timeout armed
+- terminal query detected
+- synthetic terminal response sent
 - first output received or not
+- startup watchdog killing child
 - user abort received
 - killing child
 - child killed
@@ -130,6 +133,8 @@ If this happens, paste into the smoke report:
 - The startup phase lines.
 - Whether debug had reached `output reader started`, `input bridge started`,
   and `child wait started`.
+- Whether debug printed `terminal query detected: cursor_position` and
+  `synthetic terminal response sent: cursor_position`.
 - Whether any `first output received: N bytes` debug line appeared.
 - Whether `ssh.exe` remained running after abort or exit.
 - Whether PowerShell accepts input immediately after the abort.
