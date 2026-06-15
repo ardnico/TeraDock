@@ -2375,9 +2375,10 @@ fn session_capture_lines(metadata: &session_log::SessionLogMetadata) -> Vec<Stri
 }
 
 fn print_log_tail(log_path: &Path, tail: usize) -> Result<()> {
-    let raw = std::fs::read_to_string(log_path)
+    let raw = std::fs::read(log_path)
         .with_context(|| format!("failed to read session log {}", log_path.display()))?;
-    let lines = raw.lines().collect::<Vec<_>>();
+    let display_text = session_log_display_text(&raw);
+    let lines = display_text.lines().collect::<Vec<_>>();
     let start = lines.len().saturating_sub(tail);
     println!();
     println!("log_tail:");
@@ -2385,6 +2386,25 @@ fn print_log_tail(log_path: &Path, tail: usize) -> Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+fn session_log_display_text(raw: &[u8]) -> String {
+    #[cfg(windows)]
+    {
+        String::from_utf8_lossy(&sanitize_conpty_log_bytes(raw)).into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(raw).into_owned()
+    }
+}
+
+#[cfg(windows)]
+fn sanitize_conpty_log_bytes(raw: &[u8]) -> Vec<u8> {
+    let mut sanitizer = ConptyLogSanitizer::default();
+    let mut sanitized = sanitizer.push(raw);
+    sanitized.extend(sanitizer.finish());
+    sanitized
 }
 
 fn handle_doctor(json: bool) -> Result<()> {
@@ -4142,6 +4162,272 @@ impl ConptyOutputInspector {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConptyLogCell {
+    ch: char,
+    width: usize,
+}
+
+#[cfg(windows)]
+struct ConptyLogSanitizer {
+    state: ConptyOutputParseState,
+    csi_body: Vec<u8>,
+    pending_text: Vec<u8>,
+    line: Vec<ConptyLogCell>,
+    cursor_col: usize,
+    row: usize,
+}
+
+#[cfg(windows)]
+impl Default for ConptyLogSanitizer {
+    fn default() -> Self {
+        Self {
+            state: ConptyOutputParseState::Ground,
+            csi_body: Vec::new(),
+            pending_text: Vec::new(),
+            line: Vec::new(),
+            cursor_col: 0,
+            row: 1,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ConptyLogSanitizer {
+    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &byte in bytes {
+            match self.state {
+                ConptyOutputParseState::Ground => match byte {
+                    0x1b => {
+                        self.flush_pending_text(&mut out);
+                        self.state = ConptyOutputParseState::Escape;
+                    }
+                    0x9b => {
+                        self.flush_pending_text(&mut out);
+                        self.csi_body.clear();
+                        self.state = ConptyOutputParseState::Csi;
+                    }
+                    0x9d => {
+                        self.flush_pending_text(&mut out);
+                        self.state = ConptyOutputParseState::Osc;
+                    }
+                    b'\n' => {
+                        self.flush_pending_text(&mut out);
+                        self.flush_line(&mut out);
+                    }
+                    b'\r' => {
+                        self.flush_pending_text(&mut out);
+                        self.cursor_col = 0;
+                    }
+                    b'\t' => {
+                        self.flush_pending_text(&mut out);
+                        let next_tab = ((self.cursor_col / 8) + 1) * 8;
+                        while self.cursor_col < next_tab {
+                            self.write_char(' ');
+                        }
+                    }
+                    0x07 | 0x00..=0x08 | 0x0b..=0x1f | 0x7f => {
+                        self.flush_pending_text(&mut out);
+                    }
+                    _ => self.pending_text.push(byte),
+                },
+                ConptyOutputParseState::Escape => match byte {
+                    b'[' => {
+                        self.csi_body.clear();
+                        self.state = ConptyOutputParseState::Csi;
+                    }
+                    b']' => self.state = ConptyOutputParseState::Osc,
+                    0x1b => self.state = ConptyOutputParseState::Escape,
+                    _ => self.state = ConptyOutputParseState::Ground,
+                },
+                ConptyOutputParseState::Csi => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        self.apply_csi(byte, &mut out);
+                        self.csi_body.clear();
+                        self.state = ConptyOutputParseState::Ground;
+                    } else if self.csi_body.len() < 64 {
+                        self.csi_body.push(byte);
+                    }
+                }
+                ConptyOutputParseState::Osc => match byte {
+                    0x07 => self.state = ConptyOutputParseState::Ground,
+                    0x1b => self.state = ConptyOutputParseState::OscEscape,
+                    _ => {}
+                },
+                ConptyOutputParseState::OscEscape => match byte {
+                    b'\\' => self.state = ConptyOutputParseState::Ground,
+                    0x1b => self.state = ConptyOutputParseState::OscEscape,
+                    _ => self.state = ConptyOutputParseState::Osc,
+                },
+            }
+        }
+        self.flush_pending_text(&mut out);
+        out
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.flush_pending_text(&mut out);
+        if !self.line.is_empty() {
+            self.flush_line(&mut out);
+        }
+        out
+    }
+
+    fn apply_csi(&mut self, final_byte: u8, out: &mut Vec<u8>) {
+        match final_byte {
+            b'C' => {
+                let count = csi_params(&self.csi_body).first().copied().unwrap_or(1);
+                self.cursor_col = self.cursor_col.saturating_add(count.max(1));
+            }
+            b'D' => {
+                let count = csi_params(&self.csi_body).first().copied().unwrap_or(1);
+                self.cursor_col = self.cursor_col.saturating_sub(count.max(1));
+            }
+            b'G' => {
+                let col = csi_params(&self.csi_body).first().copied().unwrap_or(1);
+                self.cursor_col = col.saturating_sub(1);
+            }
+            b'H' | b'f' => {
+                let params = csi_params(&self.csi_body);
+                let row = params.first().copied().unwrap_or(1).max(1);
+                let col = params.get(1).copied().unwrap_or(1).max(1);
+                if row > self.row && !self.line.is_empty() {
+                    self.flush_line(out);
+                }
+                self.row = row;
+                self.cursor_col = col - 1;
+            }
+            b'K' => {
+                let mode = csi_params(&self.csi_body).first().copied().unwrap_or(0);
+                match mode {
+                    0 => self.truncate_line_to_cursor(),
+                    1 => {
+                        let suffix = self.split_line_at_cursor();
+                        self.line = suffix;
+                        self.cursor_col = 0;
+                    }
+                    2 => {
+                        self.line.clear();
+                        self.cursor_col = 0;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn flush_pending_text(&mut self, _out: &mut Vec<u8>) {
+        if self.pending_text.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&self.pending_text).into_owned();
+        self.pending_text.clear();
+        for ch in text.chars() {
+            self.write_char(ch);
+        }
+    }
+
+    fn write_char(&mut self, ch: char) {
+        let width = display_width(ch);
+        if width == 0 {
+            return;
+        }
+        self.pad_to_cursor();
+        self.truncate_line_to_cursor();
+        self.line.push(ConptyLogCell { ch, width });
+        self.cursor_col = self.cursor_col.saturating_add(width);
+    }
+
+    fn pad_to_cursor(&mut self) {
+        let current_width = self.line_width();
+        if self.cursor_col <= current_width {
+            return;
+        }
+        for _ in 0..(self.cursor_col - current_width) {
+            self.line.push(ConptyLogCell { ch: ' ', width: 1 });
+        }
+    }
+
+    fn truncate_line_to_cursor(&mut self) {
+        let keep = self.index_for_col(self.cursor_col);
+        self.line.truncate(keep);
+    }
+
+    fn split_line_at_cursor(&self) -> Vec<ConptyLogCell> {
+        let start = self.index_for_col(self.cursor_col);
+        self.line[start..].to_vec()
+    }
+
+    fn index_for_col(&self, col: usize) -> usize {
+        let mut width = 0;
+        for (index, cell) in self.line.iter().enumerate() {
+            if width >= col || width.saturating_add(cell.width) > col {
+                return index;
+            }
+            width += cell.width;
+        }
+        self.line.len()
+    }
+
+    fn line_width(&self) -> usize {
+        self.line.iter().map(|cell| cell.width).sum()
+    }
+
+    fn flush_line(&mut self, out: &mut Vec<u8>) {
+        for cell in &self.line {
+            let mut encoded = [0_u8; 4];
+            out.extend_from_slice(cell.ch.encode_utf8(&mut encoded).as_bytes());
+        }
+        out.push(b'\n');
+        self.line.clear();
+        self.cursor_col = 0;
+        self.row = self.row.saturating_add(1);
+    }
+}
+
+#[cfg(windows)]
+fn csi_params(body: &[u8]) -> Vec<usize> {
+    let raw = String::from_utf8_lossy(body);
+    raw.trim_start_matches('?')
+        .split(';')
+        .filter_map(|part| part.parse::<usize>().ok())
+        .collect()
+}
+
+#[cfg(windows)]
+fn display_width(ch: char) -> usize {
+    if ch == '\u{0}' || ch.is_control() {
+        0
+    } else if is_wide_char(ch) {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(windows)]
+fn is_wide_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x115f
+            | 0x2329..=0x232a
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe19
+            | 0xfe30..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x1f300..=0x1f64f
+            | 0x1f900..=0x1f9ff
+            | 0x20000..=0x3fffd
+    )
+}
+
+#[cfg(windows)]
 fn conpty_synthetic_response_for_csi(
     body: &[u8],
     final_byte: u8,
@@ -4167,6 +4453,7 @@ fn tee_conpty_output(
     let mut buffer = [0_u8; 8192];
     let mut total_bytes = 0_u64;
     let mut inspector = ConptyOutputInspector::default();
+    let mut log_sanitizer = ConptyLogSanitizer::default();
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -4193,8 +4480,11 @@ fn tee_conpty_output(
                     );
                 }
                 send_conpty_event(event_tx, ConptyEvent::OutputChunk { bytes: n });
-                log_file.write_all(&buffer[..n])?;
-                log_file.flush()?;
+                let sanitized = log_sanitizer.push(&buffer[..n]);
+                if !sanitized.is_empty() {
+                    log_file.write_all(&sanitized)?;
+                    log_file.flush()?;
+                }
                 stdout.write_all(&buffer[..n])?;
                 stdout.flush()?;
             }
@@ -4211,6 +4501,11 @@ fn tee_conpty_output(
             }
             Err(err) => return Err(err),
         }
+    }
+    let sanitized = log_sanitizer.finish();
+    if !sanitized.is_empty() {
+        log_file.write_all(&sanitized)?;
+        log_file.flush()?;
     }
     conpty_debug(
         options.debug,
@@ -5284,6 +5579,82 @@ mod tests {
             message,
             ConptyLoopMessage::Event(ConptyEvent::StartupTimeout)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_log_sanitizer_strips_color_and_clear_sequences() {
+        let mut sanitizer = ConptyLogSanitizer::default();
+
+        let mut out = sanitizer.push(b"drwx <ESC>");
+        out.extend(sanitizer.push(b"\x1b[34m.\x1b[m/\x1b[K\n"));
+
+        assert_eq!(String::from_utf8(out).unwrap(), "drwx <ESC>./\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_log_sanitizer_turns_cursor_forward_into_spacing() {
+        let mut sanitizer = ConptyLogSanitizer::default();
+
+        let out = sanitizer.push(b"nico@ao03:~$\x1b[1Cdf -h\r\n");
+
+        assert_eq!(String::from_utf8(out).unwrap(), "nico@ao03:~$ df -h\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_log_sanitizer_applies_prompt_line_clear_redraw() {
+        let mut sanitizer = ConptyLogSanitizer {
+            row: 18,
+            ..Default::default()
+        };
+
+        let mut out = sanitizer.push("nico@ao03:~$ ｌｌ".as_bytes());
+        out.extend(sanitizer.push(b"\x1b[18;16H\x1b[K\x1b[18;14H\x1b[K\x07ll\r"));
+        out.extend(sanitizer.push(b"\x1b[?2004l\n"));
+
+        assert_eq!(String::from_utf8(out).unwrap(), "nico@ao03:~$ ll\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_log_sanitizer_splits_absolute_cursor_rows_into_lines() {
+        let mut sanitizer = ConptyLogSanitizer::default();
+
+        let mut out = sanitizer.push(b"Welcome\x1b[3;1H * Documentation\n");
+        out.extend(sanitizer.finish());
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Welcome\n * Documentation\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_log_sanitizer_preserves_utf8_japanese_text() {
+        let mut sanitizer = ConptyLogSanitizer::default();
+
+        let out = sanitizer.push("6月 15日 日本語\n".as_bytes());
+
+        assert_eq!(String::from_utf8(out).unwrap(), "6月 15日 日本語\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_log_display_text_sanitizes_existing_raw_conpty_logs() {
+        let raw = "Welcome\x1b[18;1H\
+                   nico@ao03:~$ ｌｌ\x1b[18;16H\x1b[K\x1b[18;14H\x1b[K\x07ll\r\x1b[?2004l\n\
+                   nico@ao03:~$\x1b[1Cdf -h\r\n\
+                   drwx \x1b[34m.\x1b[m/\x1b[K\n";
+
+        let display = session_log_display_text(raw.as_bytes());
+
+        assert_eq!(
+            display,
+            "Welcome\nnico@ao03:~$ ll\nnico@ao03:~$ df -h\ndrwx ./\n"
+        );
     }
 
     #[test]

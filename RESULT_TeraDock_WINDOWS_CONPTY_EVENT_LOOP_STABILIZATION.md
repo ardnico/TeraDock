@@ -38,6 +38,33 @@ Fixes added in this follow-up:
 - Add tests for cursor-position query detection, split query parsing, and
   visible prompt detection.
 
+## 2026-06-15 Log Readability Follow-Up
+
+The successful ConPTY log `sl_h27cu3m7.log` captured the SSH session, but the
+saved text still contained raw terminal control traffic:
+
+- `OSC` title updates from Windows OpenSSH.
+- `CSI` cursor movement and erase-to-end-of-line sequences from remote shell
+  line editing.
+- `SGR` color sequences from `ls --color`.
+- Bracketed paste mode toggles.
+
+This made the plain log look broken, for example when full-width `ｌｌ` input
+was erased and redrawn as `ll`, or when prompt spacing was represented as
+cursor movement instead of a literal space.
+
+Fixes added:
+
+- Keep raw ConPTY bytes for the live terminal display.
+- Save a sanitized best-effort text log instead of raw terminal control bytes.
+- Sanitize existing raw ConPTY logs when printing `td session show --tail`.
+- Strip common `OSC`, `SGR`, bracketed-paste, cursor visibility, and clear-line
+  sequences from the log.
+- Normalize simple cursor movement and clear-line redraws so prompt edits such
+  as `ｌｌ` -> `ll` are logged as the final readable command line.
+- Add tests for color stripping, cursor-forward prompt spacing, absolute row
+  movement, and prompt redraw cleanup.
+
 ## Phase 1 Findings
 
 - The previous main loop could wait on three independent paths: child wait

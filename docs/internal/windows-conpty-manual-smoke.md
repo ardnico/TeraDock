@@ -184,7 +184,9 @@ Confirm:
 - Remote output is visible in the local terminal.
 - The same remote output appears in the log file.
 - Typed commands appear in the log only when the remote side echoes them.
-- ANSI escape sequences are acceptable as preserved terminal bytes.
+- Common ANSI color, cursor, title, and line-editing escape sequences are
+  stripped or normalized in the saved log. The live terminal may still receive
+  raw terminal control bytes.
 - `td session list`, `show`, and `path` work for the saved session.
 - `td session list` keeps the `log_path` column to a log path only; backend
   warnings or notes do not appear in that column.
