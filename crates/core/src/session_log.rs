@@ -1234,7 +1234,10 @@ fn diagnostics_capture_fields(resolved_backend: &str) -> (Option<String>, Option
     } else if resolved_backend == SESSION_LOG_BACKEND_CONPTY {
         (
             Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
-            Some("ConPTY backend is experimental; use only the explicit PoC command.".to_string()),
+            Some(
+                "ConPTY backend is experimental_ready but still degraded; use only the explicit PoC command."
+                    .to_string(),
+            ),
         )
     } else {
         (None, None)
@@ -1311,10 +1314,15 @@ fn diagnostics_hints(
         _ => {}
     }
     if platform == SessionLogPlatform::Windows && resolved_backend == SESSION_LOG_BACKEND_CONPTY {
-        hints.push("ConPTY backend is experimental and is not selected by auto.".to_string());
+        hints.push(
+            "ConPTY backend has basic manual smoke evidence but is not selected by auto."
+                .to_string(),
+        );
         hints.push("Run the PoC with: td session conpty-test <profile_id>".to_string());
-        hints
-            .push("TUI integration is intentionally deferred until the PoC is proven.".to_string());
+        hints.push(
+            "TUI integration is intentionally deferred until broader Windows validation passes."
+                .to_string(),
+        );
     }
     if platform == SessionLogPlatform::Windows
         && resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
@@ -1835,7 +1843,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_conpty_is_experimental_and_not_used_by_standard_plan() {
+    fn explicit_conpty_is_experimental_ready_and_not_used_by_standard_plan() {
         let dir = temp_dir("explicit-conpty");
         let config = SessionLogConfig {
             enabled: true,
@@ -1861,6 +1869,10 @@ mod tests {
             diagnostics.content_capture_reliability.as_deref(),
             Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
         );
+        assert!(diagnostics
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("experimental_ready")));
         assert!(diagnostics
             .hints
             .iter()

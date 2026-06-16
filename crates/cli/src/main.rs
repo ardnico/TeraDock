@@ -32,7 +32,7 @@ use tdcore::profile::{
 };
 use tdcore::secret::{NewSecret, SecretStore};
 use tdcore::session_log::{
-    self, SessionLogFiles, SessionLogPlan, SessionLogReference, SESSION_LOG_BACKEND_CONPTY,
+    self, SessionLogFiles, SessionLogPlan, SessionLogReference,
     SESSION_LOG_REASON_METADATA_WRITE_FAILED, SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED,
     SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED,
 };
@@ -2237,15 +2237,15 @@ fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
     }
     if diagnostics.platform == "windows" {
         println!();
-        println!("ConPTY backend: experimental");
+        println!("ConPTY backend: experimental_ready");
         println!("ConPTY PoC command: td session conpty-test <profile_id>");
+        println!(
+            "Reason: manual smoke succeeded, but TUI integration and broader Windows validation are pending."
+        );
     }
     if diagnostics.status == "ready" {
         println!();
         println!("Status: ready");
-    } else if diagnostics.resolved_backend == SESSION_LOG_BACKEND_CONPTY {
-        println!();
-        println!("Status: experimental");
     } else if diagnostics.status != "disabled" {
         println!();
         println!("Status: {}", diagnostics.status);

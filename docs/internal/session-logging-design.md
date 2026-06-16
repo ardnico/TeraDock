@@ -61,7 +61,7 @@ Pros:
 Cons:
 - Larger implementation and test surface.
 - Higher risk of breaking TUI terminal restore behavior.
-- Still experimental. It is exposed only through `td session conpty-test <profile_id>`.
+- Still degraded. Basic manual smoke now exists, so the explicit candidate label is `experimental_ready`, but it is exposed only through `td session conpty-test <profile_id>`.
 - The initial CLI input bridge is intentionally small and is not a full terminal emulator layer.
 
 ### PowerShell Transcript backend
@@ -108,14 +108,25 @@ Cons:
   explicit `powershell-transcript` reports `degraded`, uses
   `content_capture=best_effort`, and warns that SSH input/output may not be
   captured.
-- Explicit `conpty` is recognized as an experimental backend setting, but
-  standard `td connect` and TUI `s` do not use it yet. Use the PoC command
-  `td session conpty-test <profile_id>` instead.
+- Explicit `conpty` is recognized as an `experimental_ready` backend setting,
+  but standard `td connect` and TUI `s` do not use it yet. Diagnostics remain
+  degraded because broader Windows validation and TUI integration are pending.
+  Use the PoC command `td session conpty-test <profile_id>` instead.
 - Missing PowerShell or `ssh` for explicit `powershell-transcript` reports
   not-ready errors instead of silently opening an unlogged SSH session.
 - If `script` is unavailable or setup fails under `auto`, continue the SSH session without logging when possible and record a no-log reason.
 - Do not auto-select ConPTY, wire it into TUI, add tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
 - Windows ConPTY design is tracked separately in [Windows ConPTY Session Logging Design](windows-conpty-session-logging-design.md).
+
+## Windows ConPTY status model
+
+- `td session conpty-test <profile_id>` is still an experimental command.
+- `session.log.backend=conpty` is labeled `experimental_ready` after basic
+  manual smoke, but diagnostics keep the overall status `degraded`.
+- `session.log.backend=auto` still resolves to `no-log` on Windows.
+- TUI `s` and normal `td connect` do not use ConPTY yet.
+- PowerShell Transcript remains explicit best-effort/degraded and is not a
+  reliable SSH terminal-content backend.
 
 ## Data model
 

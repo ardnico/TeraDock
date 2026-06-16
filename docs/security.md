@@ -54,7 +54,7 @@ td config set session.log.backend auto
 td config get session.log.dir --resolved
 ```
 
-The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit experimental ConPTY PoC command.
+The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit ConPTY PoC command and its candidate label.
 
 The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
 
@@ -69,9 +69,9 @@ The terminal transcript is different. TeraDock does not perform complete secret 
 
 Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output.
 
-`td session conpty-test <profile_id>` is an explicit Windows-only ConPTY PoC and is not selected by `auto`. It writes the ConPTY output stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and ANSI escape sequences. Typed input appears in the log when the remote terminal or program echoes it.
+`td session conpty-test <profile_id>` is an explicit Windows-only ConPTY PoC and is not selected by `auto`. It writes the ConPTY output stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and terminal control output after best-effort sanitization. Typed input appears in the log when the remote terminal or program echoes it.
 
-The ConPTY PoC remains degraded until manual smoke evidence proves SSH login, terminal output teeing, exit-code metadata, Ctrl-C recovery, resize behavior, UTF-8 behavior, and controlled failure cases. It is not integrated into the TUI `s` path and must not be promoted to `auto` before that evidence is reviewed.
+The ConPTY PoC has basic manual smoke evidence for SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility. It remains degraded and only `experimental_ready` until Ctrl-C recovery, startup timeout, bad host, auth failure, UTF-8/Japanese behavior, child cleanup, and broader Windows terminal coverage are reviewed. It is not integrated into the TUI `s` path and must not be promoted to `auto` before that evidence is complete.
 
 Use these commands to inspect saved sessions:
 

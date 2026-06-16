@@ -25,6 +25,30 @@ Do not use this checklist to promote ConPTY to `auto`, default session logging,
 or the TUI `s` path. The goal is to collect enough manual evidence to decide
 whether the PoC can continue.
 
+## Recorded Evidence
+
+2026-06-16 local review found one successful ConPTY session. The detailed
+evidence is recorded in `RESULT_TeraDock_WINDOWS_CONPTY_LOGGING_SUCCESS.md`.
+
+Verified from that session:
+
+- SSH login produced remote shell output in the saved ConPTY log.
+- The log contains a remote prompt, echoed commands, command output, logout,
+  and the connection-close line.
+- `td session list`, `td session show`, `td session show --tail`, and
+  `td session path` can inspect the saved ConPTY session.
+- Metadata contains safe fields only and does not store auth args, full SSH
+  command strings, private key paths, passwords, tokens, or secrets.
+
+Still required before explicit stable backend promotion:
+
+- Ctrl-C abort evidence from a clean process snapshot.
+- Startup timeout failed metadata.
+- Bad host failed metadata.
+- Auth failure behavior.
+- Purpose-built UTF-8/Japanese command output evidence.
+- Broader Windows terminal coverage.
+
 ## Prerequisites
 
 - Windows 10/11 with ConPTY support.

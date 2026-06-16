@@ -30,8 +30,8 @@ Current PoC implementation pieces:
 - Pump pseudo console output back to the user's terminal and tee the same bytes to the session log file.
 - Preserve exit code propagation from `ssh.exe`.
 - Handle terminal resize events by calling the ConPTY resize API when crossterm reports a resize.
-- Handle Ctrl-C as a raw `0x03` byte sent to the child and rely on a raw-mode guard to restore the local terminal.
-- Write initial logs as UTF-8 best-effort text; ANSI escape sequences may be preserved.
+- Treat Ctrl-C as a parent-side emergency abort for the PoC and rely on a raw-mode guard to restore the local terminal.
+- Write initial logs as UTF-8 best-effort text after stripping or normalizing common terminal control sequences.
 - Keep TUI integration out of scope until the PoC succeeds in manual smoke.
 
 ## Stabilization Status
@@ -51,9 +51,16 @@ low-risk PoC improvements:
 - Windows ConPTY exit codes are converted into the current metadata `i32`
   range without wrapping large `u32` values negative.
 
-Manual evidence is still required before treating ConPTY as more than an
-explicit PoC. Use `docs/internal/windows-conpty-manual-smoke.md` to collect the
-next run.
+The 2026-06-16 evidence pass found one successful saved ConPTY session
+(`sl_dczccyww`) from profile `p_ojql3dws`. That session proves the basic path:
+SSH login produced visible remote output, the output was saved to the session
+log, metadata was written with `backend=conpty`, `status=completed`, and
+`exit_code=0`, and `td session list/show/path` could inspect the session.
+
+This is enough to call the explicit candidate `experimental_ready`, but not
+enough to call it `ready`. Ctrl-C abort, startup timeout, bad host, auth
+failure, UTF-8/Japanese edge cases, child cleanup in a clean process snapshot,
+and broader Windows terminal coverage still need recorded evidence.
 
 ## Phase 1 Findings
 
@@ -73,10 +80,11 @@ next run.
 - Resize handling is documented and the PoC forwards resize events when crossterm reports them.
 - UTF-8/Japanese output is not obviously corrupted.
 
-No success criterion is considered satisfied by source inspection alone. The
-criteria require a manual Windows run transcript that includes the command,
-typed remote commands, `td session show`, metadata JSON, log text, Ctrl-C,
-resize, UTF-8, and controlled failure-case observations.
+Source inspection alone is not evidence. As of 2026-06-16, the successful
+`sl_dczccyww` smoke satisfies only the basic login/output/log/metadata/list
+items. The remaining criteria require manual Windows run evidence that includes
+Ctrl-C, resize, UTF-8/Japanese, bad host, auth failure, timeout, and clean child
+process observations.
 
 ## PoC No-Go Criteria
 
@@ -92,9 +100,50 @@ resize, UTF-8, and controlled failure-case observations.
 - `disabled`: session logging is off.
 - `not_ready`: the selected backend cannot run on the current platform or is missing required dependencies.
 - `degraded`: the backend is available but best-effort, experimental, or not reliable enough to treat as the production terminal-content path.
+- `experimental_ready`: ConPTY-only candidate label for the explicit backend after basic manual smoke has succeeded, while the overall diagnostic status remains `degraded`.
 - `ready`: the backend is available and considered suitable for the supported platform.
 
-PowerShell Transcript remains `degraded`. The ConPTY PoC is also treated as experimental/degraded. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
+PowerShell Transcript remains `degraded`. The ConPTY PoC command remains experimental. The explicit `session.log.backend=conpty` candidate can be described as `experimental_ready`, but diagnostics still report `Status: degraded` until broader Windows and TUI evidence exists. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
+
+Expected doctor shape:
+
+```text
+ConPTY backend: experimental_ready
+ConPTY PoC command: td session conpty-test <profile_id>
+Reason: manual smoke succeeded, but TUI integration and broader Windows validation are pending.
+Status: degraded
+```
+
+## Promotion Criteria: PoC -> Explicit Stable Backend
+
+ConPTY can be treated as stable for explicit `session.log.backend=conpty` only
+after all of the following are recorded:
+
+- SSH login works with a normal OpenSSH profile.
+- Remote shell output is visible in the current terminal.
+- Remote shell output is saved to the session log.
+- User-entered commands are captured at an acceptable level.
+- `exit` returns to the local shell.
+- SSH exit code is recorded.
+- Ctrl-C abort returns to the local shell.
+- Child `ssh.exe` does not remain after abort/exit.
+- Startup timeout produces failed metadata.
+- Bad host produces failed metadata.
+- Auth failure does not corrupt the terminal.
+- UTF-8/Japanese output is acceptable.
+- Metadata excludes auth args, full command strings, private key paths, passwords, tokens, and secrets.
+
+## Promotion Criteria: Explicit Backend -> Auto Backend
+
+Auto promotion requires more evidence than explicit backend stabilization:
+
+- Multiple Windows environments verified.
+- Windows Terminal and PowerShell tested.
+- At least one failure mode per category is documented.
+- Docs clearly warn about captured terminal secrets.
+- No known terminal restore bug.
+- No known child process leak.
+- TUI integration has passed manual smoke.
 
 ## Log Format
 
@@ -128,5 +177,5 @@ PowerShell Transcript remains `degraded`. The ConPTY PoC is also treated as expe
 ## Suggested Roadmap
 
 - v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY only as `td session conpty-test <profile_id>`; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Stabilize the ConPTY proof of concept for `ssh.exe` with manual smoke evidence for terminal I/O teeing, resize handling, Ctrl-C behavior, exit code propagation, UTF-8/Japanese output, and log metadata.
-- v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend.
+- v1.2: Move the explicit ConPTY candidate from `experimental_ready` to explicit stable only after Ctrl-C, timeout, bad host, auth failure, UTF-8/Japanese, cleanup, and broader Windows terminal evidence is recorded.
+- v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend and only then consider `auto` selection.
