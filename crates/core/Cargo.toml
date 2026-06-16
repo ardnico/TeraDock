@@ -27,3 +27,8 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 regex = { workspace = true }
 wait-timeout = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+portable-pty = { workspace = true }

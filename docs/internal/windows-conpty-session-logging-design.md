@@ -32,7 +32,7 @@ Current PoC implementation pieces:
 - Handle terminal resize events by calling the ConPTY resize API when crossterm reports a resize.
 - Treat Ctrl-C as a parent-side emergency abort for the PoC and rely on a raw-mode guard to restore the local terminal.
 - Write initial logs as UTF-8 best-effort text after stripping or normalizing common terminal control sequences.
-- Keep TUI integration out of scope until the PoC succeeds in manual smoke.
+- Share the ConPTY runner between `td session conpty-test`, explicit `td connect`, and the TUI `s` path while keeping `auto` disabled.
 
 ## Stabilization Status
 
@@ -67,7 +67,7 @@ and broader Windows terminal coverage still need recorded evidence.
 - PowerShell Transcript does not capture the missing content: SSH-side typed commands, remote shell output, interactive prompt I/O, and other terminal content after `ssh.exe` takes over can be absent. The saved file can contain only PowerShell transcript start/end metadata.
 - Existing metadata warning behavior is correct: explicit `powershell-transcript` is marked best-effort/degraded, `content_capture_reliable=false`, and host-only/empty logs are annotated with `host_only_or_empty`.
 - The ConPTY PoC implementation scope is a Windows-only explicit CLI, SSH invocation reuse from profile id, ConPTY child spawn, terminal input/output bridge, output tee to the session log file, metadata completion, exit-code propagation, and `td session list/show/path` compatibility.
-- TUI integration is avoided because the existing TUI owns raw-mode, alternate-screen, mouse capture, and same-terminal suspend/restore behavior. Mixing that with an unproven PTY bridge would increase the blast radius before the Windows terminal behavior is manually proven.
+- TUI integration is intentionally minimal: the existing TUI still owns raw-mode, alternate-screen, mouse capture, and same-terminal suspend/restore behavior. After TUI suspension, the same shared ConPTY runner is called only for SSH profiles when `session.log.enabled=true` and `session.log.backend=conpty`.
 
 ## PoC Success Criteria
 
@@ -103,14 +103,15 @@ process observations.
 - `experimental_ready`: ConPTY-only candidate label for the explicit backend after basic manual smoke has succeeded, while the overall diagnostic status remains `degraded`.
 - `ready`: the backend is available and considered suitable for the supported platform.
 
-PowerShell Transcript remains `degraded`. The ConPTY PoC command remains experimental. The explicit `session.log.backend=conpty` candidate can be described as `experimental_ready`, but diagnostics still report `Status: degraded` until broader Windows and TUI evidence exists. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
+PowerShell Transcript remains `degraded`. The ConPTY PoC command remains experimental. The explicit `session.log.backend=conpty` backend is `experimental_ready`, but diagnostics still report `Status: degraded` until broader Windows evidence exists. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
 
 Expected doctor shape:
 
 ```text
 ConPTY backend: experimental_ready
+ConPTY explicit config: td config set session.log.backend conpty
 ConPTY PoC command: td session conpty-test <profile_id>
-Reason: manual smoke succeeded, but TUI integration and broader Windows validation are pending.
+Reason: manual smoke succeeded, but auto selection is still deferred.
 Status: degraded
 ```
 
@@ -172,10 +173,10 @@ Auto promotion requires more evidence than explicit backend stabilization:
 - Secret masking.
 - Storing SSH auth args, full command strings, or private key paths in metadata.
 - Automatic `auto -> conpty` selection.
-- TUI integration before manual smoke evidence.
+- Deep TUI embedding; the TUI should call the shared runner only after its existing suspend path.
 
 ## Suggested Roadmap
 
-- v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY only as `td session conpty-test <profile_id>`; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Move the explicit ConPTY candidate from `experimental_ready` to explicit stable only after Ctrl-C, timeout, bad host, auth failure, UTF-8/Japanese, cleanup, and broader Windows terminal evidence is recorded.
+- v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY as an explicit experimental backend for `td connect` and TUI `s`, with `td session conpty-test <profile_id>` retained for focused smoke; surface metadata, doctor, show, and config UI warnings.
+- v1.2: Move the explicit ConPTY backend from `experimental_ready` to explicit stable only after Ctrl-C, timeout, bad host, auth failure, UTF-8/Japanese, cleanup, and broader Windows terminal evidence is recorded.
 - v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend and only then consider `auto` selection.

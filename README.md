@@ -117,16 +117,18 @@ Interactive SSH terminal transcript logging is available for v1.1 preparation an
 ./td config ui
 ./td config set session.log.enabled true
 ./td config set session.log.backend auto
+./td config set session.log.backend conpty
 ./td config get session.log.dir --resolved
 ./td session list
 td session conpty-test <profile_id>
+td connect <profile_id> --log-backend conpty
 td session show <session_id>
 td session path <session_id>
 ```
 
-Use `td session doctor` to see whether logging is enabled, which backend will be used, backend status (`ready`, `degraded`, or `not_ready`), content-capture reliability, dependency availability, whether the log directory looks writable, and which saved session log is newest. On Windows it also prints the explicit ConPTY PoC command and the current ConPTY candidate label. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
+Use `td session doctor` to see whether logging is enabled, which backend will be used, backend status (`ready`, `degraded`, or `not_ready`), content-capture reliability, dependency availability, whether the log directory looks writable, and which saved session log is newest. On Windows it also prints the explicit ConPTY backend command, the PoC command, and the current ConPTY candidate label. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
 
-When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured. On Windows, `auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_conpty`. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. A Windows ConPTY PoC is available as `td session conpty-test <profile_id>` and uses `portable-pty`. Basic manual smoke has shown SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility, so the candidate label is now `experimental_ready`; it is still degraded, is not selected by `auto`, and is not wired into the TUI `s` flow or normal `td connect` flow. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
+When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured. On Windows, `auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`. To capture SSH terminal I/O on Windows, explicitly set `session.log.backend=conpty` with `session.log.enabled=true`, or run `td connect <profile_id> --log-backend conpty` for that SSH connect. The TUI `s` path uses ConPTY only when those saved settings are explicit and the selected profile is SSH. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. `td session conpty-test <profile_id>` remains available as a focused Windows ConPTY smoke command. ConPTY uses `portable-pty`; basic manual smoke has shown SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility, so the explicit candidate label is `experimental_ready`. It is still degraded and is not selected by `auto`. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
 
 ## Safety Model
 
@@ -154,7 +156,7 @@ The export format includes profiles, CommandSets, parser definitions, config set
 
 TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
 
-Interactive session logging uses `script` on Linux/macOS. Windows full SSH terminal-content logging requires ConPTY; `td session conpty-test <profile_id>` is an explicit `experimental_ready` PoC, while `auto` still does not choose ConPTY. The optional PowerShell Transcript backend is experimental best-effort and may miss SSH-side commands and output.
+Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-content logging requires explicit ConPTY selection: set `session.log.enabled=true` and `session.log.backend=conpty`, or use `td connect <profile_id> --log-backend conpty`. `auto` still does not choose ConPTY. The optional PowerShell Transcript backend is experimental best-effort and may miss SSH-side commands and output.
 
 ## Project Operations
 
@@ -167,7 +169,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows full SSH termi
 
 - TUI recent-profile browsing is not implemented; use `td recent` or `td recent --json`.
 - Terminal emulator launch and tmux integration are not implemented.
-- ConPTY-based logging exists only as an explicit Windows PoC command; basic logging smoke has succeeded, but production/default integration is not implemented in the v1.1 candidate path.
+- ConPTY-based logging is an explicit Windows experimental backend; basic logging smoke has succeeded, but production/default `auto` integration is not implemented in the v1.1 candidate path.
 - CommandSet execution still receives SSH path and auth args separately inside `tdcore::cmdset_runner`.
 - Transfer and tunnel command shapes are not fully represented by `SshInvocation` yet.
 - Automated tests do not include real SSH server integration tests.

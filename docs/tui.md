@@ -65,6 +65,7 @@ td config ui
 td config get session.log.enabled --resolved
 td config set session.log.enabled true
 td config set session.log.backend auto
+td config set session.log.backend conpty
 td config get session.log.dir --resolved
 ```
 
@@ -76,7 +77,7 @@ Defaults:
 
 When logging is enabled, pressing `s` still uses the same TUI suspend/resume lifecycle. TeraDock leaves raw mode and the alternate screen before starting the logged SSH session, then returns to the TUI after the session exits.
 
-Linux/macOS use the `script` backend when available. Windows `auto` resolves to `no-log` with `windows_terminal_content_logging_requires_conpty` because reliable Windows SSH terminal-content logging requires a future ConPTY backend. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
+Linux/macOS use the `script` backend when available. Windows `auto` resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; ConPTY is not selected by `auto`. To capture SSH terminal I/O from the TUI `s` path on Windows, save `session.log.enabled=true` and `session.log.backend=conpty`, then open an SSH profile with `s`. Explicit `conpty` uses the shared Windows ConPTY runner and remains degraded/experimental_ready until broader manual evidence exists. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
 
 Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, dependency availability, log directory existence and writability, platform support, fallback reason, content-capture reliability, warning, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
 
@@ -95,7 +96,7 @@ td session path <session_id>
 
 Session metadata includes the session id, profile id, user, host, port, start/end times, duration, exit code, backend, status, log path, metadata path, and capture reliability/status warnings. It does not include SSH auth arguments, full command strings, private key paths, passwords, secrets, or tokens.
 
-The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript. On Windows, PowerShell Transcript is explicit best-effort only; it may capture only host transcript metadata and omit remote commands/output.
+The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript. On Windows, ConPTY logs SSH terminal I/O when explicitly selected, and PowerShell Transcript is explicit best-effort only; it may capture only host transcript metadata and omit remote commands/output.
 
 When a TUI SSH session writes to `op_logs`, the row includes only `session_log_saved`, `session_log_id` when a log was saved, or `session_log_reason` when no log was saved. The log path is kept in the session metadata rather than copied into `op_logs`.
 
@@ -115,6 +116,6 @@ Single runs populate stdout, stderr, and parsed tabs. Bulk runs also populate th
 
 - Recent SSH sessions are available through `td recent`, not a TUI pane.
 - Interactive SSH opens in the current terminal only; terminal emulator launch is not implemented.
-- Windows full SSH terminal-content logging is not implemented yet; ConPTY support is required.
+- Windows full SSH terminal-content logging is implemented only as the explicit experimental ConPTY backend; `auto` still resolves to no-log.
 - tmux integration is not implemented.
 - The automated test suite does not connect to a real SSH server.

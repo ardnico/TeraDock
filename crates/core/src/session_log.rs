@@ -38,9 +38,8 @@ pub const SESSION_LOG_REASON_SCRIPT_LAUNCH_FAILED: &str = "script_launch_failed"
 pub const SESSION_LOG_REASON_POWERSHELL_LAUNCH_FAILED: &str = "powershell_launch_failed";
 pub const SESSION_LOG_REASON_CONPTY_LAUNCH_FAILED: &str = "conpty_launch_failed";
 pub const SESSION_LOG_REASON_METADATA_WRITE_FAILED: &str = "metadata_write_failed";
-pub const SESSION_LOG_REASON_CONPTY_POC_ONLY: &str = "conpty_backend_poc_only";
 pub const SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY: &str =
-    "windows_terminal_content_logging_requires_conpty";
+    "windows_terminal_content_logging_requires_explicit_conpty";
 pub const SESSION_LOG_STATUS_FAILED: &str = "failed";
 pub const SESSION_LOG_STATUS_ABORTED: &str = "aborted";
 pub const SESSION_LOG_FAILURE_PHASE_CREATE_LOG: &str = "create_log";
@@ -62,15 +61,19 @@ pub const SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED: &str = "child_wait_faile
 pub const SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT: &str = "initial_output_timeout";
 pub const SESSION_LOG_FAILURE_REASON_CTRL_C: &str = "ctrl_c";
 pub const SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT: &str = "best_effort";
+pub const SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO: &str = "terminal_io";
+pub const SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY: &str = "experimental_ready";
 pub const SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "powershell_transcript_may_not_capture_interactive_ssh_io";
-pub const SESSION_LOG_BACKEND_WARNING_CONPTY_EXPERIMENTAL: &str =
-    "conpty_backend_is_experimental_poc";
+pub const SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO: &str =
+    "conpty_backend_is_explicit_and_not_selected_by_auto";
 pub const SESSION_LOG_CAPTURE_STATUS_HOST_ONLY_OR_EMPTY: &str = "host_only_or_empty";
 pub const SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT: &str =
     "No SSH terminal content appears to have been captured.";
 pub const SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "may not capture interactive SSH input/output";
+pub const SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL: &str =
+    "ConPTY logging is experimental but captures SSH terminal I/O in manual smoke.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLogBackendSetting {
@@ -183,6 +186,10 @@ pub enum SessionLogPlan {
         files: SessionLogFiles,
         launch_failure_policy: SessionLogLaunchFailurePolicy,
     },
+    Conpty {
+        files: SessionLogFiles,
+        launch_failure_policy: SessionLogLaunchFailurePolicy,
+    },
 }
 
 impl SessionLogPlan {
@@ -193,6 +200,7 @@ impl SessionLogPlan {
             Self::Error { reason } => SessionLogReference::not_saved(reason),
             Self::Script { .. } => SessionLogReference::not_saved("not_completed"),
             Self::PowerShellTranscript { .. } => SessionLogReference::not_saved("not_completed"),
+            Self::Conpty { .. } => SessionLogReference::not_saved("not_completed"),
         }
     }
 
@@ -211,6 +219,10 @@ impl SessionLogPlan {
             )),
             Self::PowerShellTranscript { files, .. } => Some(format!(
                 "TeraDock PowerShell Transcript logging is experimental and best-effort; it may miss interactive SSH input/output. Log path: {}.",
+                files.log_path.display()
+            )),
+            Self::Conpty { files, .. } => Some(format!(
+                "TeraDock ConPTY logging is experimental and explicit; terminal output may include secrets and will be saved to {}.",
                 files.log_path.display()
             )),
         }
@@ -242,6 +254,8 @@ pub struct SessionLogMetadata {
     pub content_capture: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_capture_reliable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -554,6 +568,25 @@ pub fn plan_for_target_with_ssh(
     plan_from_config_with_environment(&config, SessionLogPlatform::current(), clients)
 }
 
+pub fn plan_for_explicit_backend_with_ssh(
+    conn: &Connection,
+    ssh_executable: &Path,
+    backend: SessionLogBackendSetting,
+) -> Result<SessionLogPlan> {
+    let config = SessionLogConfig {
+        enabled: true,
+        dir: configured_session_log_dir(conn)?,
+        backend,
+    };
+    let mut clients = detect_session_log_clients();
+    clients.ssh = Some(ssh_executable.to_path_buf());
+    Ok(plan_from_config_with_environment(
+        &config,
+        SessionLogPlatform::current(),
+        clients,
+    ))
+}
+
 pub fn plan_from_config(config: &SessionLogConfig) -> SessionLogPlan {
     plan_from_config_with_environment(
         config,
@@ -612,9 +645,7 @@ fn plan_from_config_with_environment(
                     reason: SESSION_LOG_REASON_UNSUPPORTED_ON_PLATFORM.to_string(),
                 };
             }
-            SessionLogPlan::Error {
-                reason: SESSION_LOG_REASON_CONPTY_POC_ONLY.to_string(),
-            }
+            plan_conpty_backend(config, clients.ssh, false)
         }
         SessionLogBackendSetting::NoLog => unreachable!("handled above"),
     }
@@ -657,6 +688,24 @@ fn plan_powershell_backend(
     };
     SessionLogPlan::PowerShellTranscript {
         powershell_path: powershell_path.expect("checked above"),
+        files,
+        launch_failure_policy: launch_policy(auto_fallback),
+    }
+}
+
+fn plan_conpty_backend(
+    config: &SessionLogConfig,
+    ssh_path: Option<PathBuf>,
+    auto_fallback: bool,
+) -> SessionLogPlan {
+    if ssh_path.is_none() {
+        return fallback_or_error(auto_fallback, SESSION_LOG_REASON_SSH_NOT_FOUND);
+    }
+    let files = match prepare_session_files(&config.dir, auto_fallback) {
+        Ok(files) => files,
+        Err(plan) => return plan,
+    };
+    SessionLogPlan::Conpty {
         files,
         launch_failure_policy: launch_policy(auto_fallback),
     }
@@ -903,6 +952,7 @@ fn complete_logged_session_with_status(
         failure_reason: completion.failure_reason,
         content_capture: None,
         content_capture_reliable: None,
+        backend_status: None,
         backend_warning: None,
         content_capture_status: None,
         content_capture_warning: None,
@@ -1233,11 +1283,8 @@ fn diagnostics_capture_fields(resolved_backend: &str) -> (Option<String>, Option
         )
     } else if resolved_backend == SESSION_LOG_BACKEND_CONPTY {
         (
-            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
-            Some(
-                "ConPTY backend is experimental_ready but still degraded; use only the explicit PoC command."
-                    .to_string(),
-            ),
+            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string()),
+            Some(SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL.to_string()),
         )
     } else {
         (None, None)
@@ -1305,24 +1352,13 @@ fn diagnostics_hints(
                     .to_string(),
             );
         }
-        Some(SESSION_LOG_REASON_CONPTY_POC_ONLY) => {
-            hints.push(
-                "ConPTY is a PoC backend; use td session conpty-test <profile_id> explicitly."
-                    .to_string(),
-            );
-        }
         _ => {}
     }
     if platform == SessionLogPlatform::Windows && resolved_backend == SESSION_LOG_BACKEND_CONPTY {
-        hints.push(
-            "ConPTY backend has basic manual smoke evidence but is not selected by auto."
-                .to_string(),
-        );
-        hints.push("Run the PoC with: td session conpty-test <profile_id>".to_string());
-        hints.push(
-            "TUI integration is intentionally deferred until broader Windows validation passes."
-                .to_string(),
-        );
+        hints.push("ConPTY backend is explicit and remains unselected by auto.".to_string());
+        hints.push("Set it with: td config set session.log.backend conpty".to_string());
+        hints.push("Open settings UI with: td config ui".to_string());
+        hints.push("ConPTY remains explicit until broader Windows validation passes.".to_string());
     }
     if platform == SessionLogPlatform::Windows
         && resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
@@ -1391,9 +1427,11 @@ fn annotate_powershell_transcript_metadata(metadata: &mut SessionLogMetadata, lo
 }
 
 fn annotate_conpty_metadata(metadata: &mut SessionLogMetadata) {
-    metadata.content_capture = Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string());
-    metadata.content_capture_reliable = Some(false);
-    metadata.backend_warning = Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPERIMENTAL.to_string());
+    metadata.content_capture = Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO.to_string());
+    metadata.content_capture_reliable = Some(true);
+    metadata.backend_status = Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string());
+    metadata.backend_warning =
+        Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO.to_string());
 }
 
 fn powershell_transcript_is_host_only_or_empty(raw: &str) -> bool {
@@ -1843,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_conpty_is_experimental_ready_and_not_used_by_standard_plan() {
+    fn explicit_conpty_is_experimental_ready_and_plans_on_windows() {
         let dir = temp_dir("explicit-conpty");
         let config = SessionLogConfig {
             enabled: true,
@@ -1867,16 +1905,16 @@ mod tests {
         assert_eq!(diagnostics.status, "degraded");
         assert_eq!(
             diagnostics.content_capture_reliability.as_deref(),
-            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
         );
-        assert!(diagnostics
-            .warning
-            .as_deref()
-            .is_some_and(|warning| warning.contains("experimental_ready")));
+        assert_eq!(
+            diagnostics.warning.as_deref(),
+            Some(SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL)
+        );
         assert!(diagnostics
             .hints
             .iter()
-            .any(|hint| hint.contains("td session conpty-test")));
+            .any(|hint| hint.contains("session.log.backend conpty")));
 
         let plan = plan_from_config_with_environment(
             &config,
@@ -1887,12 +1925,16 @@ mod tests {
                 script: None,
             },
         );
-        assert_eq!(
-            plan,
-            SessionLogPlan::Error {
-                reason: SESSION_LOG_REASON_CONPTY_POC_ONLY.to_string()
-            }
-        );
+        match plan {
+            SessionLogPlan::Conpty {
+                launch_failure_policy,
+                ..
+            } => assert_eq!(
+                launch_failure_policy,
+                SessionLogLaunchFailurePolicy::FailSession
+            ),
+            other => panic!("expected ConPTY plan, got {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -2112,12 +2154,16 @@ mod tests {
         assert_eq!(loaded.backend, SESSION_LOG_BACKEND_CONPTY);
         assert_eq!(
             metadata.content_capture.as_deref(),
-            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+            Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO)
         );
-        assert_eq!(metadata.content_capture_reliable, Some(false));
+        assert_eq!(metadata.content_capture_reliable, Some(true));
+        assert_eq!(
+            metadata.backend_status.as_deref(),
+            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+        );
         assert_eq!(
             metadata.backend_warning.as_deref(),
-            Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPERIMENTAL)
+            Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO)
         );
         assert_eq!(metadata.failure_phase, None);
         assert_eq!(metadata.failure_reason, None);
@@ -2166,9 +2212,13 @@ mod tests {
         );
         assert_eq!(
             metadata.content_capture.as_deref(),
-            Some(SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT)
+            Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO)
         );
-        assert_eq!(metadata.content_capture_reliable, Some(false));
+        assert_eq!(metadata.content_capture_reliable, Some(true));
+        assert_eq!(
+            metadata.backend_status.as_deref(),
+            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+        );
         assert!(!raw.contains("auth_args"));
         assert!(!raw.contains("command"));
         assert!(!raw.contains("private_key_path"));

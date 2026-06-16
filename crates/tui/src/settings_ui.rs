@@ -979,6 +979,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn diagnostics_rows_show_explicit_conpty_degraded() {
+        let mut diagnostics = diagnostics_fixture();
+        diagnostics.backend_setting = session_log::SESSION_LOG_BACKEND_CONPTY.to_string();
+        diagnostics.resolved_backend = session_log::SESSION_LOG_BACKEND_CONPTY.to_string();
+        diagnostics.platform = "windows".to_string();
+        diagnostics.platform_supported = true;
+        diagnostics.content_capture_reliability =
+            Some(session_log::SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string());
+        diagnostics.warning =
+            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL.to_string());
+        diagnostics.status = "degraded".to_string();
+
+        let rows = diagnostic_rows(&diagnostics);
+
+        assert_eq!(
+            row_value(&rows, "Resolved backend"),
+            Some(session_log::SESSION_LOG_BACKEND_CONPTY)
+        );
+        assert_eq!(row_value(&rows, "Status"), Some("degraded"));
+        assert_eq!(
+            row_value(&rows, "Capture reliability"),
+            Some(session_log::SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+        );
+        assert_eq!(
+            row_value(&rows, "Warning"),
+            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL)
+        );
+    }
+
     fn diagnostics_fixture() -> session_log::SessionLogDiagnostics {
         session_log::SessionLogDiagnostics {
             enabled: true,

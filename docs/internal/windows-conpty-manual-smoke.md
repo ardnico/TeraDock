@@ -1,9 +1,13 @@
 # Windows ConPTY Manual Smoke
 
-This checklist is for the explicit Windows-only ConPTY proof of concept:
+This checklist is for the explicit Windows-only ConPTY backend and its focused
+PoC command:
 
 ```powershell
 .\target\release\td.exe session conpty-test <profile_id>
+.\target\release\td.exe config set session.log.enabled true
+.\target\release\td.exe config set session.log.backend conpty
+.\target\release\td.exe connect <profile_id> --log-backend conpty
 ```
 
 For sanitized startup diagnostics:
@@ -21,9 +25,9 @@ timeout/abort checks:
 .\target\release\td.exe session conpty-test <profile_id> --debug --startup-timeout-sec 0
 ```
 
-Do not use this checklist to promote ConPTY to `auto`, default session logging,
-or the TUI `s` path. The goal is to collect enough manual evidence to decide
-whether the PoC can continue.
+Do not use this checklist to promote ConPTY to `auto` or default session
+logging. The goal is to collect enough manual evidence to decide whether the
+explicit backend can move from `experimental_ready` to stable.
 
 ## Recorded Evidence
 
@@ -47,6 +51,7 @@ Still required before explicit stable backend promotion:
 - Bad host failed metadata.
 - Auth failure behavior.
 - Purpose-built UTF-8/Japanese command output evidence.
+- TUI `s` return-to-screen evidence after exit and Ctrl-C abort.
 - Broader Windows terminal coverage.
 
 ## Prerequisites
@@ -170,9 +175,10 @@ Metadata should include:
 - `status=failed`
 - `failure_phase=waiting_initial_output`
 - `failure_reason=initial_output_timeout`
-- `content_capture=best_effort`
-- `content_capture_reliable=false`
-- `backend_warning=conpty_backend_is_experimental_poc`
+- `content_capture=terminal_io`
+- `content_capture_reliable=true`
+- `backend_status=experimental_ready`
+- `backend_warning=conpty_backend_is_explicit_and_not_selected_by_auto`
 
 ## Commands To Type On The SSH Host
 
@@ -218,11 +224,49 @@ Confirm:
 - Sessions without a log path show `<none>` in the list/show log path field.
 - Metadata has `backend=conpty`.
 - Metadata has the expected `exit_code`.
-- Metadata has `content_capture=best_effort`.
-- Metadata has `content_capture_reliable=false`.
-- Metadata has `backend_warning=conpty_backend_is_experimental_poc`.
+- Metadata has `content_capture=terminal_io`.
+- Metadata has `content_capture_reliable=true`.
+- Metadata has `backend_status=experimental_ready`.
+- Metadata has `backend_warning=conpty_backend_is_explicit_and_not_selected_by_auto`.
 - Metadata does not include auth args, full command strings, private key paths,
   passwords, secrets, or tokens.
+
+## Explicit Backend Checks
+
+Verify doctor/config UI before running from normal paths:
+
+```powershell
+.\target\release\td.exe config set session.log.enabled true
+.\target\release\td.exe config set session.log.backend conpty
+.\target\release\td.exe session doctor
+.\target\release\td.exe config ui
+```
+
+Confirm:
+
+- `backend setting: conpty`
+- `resolved backend: conpty`
+- `content capture reliability: experimental_ready`
+- warning says ConPTY is experimental.
+- `Status: degraded`
+- Diagnostics mention that ConPTY is explicit and not selected by `auto`.
+
+Verify CLI connect:
+
+```powershell
+.\target\release\td.exe connect <profile_id> --log-backend conpty
+```
+
+Verify TUI:
+
+```powershell
+.\target\release\td.exe ui
+```
+
+In the TUI, select an SSH profile and press `s`. Confirm remote output is
+visible, output is saved, `exit` returns to the TUI, and `session list/show/path`
+can inspect the saved ConPTY session. Repeat with Ctrl-C only on controlled
+test infrastructure and confirm the TUI returns.
 
 ## Ctrl-C Check
 
@@ -254,9 +298,10 @@ Metadata should include:
 - `status=aborted`
 - `failure_phase=user_abort`
 - `failure_reason=ctrl_c`
-- `content_capture=best_effort`
-- `content_capture_reliable=false`
-- `backend_warning=conpty_backend_is_experimental_poc`
+- `content_capture=terminal_io`
+- `content_capture_reliable=true`
+- `backend_status=experimental_ready`
+- `backend_warning=conpty_backend_is_explicit_and_not_selected_by_auto`
 
 If `exit_code` is unavailable after abort, `null` is acceptable.
 
@@ -337,7 +382,7 @@ Conditional GO:
 - Basic logging works, but resize, UTF-8, or some keys have documented
   constraints.
 - The PoC remains explicit and Windows-only.
-- `auto`, default backend selection, and TUI integration remain disabled.
+- `auto` and default backend selection remain disabled.
 
 No-Go:
 

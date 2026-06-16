@@ -1,10 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 #[cfg(windows)]
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+#[cfg(all(test, windows))]
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-#[cfg(windows)]
-use portable_pty::{CommandBuilder, PtySize};
 use rusqlite::Connection;
 use std::fmt::Display;
 use std::fs::OpenOptions;
@@ -13,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    Arc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,6 +20,13 @@ use tdcore::agent;
 use tdcore::cmdset::{CmdSetStore, NewCmdSet, NewCmdStep, StepOnError};
 use tdcore::cmdset_runner::{run_cmdset_ssh, CmdSetRunRequest};
 use tdcore::configset::{ConfigFileWhen, ConfigSetStore, NewConfigFile, NewConfigSet};
+#[cfg(all(test, windows))]
+use tdcore::conpty::{
+    conpty_exit_code, key_event_to_pty_bytes, pty_size, recv_conpty_loop_message, ConptyEvent,
+    ConptyLoopMessage, ConptyOutputInspector, ConptySyntheticResponse,
+};
+#[cfg(windows)]
+use tdcore::conpty::{run_conpty_ssh_child, ConptyLogSanitizer, ConptyRunOptions};
 use tdcore::db;
 use tdcore::doctor::{self, ClientKind, ClientOverrides};
 use tdcore::import_export::{self, ConflictStrategy, ExportDocument, ImportReport};
@@ -129,13 +135,7 @@ enum Commands {
         json: bool,
     },
     /// Connect to a profile (SSH/Telnet/Serial)
-    Connect {
-        /// Profile ID to connect to
-        profile_id: String,
-        /// One-time string to send right after connect (overrides profile)
-        #[arg(long)]
-        initial_send: Option<String>,
-    },
+    Connect(ConnectArgs),
     /// Show recently used interactive SSH session profiles
     Recent {
         /// Maximum number of profiles to show
@@ -197,6 +197,18 @@ enum ProfileCommands {
     Show { profile_id: String },
     /// Remove a profile
     Rm { profile_id: String },
+}
+
+#[derive(Debug, Args)]
+struct ConnectArgs {
+    /// Profile ID to connect to
+    profile_id: String,
+    /// One-time string to send right after connect (overrides profile)
+    #[arg(long)]
+    initial_send: Option<String>,
+    /// Explicit session logging backend for this SSH connect (currently conpty)
+    #[arg(long)]
+    log_backend: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -676,10 +688,7 @@ fn main() -> Result<()> {
             cmdset_id,
             json,
         }) => handle_run(profile_id, cmdset_id, json),
-        Some(Commands::Connect {
-            profile_id,
-            initial_send,
-        }) => handle_connect(profile_id, initial_send),
+        Some(Commands::Connect(args)) => handle_connect(args),
         Some(Commands::Recent { limit, json }) => handle_recent(limit, json),
         Some(Commands::Session { command }) => handle_session(command),
         Some(Commands::Tunnel { command }) => handle_tunnel(command),
@@ -1915,8 +1924,9 @@ fn handle_run(profile_id: String, cmdset_id: String, json_output: bool) -> Resul
     Ok(())
 }
 
-fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()> {
+fn handle_connect(args: ConnectArgs) -> Result<()> {
     let store = ProfileStore::new(db::init_connection()?);
+    let profile_id = args.profile_id;
     let profile = store
         .get(&profile_id)?
         .ok_or_else(|| anyhow!("profile not found: {profile_id}"))?;
@@ -1924,7 +1934,8 @@ fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()
         println!("Aborted by user.");
         return Ok(());
     }
-    let initial_send = initial_send.or_else(|| profile.initial_send.clone());
+    let log_backend = parse_connect_log_backend(args.log_backend)?;
+    let initial_send = args.initial_send.or_else(|| profile.initial_send.clone());
     match profile.profile_type {
         ProfileType::Ssh => {
             let invocation = ssh::build_ssh_invocation(
@@ -1936,9 +1947,10 @@ fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()
                 },
             )?;
             emit_ssh_auth_messages(&invocation.auth_context);
-            connect_ssh(&store, invocation)
+            connect_ssh(&store, invocation, log_backend)
         }
         ProfileType::Telnet => {
+            reject_non_ssh_log_backend(log_backend)?;
             let telnet = resolve_client_for(
                 ClientKind::Telnet,
                 profile.client_overrides.as_ref(),
@@ -1946,7 +1958,35 @@ fn handle_connect(profile_id: String, initial_send: Option<String>) -> Result<()
             )?;
             connect_telnet(&store, profile, telnet, initial_send)
         }
-        ProfileType::Serial => connect_serial(&store, profile, initial_send),
+        ProfileType::Serial => {
+            reject_non_ssh_log_backend(log_backend)?;
+            connect_serial(&store, profile, initial_send)
+        }
+    }
+}
+
+fn parse_connect_log_backend(
+    raw: Option<String>,
+) -> Result<Option<session_log::SessionLogBackendSetting>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let backend = session_log::SessionLogBackendSetting::parse(&raw)?;
+    if backend != session_log::SessionLogBackendSetting::Conpty {
+        return Err(anyhow!(
+            "--log-backend currently supports only explicit conpty"
+        ));
+    }
+    Ok(Some(backend))
+}
+
+fn reject_non_ssh_log_backend(
+    backend: Option<session_log::SessionLogBackendSetting>,
+) -> Result<()> {
+    if backend.is_some() {
+        Err(anyhow!("--log-backend only supports SSH profiles"))
+    } else {
+        Ok(())
     }
 }
 
@@ -2036,7 +2076,7 @@ fn handle_session_conpty_test(store: &ProfileStore, args: SessionConptyTestArgs)
     let invocation = build_conpty_test_invocation(store, &profile_id)?;
     emit_ssh_auth_messages(&invocation.auth_context);
     println!("ConPTY session logging PoC is experimental.");
-    println!("ConPTY is not selected by auto and is not integrated with the TUI.");
+    println!("ConPTY is not selected by auto; use session.log.backend=conpty explicitly.");
     println!(
         "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
     );
@@ -2238,10 +2278,9 @@ fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
     if diagnostics.platform == "windows" {
         println!();
         println!("ConPTY backend: experimental_ready");
+        println!("ConPTY explicit config: td config set session.log.backend conpty");
         println!("ConPTY PoC command: td session conpty-test <profile_id>");
-        println!(
-            "Reason: manual smoke succeeded, but TUI integration and broader Windows validation are pending."
-        );
+        println!("Reason: manual smoke succeeded, but auto selection is still deferred.");
     }
     if diagnostics.status == "ready" {
         println!();
@@ -2351,7 +2390,9 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
 
 fn session_capture_lines(metadata: &session_log::SessionLogMetadata) -> Vec<String> {
     let mut lines = Vec::new();
-    if metadata.backend == session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+    if let Some(status) = &metadata.backend_status {
+        lines.push(format!("backend_status: {status}"));
+    } else if metadata.backend == session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
         || metadata.backend == session_log::SESSION_LOG_BACKEND_CONPTY
     {
         lines.push("backend_status: degraded".to_string());
@@ -2958,12 +2999,23 @@ enum CliSshRunResult {
     },
 }
 
-fn connect_ssh(store: &ProfileStore, invocation: SshInvocation) -> Result<()> {
-    let plan = session_log::plan_for_target_with_ssh(
-        store.conn(),
-        &invocation.target,
-        &invocation.client_path,
-    );
+fn connect_ssh(
+    store: &ProfileStore,
+    invocation: SshInvocation,
+    log_backend: Option<session_log::SessionLogBackendSetting>,
+) -> Result<()> {
+    let plan = match log_backend {
+        Some(backend) => session_log::plan_for_explicit_backend_with_ssh(
+            store.conn(),
+            &invocation.client_path,
+            backend,
+        )?,
+        None => session_log::plan_for_target_with_ssh(
+            store.conn(),
+            &invocation.target,
+            &invocation.client_path,
+        ),
+    };
     emit_session_log_notice(&plan);
     let result = match &plan {
         SessionLogPlan::Script {
@@ -2981,6 +3033,22 @@ fn connect_ssh(store: &ProfileStore, invocation: SshInvocation) -> Result<()> {
             files,
             *launch_failure_policy,
         ),
+        #[cfg(windows)]
+        SessionLogPlan::Conpty { files, .. } => {
+            let options = ConptyRunOptions {
+                debug: teradock_debug_enabled(),
+                startup_timeout: conpty_startup_timeout(10),
+            };
+            run_conpty_logged_cli_ssh(&invocation, files, options)
+        }
+        #[cfg(not(windows))]
+        SessionLogPlan::Conpty { .. } => CliSshRunResult::LaunchFailed {
+            error: anyhow!("unsupported: ConPTY session logging is only available on Windows"),
+            duration_ms: 0,
+            session_log: SessionLogReference::not_saved(
+                session_log::SESSION_LOG_REASON_UNSUPPORTED_ON_PLATFORM,
+            ),
+        },
         SessionLogPlan::Error { reason } => CliSshRunResult::LaunchFailed {
             error: anyhow!("session logging backend is not ready: {reason}"),
             duration_ms: 0,
@@ -3201,135 +3269,6 @@ fn run_powershell_transcript_cli_ssh(
 }
 
 #[cfg(windows)]
-#[derive(Clone, Copy)]
-struct ConptyRunOptions {
-    debug: bool,
-    startup_timeout: Option<Duration>,
-}
-
-#[cfg(windows)]
-struct ConptyChildReport {
-    exit_code: Option<i32>,
-    first_output_received: bool,
-}
-
-#[cfg(windows)]
-struct ConptyOutputThread {
-    handle: thread::JoinHandle<()>,
-    result_rx: mpsc::Receiver<io::Result<u64>>,
-}
-
-#[cfg(windows)]
-struct ConptyInputThread {
-    handle: thread::JoinHandle<()>,
-    done_rx: mpsc::Receiver<()>,
-}
-
-#[cfg(windows)]
-struct ConptyWaitThread {
-    handle: thread::JoinHandle<()>,
-    done_rx: mpsc::Receiver<()>,
-}
-
-#[cfg(windows)]
-struct ConptyTimerThread {
-    handle: thread::JoinHandle<()>,
-    done_rx: mpsc::Receiver<()>,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConptySyntheticResponse {
-    CursorPosition,
-    DeviceStatusOk,
-}
-
-#[cfg(windows)]
-impl ConptySyntheticResponse {
-    fn bytes(self) -> &'static [u8] {
-        match self {
-            Self::CursorPosition => b"\x1b[1;1R",
-            Self::DeviceStatusOk => b"\x1b[0n",
-        }
-    }
-
-    fn debug_label(self) -> &'static str {
-        match self {
-            Self::CursorPosition => "cursor_position",
-            Self::DeviceStatusOk => "device_status_ok",
-        }
-    }
-}
-
-#[cfg(windows)]
-enum ConptyInputCommand {
-    WriteSynthetic { response: ConptySyntheticResponse },
-}
-
-#[cfg(windows)]
-#[derive(Debug)]
-enum ConptyEvent {
-    FirstOutput { bytes: usize },
-    OutputChunk { bytes: usize },
-    ChildExited { exit_code: Option<i32> },
-    StartupTimeout,
-    UserAbort,
-    OutputError { message: String },
-    InputError { message: String },
-}
-
-#[cfg(windows)]
-#[derive(Debug)]
-enum ConptyLoopMessage {
-    Event(ConptyEvent),
-    ChildWaitError { message: String },
-}
-
-#[cfg(windows)]
-fn send_conpty_event(tx: &mpsc::Sender<ConptyLoopMessage>, event: ConptyEvent) {
-    let _ = tx.send(ConptyLoopMessage::Event(event));
-}
-
-#[cfg(windows)]
-struct ConptyChildFailure {
-    status: &'static str,
-    phase: &'static str,
-    reason: &'static str,
-    error: anyhow::Error,
-}
-
-#[cfg(windows)]
-impl ConptyChildFailure {
-    fn failed(phase: &'static str, reason: &'static str, error: anyhow::Error) -> Self {
-        Self {
-            status: session_log::SESSION_LOG_STATUS_FAILED,
-            phase,
-            reason,
-            error,
-        }
-    }
-
-    fn aborted(phase: &'static str, reason: &'static str, error: anyhow::Error) -> Self {
-        Self {
-            status: session_log::SESSION_LOG_STATUS_ABORTED,
-            phase,
-            reason,
-            error,
-        }
-    }
-
-    fn into_error(self) -> anyhow::Error {
-        anyhow!(
-            "ConPTY SSH {status} during {phase}: {reason}: {error}",
-            status = self.status,
-            phase = self.phase,
-            reason = self.reason,
-            error = self.error
-        )
-    }
-}
-
-#[cfg(windows)]
 fn run_conpty_logged_cli_ssh(
     invocation: &SshInvocation,
     files: &SessionLogFiles,
@@ -3337,7 +3276,12 @@ fn run_conpty_logged_cli_ssh(
 ) -> CliSshRunResult {
     let log_started_at = now_ms();
     let started = Instant::now();
-    let status = run_conpty_ssh_child(invocation, files, options);
+    let status = run_conpty_ssh_child(
+        &invocation.client_path,
+        &invocation.args,
+        &files.log_path,
+        options,
+    );
     let duration_ms = started.elapsed().as_millis() as i64;
 
     match status {
@@ -3434,1163 +3378,14 @@ fn run_conpty_logged_cli_ssh(
     }
 }
 
-#[cfg(windows)]
-fn run_conpty_ssh_child(
-    invocation: &SshInvocation,
-    files: &SessionLogFiles,
-    options: ConptyRunOptions,
-) -> std::result::Result<ConptyChildReport, ConptyChildFailure> {
-    conpty_debug(options.debug, "child spawn phase: create log");
-    let log_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&files.log_path)
-        .map_err(|err| {
-            ConptyChildFailure::failed(
-                session_log::SESSION_LOG_FAILURE_PHASE_CREATE_LOG,
-                session_log::SESSION_LOG_FAILURE_REASON_CREATE_LOG_FAILED,
-                err.into(),
-            )
-        })?;
-    conpty_debug(options.debug, "child spawn phase: open pty");
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system.openpty(current_pty_size()).map_err(|err| {
-        ConptyChildFailure::failed(
-            session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
-            session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
-            err,
-        )
-    })?;
-    let master = pair.master;
-    let slave = pair.slave;
-    let reader = master.try_clone_reader().map_err(|err| {
-        ConptyChildFailure::failed(
-            session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
-            session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
-            err,
-        )
-    })?;
-    let writer = master.take_writer().map_err(|err| {
-        ConptyChildFailure::failed(
-            session_log::SESSION_LOG_FAILURE_PHASE_OPEN_PTY,
-            session_log::SESSION_LOG_FAILURE_REASON_OPEN_PTY_FAILED,
-            err,
-        )
-    })?;
-    conpty_debug(options.debug, "child spawn phase: enter raw mode");
-    let raw_mode = match RawModeGuard::enter() {
-        Ok(guard) => guard,
-        Err(err) => {
-            drop(log_file);
-            return Err(ConptyChildFailure::failed(
-                session_log::SESSION_LOG_FAILURE_PHASE_ENTER_RAW_MODE,
-                session_log::SESSION_LOG_FAILURE_REASON_RAW_MODE_FAILED,
-                err,
-            ));
-        }
-    };
-    let mut cmd = CommandBuilder::new(invocation.client_path.as_os_str());
-    cmd.args(&invocation.args);
-    conpty_debug(options.debug, "child spawn phase: spawn child");
-    let child = match slave.spawn_command(cmd) {
-        Ok(child) => child,
-        Err(err) => {
-            drop(raw_mode);
-            drop(log_file);
-            return Err(ConptyChildFailure::failed(
-                session_log::SESSION_LOG_FAILURE_PHASE_SPAWN_CHILD,
-                session_log::SESSION_LOG_FAILURE_REASON_SPAWN_CHILD_FAILED,
-                err,
-            ));
-        }
-    };
-    conpty_debug(options.debug, "child spawned");
-    drop(slave);
-
-    let first_output_received = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (event_tx, event_rx) = mpsc::channel();
-    let (input_command_tx, input_command_rx) = mpsc::channel();
-    let output_thread = spawn_conpty_output_thread(
-        reader,
-        log_file,
-        Arc::clone(&first_output_received),
-        event_tx.clone(),
-        input_command_tx,
-        options,
-    );
-    let mut child_killer = child.clone_killer();
-    let timeout_child_killer = child_killer.clone_killer();
-    let wait_thread =
-        spawn_conpty_wait_thread(child, Arc::clone(&cancel), event_tx.clone(), options);
-    let input_thread = spawn_conpty_input_thread(
-        writer,
-        master,
-        Arc::clone(&cancel),
-        input_command_rx,
-        event_tx.clone(),
-        options,
-    );
-    let timeout_thread = spawn_conpty_startup_timeout_thread(
-        options.startup_timeout,
-        Arc::clone(&first_output_received),
-        Arc::clone(&cancel),
-        event_tx.clone(),
-        timeout_child_killer,
-        options,
-    );
-    drop(event_tx);
-
-    let mut output_bytes = 0_u64;
-    let startup_deadline = options
-        .startup_timeout
-        .and_then(|timeout| Instant::now().checked_add(timeout));
-    let loop_result = loop {
-        let Some(message) =
-            recv_conpty_loop_message(&event_rx, &first_output_received, startup_deadline)
-        else {
-            break Err(ConptyChildFailure::failed(
-                session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
-                session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
-                anyhow!("ConPTY event loop ended without child status"),
-            ));
-        };
-        match message {
-            ConptyLoopMessage::Event(ConptyEvent::FirstOutput { bytes }) => {
-                conpty_debug(
-                    options.debug,
-                    format_args!("first output received: {bytes} bytes"),
-                );
-            }
-            ConptyLoopMessage::Event(ConptyEvent::OutputChunk { bytes }) => {
-                output_bytes += bytes as u64;
-            }
-            ConptyLoopMessage::Event(ConptyEvent::ChildExited { exit_code }) => {
-                let exit_code_text = exit_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "unavailable".to_string());
-                conpty_debug(
-                    options.debug,
-                    format_args!("child exited: code {exit_code_text}"),
-                );
-                break Ok(exit_code);
-            }
-            ConptyLoopMessage::Event(ConptyEvent::StartupTimeout) => {
-                if first_output_received.load(Ordering::SeqCst) {
-                    conpty_debug(options.debug, "startup timeout ignored after first output");
-                    continue;
-                }
-                let timeout = options.startup_timeout.unwrap_or(Duration::from_secs(0));
-                conpty_debug(
-                    options.debug,
-                    format_args!("startup timeout after {} seconds", timeout.as_secs()),
-                );
-                conpty_debug(options.debug, "first output received: no");
-                eprintln!();
-                eprintln!(
-                    "Error: no ConPTY output received within {} seconds.",
-                    timeout.as_secs()
-                );
-                eprintln!("Aborting ConPTY child...");
-                kill_conpty_child(&mut child_killer, options);
-                break Err(ConptyChildFailure::failed(
-                    session_log::SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT,
-                    session_log::SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT,
-                    anyhow!(
-                        "no ConPTY output received within {} seconds",
-                        timeout.as_secs()
-                    ),
-                ));
-            }
-            ConptyLoopMessage::Event(ConptyEvent::UserAbort) => {
-                conpty_debug(options.debug, "user abort received");
-                kill_conpty_child(&mut child_killer, options);
-                break Err(ConptyChildFailure::aborted(
-                    session_log::SESSION_LOG_FAILURE_PHASE_USER_ABORT,
-                    session_log::SESSION_LOG_FAILURE_REASON_CTRL_C,
-                    anyhow!("aborted by Ctrl-C"),
-                ));
-            }
-            ConptyLoopMessage::Event(ConptyEvent::OutputError { message }) => {
-                kill_conpty_child(&mut child_killer, options);
-                break Err(ConptyChildFailure::failed(
-                    session_log::SESSION_LOG_FAILURE_PHASE_OUTPUT_BRIDGE,
-                    session_log::SESSION_LOG_FAILURE_REASON_OUTPUT_BRIDGE_FAILED,
-                    anyhow!(message),
-                ));
-            }
-            ConptyLoopMessage::Event(ConptyEvent::InputError { message }) => {
-                kill_conpty_child(&mut child_killer, options);
-                break Err(ConptyChildFailure::failed(
-                    session_log::SESSION_LOG_FAILURE_PHASE_INPUT_BRIDGE,
-                    session_log::SESSION_LOG_FAILURE_REASON_INPUT_BRIDGE_FAILED,
-                    anyhow!(message),
-                ));
-            }
-            ConptyLoopMessage::ChildWaitError { message } => {
-                kill_conpty_child(&mut child_killer, options);
-                eprintln!("Warning: ConPTY child process exit could not be confirmed.");
-                break Err(ConptyChildFailure::failed(
-                    session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
-                    session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
-                    anyhow!(message),
-                ));
-            }
-        }
-    };
-
-    cancel.store(true, Ordering::SeqCst);
-    conpty_debug(options.debug, "dropping pty handles");
-    conpty_debug(options.debug, "joining threads best-effort");
-    let input_shutdown = join_conpty_input_thread(input_thread, Duration::from_millis(500));
-    drop(raw_mode);
-    conpty_debug(options.debug, "terminal restored");
-    match input_shutdown {
-        Ok(()) => conpty_debug(
-            options.debug,
-            "thread shutdown status: input bridge stopped",
-        ),
-        Err(err) => conpty_debug(
-            options.debug,
-            format_args!("thread shutdown status: input bridge incomplete: {err}"),
-        ),
-    }
-
-    let wait_shutdown = join_conpty_wait_thread_best_effort(wait_thread, Duration::from_secs(3));
-    match &wait_shutdown {
-        Ok(()) => conpty_debug(options.debug, "thread shutdown status: child wait stopped"),
-        Err(err) => {
-            conpty_debug(
-                options.debug,
-                format_args!("thread shutdown status: child wait incomplete: {err}"),
-            );
-            eprintln!("Warning: ConPTY child process did not confirm exit after cleanup.");
-        }
-    }
-    let timeout_shutdown =
-        join_conpty_timer_thread_best_effort(timeout_thread, Duration::from_millis(200));
-    match &timeout_shutdown {
-        Ok(()) => conpty_debug(
-            options.debug,
-            "thread shutdown status: startup timer stopped",
-        ),
-        Err(err) => conpty_debug(
-            options.debug,
-            format_args!("thread shutdown status: startup timer incomplete: {err}"),
-        ),
-    }
-
-    let exit_code = match loop_result {
-        Ok(exit_code) => {
-            wait_shutdown.map_err(|err| {
-                ConptyChildFailure::failed(
-                    session_log::SESSION_LOG_FAILURE_PHASE_CHILD_WAIT,
-                    session_log::SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED,
-                    err,
-                )
-            })?;
-            exit_code
-        }
-        Err(failure) => {
-            if let Err(err) =
-                join_conpty_output_thread_best_effort(output_thread, Duration::from_millis(1000))
-            {
-                conpty_debug(
-                    options.debug,
-                    format_args!("thread shutdown status: output reader incomplete: {err}"),
-                );
-            } else {
-                conpty_debug(
-                    options.debug,
-                    "thread shutdown status: output reader stopped",
-                );
-            }
-            return Err(failure);
-        }
-    };
-    let output_total = join_conpty_output_thread(output_thread, Duration::from_millis(1000))
-        .map_err(|err| {
-            ConptyChildFailure::failed(
-                session_log::SESSION_LOG_FAILURE_PHASE_OUTPUT_BRIDGE,
-                session_log::SESSION_LOG_FAILURE_REASON_OUTPUT_BRIDGE_FAILED,
-                err,
-            )
-        })?;
-    conpty_debug(
-        options.debug,
-        "thread shutdown status: output reader stopped",
-    );
-    conpty_debug(
-        options.debug,
-        format_args!(
-            "output reader completed: {output_total} bytes; event loop observed {output_bytes} bytes"
-        ),
-    );
-    Ok(ConptyChildReport {
-        exit_code,
-        first_output_received: first_output_received.load(Ordering::SeqCst),
-    })
-}
-
-#[cfg(windows)]
-fn recv_conpty_loop_message(
-    event_rx: &mpsc::Receiver<ConptyLoopMessage>,
-    first_output_received: &AtomicBool,
-    startup_deadline: Option<Instant>,
-) -> Option<ConptyLoopMessage> {
-    if first_output_received.load(Ordering::SeqCst) {
-        return event_rx.recv().ok();
-    }
-    let Some(deadline) = startup_deadline else {
-        return event_rx.recv().ok();
-    };
-    let now = Instant::now();
-    if now >= deadline {
-        return Some(ConptyLoopMessage::Event(ConptyEvent::StartupTimeout));
-    }
-    match event_rx.recv_timeout(deadline.duration_since(now)) {
-        Ok(message) => Some(message),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            Some(ConptyLoopMessage::Event(ConptyEvent::StartupTimeout))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => None,
-    }
-}
-
-#[cfg(windows)]
-fn spawn_conpty_output_thread(
-    mut reader: Box<dyn Read + Send>,
-    log_file: std::fs::File,
-    first_output_received: Arc<AtomicBool>,
-    event_tx: mpsc::Sender<ConptyLoopMessage>,
-    input_command_tx: mpsc::Sender<ConptyInputCommand>,
-    options: ConptyRunOptions,
-) -> ConptyOutputThread {
-    let (result_tx, result_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let result = tee_conpty_output(
-            &mut reader,
-            log_file,
-            first_output_received,
-            &event_tx,
-            &input_command_tx,
-            options,
-        );
-        if let Err(err) = &result {
-            send_conpty_event(
-                &event_tx,
-                ConptyEvent::OutputError {
-                    message: err.to_string(),
-                },
-            );
-        }
-        let _ = result_tx.send(result);
-    });
-    ConptyOutputThread { handle, result_rx }
-}
-
-#[cfg(windows)]
-fn spawn_conpty_input_thread(
-    mut writer: Box<dyn Write + Send>,
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    cancel: Arc<AtomicBool>,
-    input_command_rx: mpsc::Receiver<ConptyInputCommand>,
-    event_tx: mpsc::Sender<ConptyLoopMessage>,
-    options: ConptyRunOptions,
-) -> ConptyInputThread {
-    let (done_tx, done_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        conpty_debug(options.debug, "input bridge started");
-        let result = run_conpty_input_bridge(
-            &mut writer,
-            master.as_ref(),
-            &cancel,
-            &input_command_rx,
-            &event_tx,
-            options,
-        );
-        if let Err(err) = result {
-            send_conpty_event(
-                &event_tx,
-                ConptyEvent::InputError {
-                    message: err.to_string(),
-                },
-            );
-        }
-        drop(writer);
-        drop(master);
-        let _ = done_tx.send(());
-    });
-    ConptyInputThread { handle, done_rx }
-}
-
-#[cfg(windows)]
-fn run_conpty_input_bridge(
-    writer: &mut Box<dyn Write + Send>,
-    master: &dyn portable_pty::MasterPty,
-    cancel: &Arc<AtomicBool>,
-    input_command_rx: &mpsc::Receiver<ConptyInputCommand>,
-    event_tx: &mpsc::Sender<ConptyLoopMessage>,
-    options: ConptyRunOptions,
-) -> Result<()> {
-    while !cancel.load(Ordering::SeqCst) {
-        drain_conpty_input_commands(writer, input_command_rx, options)?;
-        if !event::poll(Duration::from_millis(20))
-            .context("failed to poll terminal input for ConPTY")?
-        {
-            continue;
-        }
-        match event::read().context("failed to read terminal input for ConPTY")? {
-            Event::Key(key) => {
-                if key_event_is_ctrl_c(key) {
-                    conpty_debug(options.debug, "ctrl-c input event received");
-                    cancel.store(true, Ordering::SeqCst);
-                    send_conpty_event(event_tx, ConptyEvent::UserAbort);
-                    return Ok(());
-                }
-                if let Some(bytes) = key_event_to_pty_bytes(key) {
-                    writer
-                        .write_all(&bytes)
-                        .context("failed to write terminal input to ConPTY")?;
-                    writer
-                        .flush()
-                        .context("failed to flush terminal input to ConPTY")?;
-                }
-            }
-            Event::Resize(cols, rows) => {
-                master
-                    .resize(pty_size(cols, rows))
-                    .context("failed to resize ConPTY")?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn drain_conpty_input_commands(
-    writer: &mut Box<dyn Write + Send>,
-    input_command_rx: &mpsc::Receiver<ConptyInputCommand>,
-    options: ConptyRunOptions,
-) -> Result<()> {
-    while let Ok(ConptyInputCommand::WriteSynthetic { response }) = input_command_rx.try_recv() {
-        writer
-            .write_all(response.bytes())
-            .context("failed to write synthetic terminal response to ConPTY")?;
-        writer
-            .flush()
-            .context("failed to flush synthetic terminal response to ConPTY")?;
-        conpty_debug(
-            options.debug,
-            format_args!(
-                "synthetic terminal response sent: {}",
-                response.debug_label()
-            ),
-        );
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn spawn_conpty_wait_thread(
-    mut child: Box<dyn portable_pty::Child + Send + Sync>,
-    cancel: Arc<AtomicBool>,
-    event_tx: mpsc::Sender<ConptyLoopMessage>,
-    options: ConptyRunOptions,
-) -> ConptyWaitThread {
-    let (done_tx, done_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        conpty_debug(options.debug, "child wait started");
-        let mut cancel_seen_at: Option<Instant> = None;
-        let message = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let exit_code = Some(conpty_exit_code(&status));
-                    let exit_code_text = exit_code
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "unavailable".to_string());
-                    conpty_debug(
-                        options.debug,
-                        format_args!("child exited: code {exit_code_text}"),
-                    );
-                    break ConptyLoopMessage::Event(ConptyEvent::ChildExited { exit_code });
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    break ConptyLoopMessage::ChildWaitError {
-                        message: err.to_string(),
-                    }
-                }
-            }
-            if cancel.load(Ordering::SeqCst) {
-                let first_seen = cancel_seen_at.get_or_insert_with(Instant::now);
-                if first_seen.elapsed() >= Duration::from_secs(2) {
-                    break ConptyLoopMessage::ChildWaitError {
-                        message: "ConPTY child did not exit after shutdown request".to_string(),
-                    };
-                }
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        let _ = event_tx.send(message);
-        let _ = done_tx.send(());
-    });
-    ConptyWaitThread { handle, done_rx }
-}
-
-#[cfg(windows)]
-fn spawn_conpty_startup_timeout_thread(
-    timeout: Option<Duration>,
-    first_output_received: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
-    event_tx: mpsc::Sender<ConptyLoopMessage>,
-    mut child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    options: ConptyRunOptions,
-) -> Option<ConptyTimerThread> {
-    let Some(timeout) = timeout else {
-        conpty_debug(options.debug, "startup timeout disabled");
-        return None;
-    };
-    conpty_debug(
-        options.debug,
-        format_args!("startup timeout armed: {} seconds", timeout.as_secs()),
-    );
-    let (done_tx, done_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let started = Instant::now();
-        while started.elapsed() < timeout {
-            if cancel.load(Ordering::SeqCst) || first_output_received.load(Ordering::SeqCst) {
-                let _ = done_tx.send(());
-                return;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        if !cancel.load(Ordering::SeqCst) && !first_output_received.load(Ordering::SeqCst) {
-            conpty_debug(options.debug, "startup watchdog killing child");
-            if let Err(err) = child_killer.kill() {
-                conpty_debug(
-                    options.debug,
-                    format_args!("startup watchdog child kill failed: {err}"),
-                );
-            }
-            send_conpty_event(&event_tx, ConptyEvent::StartupTimeout);
-        }
-        let _ = done_tx.send(());
-    });
-    Some(ConptyTimerThread { handle, done_rx })
-}
-
-#[cfg(windows)]
-fn kill_conpty_child(
-    child_killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    options: ConptyRunOptions,
-) {
-    conpty_debug(options.debug, "killing child");
-    if let Err(err) = child_killer.kill() {
-        conpty_debug(options.debug, format_args!("child kill failed: {err}"));
-    } else {
-        conpty_debug(options.debug, "child killed");
-    }
-}
-
-#[cfg(windows)]
-fn join_conpty_input_thread(thread: ConptyInputThread, timeout: Duration) -> Result<()> {
-    match thread.done_rx.recv_timeout(timeout) {
-        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => match thread.handle.join() {
-            Ok(()) => Ok(()),
-            Err(_) => Err(anyhow!("ConPTY input bridge thread panicked")),
-        },
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
-            "ConPTY input bridge did not stop within {} ms",
-            timeout.as_millis()
-        )),
-    }
-}
-
-#[cfg(windows)]
-fn join_conpty_wait_thread_best_effort(thread: ConptyWaitThread, timeout: Duration) -> Result<()> {
-    match thread.done_rx.recv_timeout(timeout) {
-        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => match thread.handle.join() {
-            Ok(()) => Ok(()),
-            Err(_) => Err(anyhow!("ConPTY child wait thread panicked")),
-        },
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
-            "ConPTY child wait did not stop within {} ms",
-            timeout.as_millis()
-        )),
-    }
-}
-
-#[cfg(windows)]
-fn join_conpty_timer_thread_best_effort(
-    thread: Option<ConptyTimerThread>,
-    timeout: Duration,
-) -> Result<()> {
-    let Some(thread) = thread else {
-        return Ok(());
-    };
-    match thread.done_rx.recv_timeout(timeout) {
-        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => match thread.handle.join() {
-            Ok(()) => Ok(()),
-            Err(_) => Err(anyhow!("ConPTY startup timer thread panicked")),
-        },
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
-            "ConPTY startup timer did not stop within {} ms",
-            timeout.as_millis()
-        )),
-    }
-}
-
-#[cfg(windows)]
-fn join_conpty_output_thread(output_thread: ConptyOutputThread, timeout: Duration) -> Result<u64> {
-    match output_thread.result_rx.recv_timeout(timeout) {
-        Ok(result) => {
-            match output_thread.handle.join() {
-                Ok(()) => {}
-                Err(_) => return Err(anyhow!("ConPTY output thread panicked")),
-            }
-            result.context("ConPTY output tee failed")
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => match output_thread.handle.join() {
-            Ok(()) => Ok(0),
-            Err(_) => Err(anyhow!("ConPTY output thread panicked")),
-        },
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
-            "ConPTY output reader did not stop within {} ms",
-            timeout.as_millis()
-        )),
-    }
-}
-
-#[cfg(windows)]
-fn join_conpty_output_thread_best_effort(
-    output_thread: ConptyOutputThread,
-    timeout: Duration,
-) -> Result<Option<u64>> {
-    match join_conpty_output_thread(output_thread, timeout) {
-        Ok(total) => Ok(Some(total)),
-        Err(err) => Err(err),
-    }
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConptyOutputParseState {
-    Ground,
-    Escape,
-    Csi,
-    Osc,
-    OscEscape,
-}
-
-#[cfg(windows)]
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ConptyOutputInspection {
-    has_visible_output: bool,
-    synthetic_responses: Vec<ConptySyntheticResponse>,
-}
-
-#[cfg(windows)]
-struct ConptyOutputInspector {
-    state: ConptyOutputParseState,
-    csi_body: Vec<u8>,
-}
-
-#[cfg(windows)]
-impl Default for ConptyOutputInspector {
-    fn default() -> Self {
-        Self {
-            state: ConptyOutputParseState::Ground,
-            csi_body: Vec::new(),
-        }
-    }
-}
-
-#[cfg(windows)]
-impl ConptyOutputInspector {
-    fn inspect(&mut self, bytes: &[u8]) -> ConptyOutputInspection {
-        let mut inspection = ConptyOutputInspection::default();
-        for &byte in bytes {
-            match self.state {
-                ConptyOutputParseState::Ground => match byte {
-                    0x1b => self.state = ConptyOutputParseState::Escape,
-                    0x9b => {
-                        self.csi_body.clear();
-                        self.state = ConptyOutputParseState::Csi;
-                    }
-                    0x9d => self.state = ConptyOutputParseState::Osc,
-                    0x00..=0x1f | 0x7f | 0x80..=0x9f => {}
-                    _ => inspection.has_visible_output = true,
-                },
-                ConptyOutputParseState::Escape => match byte {
-                    b'[' => {
-                        self.csi_body.clear();
-                        self.state = ConptyOutputParseState::Csi;
-                    }
-                    b']' => self.state = ConptyOutputParseState::Osc,
-                    0x1b => self.state = ConptyOutputParseState::Escape,
-                    _ => self.state = ConptyOutputParseState::Ground,
-                },
-                ConptyOutputParseState::Csi => {
-                    if (0x40..=0x7e).contains(&byte) {
-                        if let Some(response) =
-                            conpty_synthetic_response_for_csi(&self.csi_body, byte)
-                        {
-                            inspection.synthetic_responses.push(response);
-                        }
-                        self.csi_body.clear();
-                        self.state = ConptyOutputParseState::Ground;
-                    } else if self.csi_body.len() < 64 {
-                        self.csi_body.push(byte);
-                    }
-                }
-                ConptyOutputParseState::Osc => match byte {
-                    0x07 => self.state = ConptyOutputParseState::Ground,
-                    0x1b => self.state = ConptyOutputParseState::OscEscape,
-                    _ => {}
-                },
-                ConptyOutputParseState::OscEscape => match byte {
-                    b'\\' => self.state = ConptyOutputParseState::Ground,
-                    0x1b => self.state = ConptyOutputParseState::OscEscape,
-                    _ => self.state = ConptyOutputParseState::Osc,
-                },
-            }
-        }
-        inspection
-    }
-}
-
-#[cfg(windows)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ConptyLogCell {
-    ch: char,
-    width: usize,
-}
-
-#[cfg(windows)]
-struct ConptyLogSanitizer {
-    state: ConptyOutputParseState,
-    csi_body: Vec<u8>,
-    pending_text: Vec<u8>,
-    line: Vec<ConptyLogCell>,
-    cursor_col: usize,
-    row: usize,
-}
-
-#[cfg(windows)]
-impl Default for ConptyLogSanitizer {
-    fn default() -> Self {
-        Self {
-            state: ConptyOutputParseState::Ground,
-            csi_body: Vec::new(),
-            pending_text: Vec::new(),
-            line: Vec::new(),
-            cursor_col: 0,
-            row: 1,
-        }
-    }
-}
-
-#[cfg(windows)]
-impl ConptyLogSanitizer {
-    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for &byte in bytes {
-            match self.state {
-                ConptyOutputParseState::Ground => match byte {
-                    0x1b => {
-                        self.flush_pending_text(&mut out);
-                        self.state = ConptyOutputParseState::Escape;
-                    }
-                    0x9b => {
-                        self.flush_pending_text(&mut out);
-                        self.csi_body.clear();
-                        self.state = ConptyOutputParseState::Csi;
-                    }
-                    0x9d => {
-                        self.flush_pending_text(&mut out);
-                        self.state = ConptyOutputParseState::Osc;
-                    }
-                    b'\n' => {
-                        self.flush_pending_text(&mut out);
-                        self.flush_line(&mut out);
-                    }
-                    b'\r' => {
-                        self.flush_pending_text(&mut out);
-                        self.cursor_col = 0;
-                    }
-                    b'\t' => {
-                        self.flush_pending_text(&mut out);
-                        let next_tab = ((self.cursor_col / 8) + 1) * 8;
-                        while self.cursor_col < next_tab {
-                            self.write_char(' ');
-                        }
-                    }
-                    0x07 | 0x00..=0x08 | 0x0b..=0x1f | 0x7f => {
-                        self.flush_pending_text(&mut out);
-                    }
-                    _ => self.pending_text.push(byte),
-                },
-                ConptyOutputParseState::Escape => match byte {
-                    b'[' => {
-                        self.csi_body.clear();
-                        self.state = ConptyOutputParseState::Csi;
-                    }
-                    b']' => self.state = ConptyOutputParseState::Osc,
-                    0x1b => self.state = ConptyOutputParseState::Escape,
-                    _ => self.state = ConptyOutputParseState::Ground,
-                },
-                ConptyOutputParseState::Csi => {
-                    if (0x40..=0x7e).contains(&byte) {
-                        self.apply_csi(byte, &mut out);
-                        self.csi_body.clear();
-                        self.state = ConptyOutputParseState::Ground;
-                    } else if self.csi_body.len() < 64 {
-                        self.csi_body.push(byte);
-                    }
-                }
-                ConptyOutputParseState::Osc => match byte {
-                    0x07 => self.state = ConptyOutputParseState::Ground,
-                    0x1b => self.state = ConptyOutputParseState::OscEscape,
-                    _ => {}
-                },
-                ConptyOutputParseState::OscEscape => match byte {
-                    b'\\' => self.state = ConptyOutputParseState::Ground,
-                    0x1b => self.state = ConptyOutputParseState::OscEscape,
-                    _ => self.state = ConptyOutputParseState::Osc,
-                },
-            }
-        }
-        self.flush_pending_text(&mut out);
-        out
-    }
-
-    fn finish(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.flush_pending_text(&mut out);
-        if !self.line.is_empty() {
-            self.flush_line(&mut out);
-        }
-        out
-    }
-
-    fn apply_csi(&mut self, final_byte: u8, out: &mut Vec<u8>) {
-        match final_byte {
-            b'C' => {
-                let count = csi_params(&self.csi_body).first().copied().unwrap_or(1);
-                self.cursor_col = self.cursor_col.saturating_add(count.max(1));
-            }
-            b'D' => {
-                let count = csi_params(&self.csi_body).first().copied().unwrap_or(1);
-                self.cursor_col = self.cursor_col.saturating_sub(count.max(1));
-            }
-            b'G' => {
-                let col = csi_params(&self.csi_body).first().copied().unwrap_or(1);
-                self.cursor_col = col.saturating_sub(1);
-            }
-            b'H' | b'f' => {
-                let params = csi_params(&self.csi_body);
-                let row = params.first().copied().unwrap_or(1).max(1);
-                let col = params.get(1).copied().unwrap_or(1).max(1);
-                if row > self.row && !self.line.is_empty() {
-                    self.flush_line(out);
-                }
-                self.row = row;
-                self.cursor_col = col - 1;
-            }
-            b'K' => {
-                let mode = csi_params(&self.csi_body).first().copied().unwrap_or(0);
-                match mode {
-                    0 => self.truncate_line_to_cursor(),
-                    1 => {
-                        let suffix = self.split_line_at_cursor();
-                        self.line = suffix;
-                        self.cursor_col = 0;
-                    }
-                    2 => {
-                        self.line.clear();
-                        self.cursor_col = 0;
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn flush_pending_text(&mut self, _out: &mut Vec<u8>) {
-        if self.pending_text.is_empty() {
-            return;
-        }
-        let text = String::from_utf8_lossy(&self.pending_text).into_owned();
-        self.pending_text.clear();
-        for ch in text.chars() {
-            self.write_char(ch);
-        }
-    }
-
-    fn write_char(&mut self, ch: char) {
-        let width = display_width(ch);
-        if width == 0 {
-            return;
-        }
-        self.pad_to_cursor();
-        self.truncate_line_to_cursor();
-        self.line.push(ConptyLogCell { ch, width });
-        self.cursor_col = self.cursor_col.saturating_add(width);
-    }
-
-    fn pad_to_cursor(&mut self) {
-        let current_width = self.line_width();
-        if self.cursor_col <= current_width {
-            return;
-        }
-        for _ in 0..(self.cursor_col - current_width) {
-            self.line.push(ConptyLogCell { ch: ' ', width: 1 });
-        }
-    }
-
-    fn truncate_line_to_cursor(&mut self) {
-        let keep = self.index_for_col(self.cursor_col);
-        self.line.truncate(keep);
-    }
-
-    fn split_line_at_cursor(&self) -> Vec<ConptyLogCell> {
-        let start = self.index_for_col(self.cursor_col);
-        self.line[start..].to_vec()
-    }
-
-    fn index_for_col(&self, col: usize) -> usize {
-        let mut width = 0;
-        for (index, cell) in self.line.iter().enumerate() {
-            if width >= col || width.saturating_add(cell.width) > col {
-                return index;
-            }
-            width += cell.width;
-        }
-        self.line.len()
-    }
-
-    fn line_width(&self) -> usize {
-        self.line.iter().map(|cell| cell.width).sum()
-    }
-
-    fn flush_line(&mut self, out: &mut Vec<u8>) {
-        for cell in &self.line {
-            let mut encoded = [0_u8; 4];
-            out.extend_from_slice(cell.ch.encode_utf8(&mut encoded).as_bytes());
-        }
-        out.push(b'\n');
-        self.line.clear();
-        self.cursor_col = 0;
-        self.row = self.row.saturating_add(1);
-    }
-}
-
-#[cfg(windows)]
-fn csi_params(body: &[u8]) -> Vec<usize> {
-    let raw = String::from_utf8_lossy(body);
-    raw.trim_start_matches('?')
-        .split(';')
-        .filter_map(|part| part.parse::<usize>().ok())
-        .collect()
-}
-
-#[cfg(windows)]
-fn display_width(ch: char) -> usize {
-    if ch == '\u{0}' || ch.is_control() {
-        0
-    } else if is_wide_char(ch) {
-        2
-    } else {
-        1
-    }
-}
-
-#[cfg(windows)]
-fn is_wide_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x115f
-            | 0x2329..=0x232a
-            | 0x2e80..=0xa4cf
-            | 0xac00..=0xd7a3
-            | 0xf900..=0xfaff
-            | 0xfe10..=0xfe19
-            | 0xfe30..=0xfe6f
-            | 0xff00..=0xff60
-            | 0xffe0..=0xffe6
-            | 0x1f300..=0x1f64f
-            | 0x1f900..=0x1f9ff
-            | 0x20000..=0x3fffd
-    )
-}
-
-#[cfg(windows)]
-fn conpty_synthetic_response_for_csi(
-    body: &[u8],
-    final_byte: u8,
-) -> Option<ConptySyntheticResponse> {
-    match (body, final_byte) {
-        (b"6", b'n') => Some(ConptySyntheticResponse::CursorPosition),
-        (b"5", b'n') => Some(ConptySyntheticResponse::DeviceStatusOk),
-        _ => None,
-    }
-}
-
-#[cfg(windows)]
-fn tee_conpty_output(
-    reader: &mut Box<dyn Read + Send>,
-    mut log_file: std::fs::File,
-    first_output_received: Arc<AtomicBool>,
-    event_tx: &mpsc::Sender<ConptyLoopMessage>,
-    input_command_tx: &mpsc::Sender<ConptyInputCommand>,
-    options: ConptyRunOptions,
-) -> io::Result<u64> {
-    conpty_debug(options.debug, "output reader started");
-    let mut stdout = io::stdout();
-    let mut buffer = [0_u8; 8192];
-    let mut total_bytes = 0_u64;
-    let mut inspector = ConptyOutputInspector::default();
-    let mut log_sanitizer = ConptyLogSanitizer::default();
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                total_bytes += n as u64;
-                let inspection = inspector.inspect(&buffer[..n]);
-                for response in inspection.synthetic_responses {
-                    conpty_debug(
-                        options.debug,
-                        format_args!("terminal query detected: {}", response.debug_label()),
-                    );
-                    let _ = input_command_tx.send(ConptyInputCommand::WriteSynthetic { response });
-                }
-                if inspection.has_visible_output
-                    && !first_output_received.swap(true, Ordering::SeqCst)
-                {
-                    send_conpty_event(event_tx, ConptyEvent::FirstOutput { bytes: n });
-                } else if !inspection.has_visible_output
-                    && !first_output_received.load(Ordering::SeqCst)
-                {
-                    conpty_debug(
-                        options.debug,
-                        format_args!("startup control output ignored: {n} bytes"),
-                    );
-                }
-                send_conpty_event(event_tx, ConptyEvent::OutputChunk { bytes: n });
-                let sanitized = log_sanitizer.push(&buffer[..n]);
-                if !sanitized.is_empty() {
-                    log_file.write_all(&sanitized)?;
-                    log_file.flush()?;
-                }
-                stdout.write_all(&buffer[..n])?;
-                stdout.flush()?;
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::UnexpectedEof
-                ) =>
-            {
-                break
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    let sanitized = log_sanitizer.finish();
-    if !sanitized.is_empty() {
-        log_file.write_all(&sanitized)?;
-        log_file.flush()?;
-    }
-    conpty_debug(
-        options.debug,
-        format_args!("output reader ended: {total_bytes} bytes"),
-    );
-    Ok(total_bytes)
-}
-
-#[cfg(windows)]
-fn current_pty_size() -> PtySize {
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    pty_size(cols, rows)
-}
-
-#[cfg(windows)]
-fn pty_size(cols: u16, rows: u16) -> PtySize {
-    PtySize {
-        rows: rows.max(1),
-        cols: cols.max(1),
-        pixel_width: 0,
-        pixel_height: 0,
-    }
-}
-
-#[cfg(windows)]
-fn conpty_exit_code(status: &portable_pty::ExitStatus) -> i32 {
-    i32::try_from(status.exit_code()).unwrap_or(i32::MAX)
-}
-
-#[cfg(windows)]
-fn key_event_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
-    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            ctrl_char_to_byte(ch).map(|byte| vec![byte])
-        }
-        KeyCode::Char(ch) => {
-            let mut encoded = [0_u8; 4];
-            Some(ch.encode_utf8(&mut encoded).as_bytes().to_vec())
-        }
-        KeyCode::Enter => Some(b"\r".to_vec()),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Tab => Some(b"\t".to_vec()),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
-        _ => None,
-    }
-}
-
-#[cfg(windows)]
-fn key_event_is_ctrl_c(key: KeyEvent) -> bool {
-    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-        && key.code == KeyCode::Char('c')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-}
-
-#[cfg(windows)]
-fn ctrl_char_to_byte(ch: char) -> Option<u8> {
-    let upper = ch.to_ascii_uppercase();
-    if upper.is_ascii_uppercase() {
-        Some((upper as u8) - b'A' + 1)
-    } else if ch == ' ' {
-        Some(0)
-    } else {
-        None
-    }
-}
-
 fn emit_session_log_notice(plan: &SessionLogPlan) {
     if let Some(notice) = plan.notice() {
         eprintln!("{notice}");
         if matches!(
             plan,
-            SessionLogPlan::Script { .. } | SessionLogPlan::PowerShellTranscript { .. }
+            SessionLogPlan::Script { .. }
+                | SessionLogPlan::PowerShellTranscript { .. }
+                | SessionLogPlan::Conpty { .. }
         ) {
             eprintln!(
                 "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
@@ -5028,6 +3823,8 @@ fn load_master_prompt(store: &SecretStore) -> Result<tdcore::crypto::MasterKey> 
 mod tests {
     use super::*;
     use clap::Parser;
+    #[cfg(windows)]
+    use std::sync::mpsc;
 
     #[test]
     fn parses_profile_add_with_defaults_and_tags() {
@@ -5295,6 +4092,29 @@ mod tests {
             }
             _ => panic!("expected run command"),
         }
+    }
+
+    #[test]
+    fn parses_connect_log_backend_conpty() {
+        let cli = Cli::try_parse_from(["td", "connect", "p1", "--log-backend", "conpty"])
+            .expect("parses connect --log-backend conpty");
+
+        match cli.command {
+            Some(Commands::Connect(args)) => {
+                assert_eq!(args.profile_id, "p1");
+                assert_eq!(args.log_backend.as_deref(), Some("conpty"));
+            }
+            _ => panic!("expected connect command"),
+        }
+    }
+
+    #[test]
+    fn connect_log_backend_rejects_non_conpty() {
+        let err = parse_connect_log_backend(Some("script".to_string())).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("--log-backend currently supports only explicit conpty"));
     }
 
     #[test]
@@ -5605,10 +4425,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn conpty_log_sanitizer_applies_prompt_line_clear_redraw() {
-        let mut sanitizer = ConptyLogSanitizer {
-            row: 18,
-            ..Default::default()
-        };
+        let mut sanitizer = ConptyLogSanitizer::with_row(18);
 
         let mut out = sanitizer.push("nico@ao03:~$ ｌｌ".as_bytes());
         out.extend(sanitizer.push(b"\x1b[18;16H\x1b[K\x1b[18;14H\x1b[K\x07ll\r"));
@@ -5678,6 +4495,7 @@ mod tests {
             failure_reason: None,
             content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
             content_capture_reliable: Some(false),
+            backend_status: None,
             backend_warning: Some(
                 session_log::SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT.to_string(),
             ),
@@ -5725,10 +4543,13 @@ mod tests {
             reason: None,
             failure_phase: None,
             failure_reason: None,
-            content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT.to_string()),
-            content_capture_reliable: Some(false),
+            content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO.to_string()),
+            content_capture_reliable: Some(true),
+            backend_status: Some(
+                session_log::SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string(),
+            ),
             backend_warning: Some(
-                session_log::SESSION_LOG_BACKEND_WARNING_CONPTY_EXPERIMENTAL.to_string(),
+                session_log::SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO.to_string(),
             ),
             content_capture_status: None,
             content_capture_warning: None,
@@ -5736,17 +4557,26 @@ mod tests {
 
         let lines = session_capture_lines(&metadata);
 
-        assert!(lines.iter().any(|line| line == "backend_status: degraded"));
         assert!(lines
             .iter()
-            .any(|line| line == "backend_warning: conpty_backend_is_experimental_poc"));
+            .any(|line| line == "backend_status: experimental_ready"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "content_capture: terminal_io"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "content_capture_reliable: true"));
+        assert!(lines
+            .iter()
+            .any(|line| line
+                == "backend_warning: conpty_backend_is_explicit_and_not_selected_by_auto"));
     }
 
     #[test]
     fn session_log_path_display_ignores_warning_text() {
         assert_eq!(
             format_session_log_path(Some(Path::new(
-                "not selected by auto and is not integrated with the TUI."
+                "not selected by auto; use session.log.backend=conpty explicitly."
             ))),
             "<none>"
         );

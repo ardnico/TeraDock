@@ -15,6 +15,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tdcore::cmdset::CmdSetStore;
+#[cfg(windows)]
+use tdcore::conpty::{run_conpty_ssh_child, ConptyRunOptions};
 use tdcore::db;
 use tdcore::profile::ProfileStore;
 use tdcore::session_log::{
@@ -275,7 +277,9 @@ fn run_interactive_ssh_session(
         println!("{notice}");
         if matches!(
             &session.session_log_plan,
-            SessionLogPlan::Script { .. } | SessionLogPlan::PowerShellTranscript { .. }
+            SessionLogPlan::Script { .. }
+                | SessionLogPlan::PowerShellTranscript { .. }
+                | SessionLogPlan::Conpty { .. }
         ) {
             println!(
                 "TeraDock does not mask terminal output; passwords, tokens, or secrets shown on screen may be captured."
@@ -299,6 +303,16 @@ fn run_interactive_ssh_session(
             files,
             *launch_failure_policy,
         ),
+        #[cfg(windows)]
+        SessionLogPlan::Conpty { files, .. } => run_conpty_logged_ssh_session(session, files),
+        #[cfg(not(windows))]
+        SessionLogPlan::Conpty { .. } => SshSessionRunResult::LaunchFailed {
+            error: anyhow!("unsupported: ConPTY session logging is only available on Windows"),
+            duration_ms: 0,
+            session_log: SessionLogReference::not_saved(
+                session_log::SESSION_LOG_REASON_UNSUPPORTED_ON_PLATFORM,
+            ),
+        },
         SessionLogPlan::Error { reason } => run_session_logging_setup_error(session, reason),
         SessionLogPlan::Disabled | SessionLogPlan::NoLog { .. } => {
             run_plain_ssh_session(session, session.session_log_plan.not_saved_reference())
@@ -486,6 +500,70 @@ fn run_powershell_transcript_ssh_session(
     }
 }
 
+#[cfg(windows)]
+fn run_conpty_logged_ssh_session(
+    session: &SshSessionCommand,
+    files: &SessionLogFiles,
+) -> SshSessionRunResult {
+    let options = ConptyRunOptions {
+        debug: teradock_debug_enabled(),
+        startup_timeout: Some(Duration::from_secs(10)),
+    };
+    let log_started_at = now_ms();
+    let started = Instant::now();
+    let status = run_conpty_ssh_child(&session.executable, &session.args, &files.log_path, options);
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let target = session_log_target(session);
+
+    match status {
+        Ok(report) => {
+            let exit_code = report.exit_code;
+            let session_log = match session_log::complete_conpty_session(
+                files,
+                &target,
+                log_started_at,
+                duration_ms,
+                exit_code,
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            SshSessionRunResult::Completed(SshSessionOutcome {
+                ok: exit_code == Some(0),
+                exit_code,
+                duration_ms,
+                session_log,
+            })
+        }
+        Err(failure) => {
+            let session_log = match session_log::complete_conpty_failure_session(
+                files,
+                &target,
+                log_started_at,
+                duration_ms,
+                session_log::SessionLogFailureMetadata {
+                    status: failure.status,
+                    failure_phase: failure.phase,
+                    failure_reason: failure.reason,
+                    exit_code: None,
+                },
+            ) {
+                Ok(metadata) => SessionLogReference::saved(metadata.session_id),
+                Err(err) => SessionLogReference::not_saved(format!(
+                    "{SESSION_LOG_REASON_METADATA_WRITE_FAILED}: {err}"
+                )),
+            };
+            SshSessionRunResult::LaunchFailed {
+                error: failure.into_error(),
+                duration_ms,
+                session_log,
+            }
+        }
+    }
+}
+
 fn run_session_logging_setup_error(
     session: &SshSessionCommand,
     reason: &str,
@@ -506,6 +584,17 @@ fn session_log_target(session: &SshSessionCommand) -> tdcore::ssh::SshTarget {
         host: session.host.clone(),
         port: session.port,
         danger_level: tdcore::profile::DangerLevel::Normal,
+    }
+}
+
+#[cfg(windows)]
+fn teradock_debug_enabled() -> bool {
+    match std::env::var("TERADOCK_DEBUG") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 

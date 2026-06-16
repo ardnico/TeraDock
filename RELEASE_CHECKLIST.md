@@ -102,11 +102,14 @@ td session doctor
 td session list --json
 ```
 
-Windows ConPTY PoC smoke, only on a controlled Windows SSH profile and only when
-collecting explicit PoC evidence:
+Windows ConPTY explicit backend smoke, only on a controlled Windows SSH profile:
 
 ```powershell
+.\target\release\td.exe config set session.log.enabled true
+.\target\release\td.exe config set session.log.backend conpty
+.\target\release\td.exe session doctor
 .\target\release\td.exe session conpty-test <profile_id>
+.\target\release\td.exe connect <profile_id> --log-backend conpty
 .\target\release\td.exe session list
 .\target\release\td.exe session show <session_id>
 .\target\release\td.exe session path <session_id>
@@ -115,8 +118,7 @@ collecting explicit PoC evidence:
 Follow [Windows ConPTY Manual Smoke](docs/internal/windows-conpty-manual-smoke.md).
 Confirm SSH login, terminal output display, output capture in the log,
 `exit_code` in metadata, Ctrl-C recovery, resize behavior, UTF-8 behavior, and
-controlled failure behavior. This check does not promote ConPTY to `auto` and
-does not cover the TUI `s` path.
+controlled failure behavior. This check does not promote ConPTY to `auto`.
 
 ## 5. TUI smoke tests
 
@@ -136,13 +138,15 @@ does not cover the TUI `s` path.
 - With `session.log.enabled=true` on Linux/macOS, `s` uses `script` when
   available and `td session list` shows the saved metadata after return.
 - On Windows, enabled `auto` session logging resolves to `no-log` with
-  `windows_terminal_content_logging_requires_conpty`.
+  `windows_terminal_content_logging_requires_explicit_conpty`.
 - On Windows, explicit `powershell-transcript` reports `degraded`,
   `content_capture=best_effort`, and warns that interactive SSH input/output
   may not be captured. Missing PowerShell or `ssh` for that explicit backend
   reports `powershell_not_found` or `ssh_not_found`.
-- On Windows, ConPTY remains an explicit `td session conpty-test <profile_id>`
-  PoC. It is not selected by `auto` and is not used by the TUI `s` path.
+- On Windows, ConPTY remains explicit and experimental. With
+  `session.log.enabled=true` and `session.log.backend=conpty`, TUI `s` uses
+  ConPTY for SSH profiles, returns to the TUI after `exit`, and leaves
+  `session list/show/path` usable. It is not selected by `auto`.
 - Host-only or empty PowerShell transcripts add `content_capture_status` and
   `content_capture_warning`, and `td session show <session_id>` displays the
   warning.

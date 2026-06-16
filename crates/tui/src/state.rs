@@ -1151,6 +1151,7 @@ mod tests {
     use tdcore::db;
     use tdcore::doctor::ClientOverrides;
     use tdcore::profile::{NewProfile, ProfileStore};
+    use tdcore::settings;
 
     fn empty_cmdset_store() -> CmdSetStore {
         CmdSetStore::new(db::init_in_memory().unwrap())
@@ -1239,6 +1240,76 @@ mod tests {
             command.args.last().unwrap(),
             OsStr::new("alice@example.com")
         );
+        let _ = fs::remove_file(command.executable);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_conpty_backend_flows_into_tui_ssh_session_plan() {
+        let fake_ssh = fake_ssh_path("conpty-plan");
+        let mut profile = base_profile(ProfileType::Ssh);
+        profile.client_overrides = Some(ClientOverrides {
+            ssh: Some(fake_ssh.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        let mut state = state_with_profiles(vec![profile]);
+        settings::set_setting(
+            state.store.conn(),
+            session_log::SESSION_LOG_ENABLED_KEY,
+            "true",
+        )
+        .unwrap();
+        settings::set_setting(
+            state.store.conn(),
+            session_log::SESSION_LOG_BACKEND_KEY,
+            session_log::SESSION_LOG_BACKEND_CONPTY,
+        )
+        .unwrap();
+
+        let command = state
+            .build_ssh_session_command()
+            .unwrap()
+            .expect("ssh session command");
+
+        assert!(matches!(
+            command.session_log_plan,
+            SessionLogPlan::Conpty { .. }
+        ));
+        let _ = fs::remove_file(command.executable);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_auto_backend_does_not_flow_into_tui_conpty_plan() {
+        let fake_ssh = fake_ssh_path("auto-plan");
+        let mut profile = base_profile(ProfileType::Ssh);
+        profile.client_overrides = Some(ClientOverrides {
+            ssh: Some(fake_ssh.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        let mut state = state_with_profiles(vec![profile]);
+        settings::set_setting(
+            state.store.conn(),
+            session_log::SESSION_LOG_ENABLED_KEY,
+            "true",
+        )
+        .unwrap();
+        settings::set_setting(
+            state.store.conn(),
+            session_log::SESSION_LOG_BACKEND_KEY,
+            session_log::SESSION_LOG_BACKEND_AUTO,
+        )
+        .unwrap();
+
+        let command = state
+            .build_ssh_session_command()
+            .unwrap()
+            .expect("ssh session command");
+
+        assert!(matches!(
+            command.session_log_plan,
+            SessionLogPlan::NoLog { .. }
+        ));
         let _ = fs::remove_file(command.executable);
     }
 

@@ -61,7 +61,7 @@ Pros:
 Cons:
 - Larger implementation and test surface.
 - Higher risk of breaking TUI terminal restore behavior.
-- Still degraded. Basic manual smoke now exists, so the explicit candidate label is `experimental_ready`, but it is exposed only through `td session conpty-test <profile_id>`.
+- Still degraded. Basic manual smoke now exists, so the explicit backend label is `experimental_ready`, but it remains unselected by `auto`.
 - The initial CLI input bridge is intentionally small and is not a full terminal emulator layer.
 
 ### PowerShell Transcript backend
@@ -102,20 +102,23 @@ Cons:
 - Default: disabled.
 - Linux/macOS: use the `script` backend when `session.log.backend=auto` or `script`.
 - Windows: `session.log.backend=auto` resolves to `no-log` with
-  `windows_terminal_content_logging_requires_conpty`.
+  `windows_terminal_content_logging_requires_explicit_conpty`.
 - Windows full SSH terminal-content logging requires ConPTY.
 - Explicit `powershell-transcript` is unsupported outside Windows. On Windows,
   explicit `powershell-transcript` reports `degraded`, uses
   `content_capture=best_effort`, and warns that SSH input/output may not be
   captured.
-- Explicit `conpty` is recognized as an `experimental_ready` backend setting,
-  but standard `td connect` and TUI `s` do not use it yet. Diagnostics remain
-  degraded because broader Windows validation and TUI integration are pending.
-  Use the PoC command `td session conpty-test <profile_id>` instead.
+- Explicit `conpty` is recognized as an `experimental_ready` backend setting.
+  On Windows, normal `td connect` and TUI `s` use it only when
+  `session.log.enabled=true` and `session.log.backend=conpty`; `td connect
+  <profile_id> --log-backend conpty` can also request it for one SSH connect.
+  Diagnostics remain degraded because broader Windows validation is pending.
+  The PoC command `td session conpty-test <profile_id>` remains available for
+  focused smoke checks.
 - Missing PowerShell or `ssh` for explicit `powershell-transcript` reports
   not-ready errors instead of silently opening an unlogged SSH session.
 - If `script` is unavailable or setup fails under `auto`, continue the SSH session without logging when possible and record a no-log reason.
-- Do not auto-select ConPTY, wire it into TUI, add tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
+- Do not auto-select ConPTY, add tmux, terminal emulator launch, Web UI, remote daemon, or CommandSet output history integration in this slice.
 - Windows ConPTY design is tracked separately in [Windows ConPTY Session Logging Design](windows-conpty-session-logging-design.md).
 
 ## Windows ConPTY status model
@@ -124,7 +127,8 @@ Cons:
 - `session.log.backend=conpty` is labeled `experimental_ready` after basic
   manual smoke, but diagnostics keep the overall status `degraded`.
 - `session.log.backend=auto` still resolves to `no-log` on Windows.
-- TUI `s` and normal `td connect` do not use ConPTY yet.
+- TUI `s` and normal `td connect` use ConPTY only when explicitly configured;
+  `auto` does not.
 - PowerShell Transcript remains explicit best-effort/degraded and is not a
   reliable SSH terminal-content backend.
 
@@ -148,6 +152,7 @@ Session log metadata is a JSON sidecar file next to the terminal log:
 - `reason`
 - `content_capture`
 - `content_capture_reliable`
+- `backend_status`
 - `backend_warning`
 - `content_capture_status`
 - `content_capture_warning`
@@ -174,14 +179,15 @@ otherwise empty of SSH terminal content, metadata also includes:
 }
 ```
 
-For the ConPTY PoC, metadata includes:
+For the explicit ConPTY backend, metadata includes:
 
 ```json
 {
   "backend": "conpty",
-  "content_capture": "best_effort",
-  "content_capture_reliable": false,
-  "backend_warning": "conpty_backend_is_experimental_poc"
+  "content_capture": "terminal_io",
+  "content_capture_reliable": true,
+  "backend_status": "experimental_ready",
+  "backend_warning": "conpty_backend_is_explicit_and_not_selected_by_auto"
 }
 ```
 
@@ -197,9 +203,9 @@ ConPTY metadata uses the same exclusion policy: no SSH auth args, full command s
   - `session.log.enabled=false`
   - `session.log.dir=<data_dir>/session-logs`
   - `session.log.backend=auto`
-- TUI: pressing `s` opens an SSH session as before. When logging is enabled and supported, TeraDock saves the transcript and reports the session id after return.
+- TUI: pressing `s` opens an SSH session as before. When logging is enabled and supported, TeraDock saves the transcript and records the session id after return. On Windows this uses ConPTY only when `session.log.backend=conpty` is explicit.
 - TUI settings: pressing `c` opens the settings screen. Saving there writes global settings and affects subsequent SSH sessions.
-- CLI: `td connect <profile_id>` can use the same logging path for SSH profiles.
+- CLI: `td connect <profile_id>` can use the same logging path for SSH profiles. `td connect <profile_id> --log-backend conpty` requests the explicit Windows ConPTY backend for that SSH connect.
 - CLI PoC: `td session conpty-test <profile_id>` runs a Windows-only ConPTY experiment and writes session metadata/log files readable through `td session list`, `td session show`, and `td session path`.
 - CLI settings: `td config ui` opens the same BIOS-style settings screen outside `td ui`.
 - Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, dependency availability, log directory state, newest saved session log, platform support, fallback reason, content-capture reliability, warning, status, and hints.
