@@ -80,7 +80,7 @@ td ui
 
 `session.log.backend=conpty` is an explicit Windows-only backend and is not selected by `auto`. When selected, normal `td connect` and the TUI `s` SSH path use the ConPTY runner for SSH profiles. `td session conpty-test <profile_id>` remains available as a focused smoke command. The ConPTY backend writes the terminal I/O stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and terminal control output after best-effort sanitization. Typed input appears in the log when the remote terminal or program echoes it.
 
-The ConPTY backend has manual smoke evidence for SSH login, visible remote output, saved log output, metadata, `session list/show/path` compatibility, and TUI `s` logging with Japanese output. It remains degraded and `explicit_ready` until Ctrl-C recovery, startup timeout, bad host, auth failure, resize, large output, child cleanup, and broader Windows terminal coverage are reviewed. It must not be promoted to `auto` before that evidence is complete.
+The ConPTY backend has manual smoke evidence for SSH login, visible remote output, saved log output, metadata, `session list/show/path` compatibility, and TUI `s` logging with Japanese output. It remains degraded and `explicit_ready` until post-fix Ctrl-C remote interrupt, Ctrl-C emergency abort, startup timeout, bad host, auth failure, resize, large output, child cleanup, and broader Windows terminal coverage are reviewed. It must not be promoted to `auto` before that evidence is complete.
 
 Use these commands to inspect saved sessions:
 
@@ -97,7 +97,7 @@ td session path <session_id>
 
 Do not attach raw session logs to issues, pull requests, support requests, release evidence, or screenshots unless hosts, users, prompts, command output, and sensitive values have been reviewed and redacted.
 
-If an interactive logging run leaves the terminal in an unusable state, press `Ctrl-C`, use `reset` where available, or close and reopen the terminal. Before retrying ConPTY smoke, verify that no leftover `td` or `ssh` process from the failed run remains.
+If an active ConPTY logging run stops responding after a forwarded `Ctrl-C`, press `Ctrl-C` again within 2 seconds to request the TeraDock emergency abort. If the terminal remains unusable after returning, use `reset` where available or close and reopen the terminal. Before retrying ConPTY smoke, verify that no leftover `td` or `ssh` process from the failed run remains.
 
 ## Release Safety Scope
 

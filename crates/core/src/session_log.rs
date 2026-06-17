@@ -60,6 +60,7 @@ pub const SESSION_LOG_FAILURE_REASON_OUTPUT_BRIDGE_FAILED: &str = "output_bridge
 pub const SESSION_LOG_FAILURE_REASON_CHILD_WAIT_FAILED: &str = "child_wait_failed";
 pub const SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT: &str = "initial_output_timeout";
 pub const SESSION_LOG_FAILURE_REASON_CTRL_C: &str = "ctrl_c";
+pub const SESSION_LOG_FAILURE_REASON_CTRL_C_DOUBLE_PRESS: &str = "ctrl_c_double_press";
 pub const SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT: &str = "best_effort";
 pub const SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO: &str = "terminal_io";
 pub const SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY: &str = "explicit_ready";
@@ -2279,6 +2280,37 @@ mod tests {
     }
 
     #[test]
+    fn writes_conpty_completed_metadata_after_forwarded_ctrl_c_scenario() {
+        let dir = temp_dir("conpty-forwarded-ctrl-c-metadata");
+        let files = allocate_session_files(&dir).unwrap();
+        fs::write(&files.log_path, "sleep 30\n^C\nafter-ctrl-c\nexit\n").unwrap();
+        let target = sample_target();
+
+        let metadata = complete_conpty_session(&files, &target, 1000, 42, Some(0)).unwrap();
+        let loaded = get_session_log_in_dir(&dir, &files.session_id).unwrap();
+        let raw = fs::read_to_string(&files.metadata_path).unwrap();
+
+        assert_eq!(metadata.status, "completed");
+        assert_eq!(metadata.exit_code, Some(0));
+        assert_eq!(metadata.failure_phase, None);
+        assert_eq!(metadata.failure_reason, None);
+        assert_eq!(loaded.status, "completed");
+        assert_eq!(loaded.exit_code, Some(0));
+        assert_eq!(
+            metadata.content_capture.as_deref(),
+            Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO)
+        );
+        assert!(!raw.contains("auth_args"));
+        assert!(!raw.contains("command"));
+        assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn writes_conpty_initial_timeout_metadata_without_secret_fields() {
         let dir = temp_dir("conpty-timeout-metadata");
         let files = allocate_session_files(&dir).unwrap();
@@ -2384,7 +2416,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_conpty_abort_metadata_without_log_file() {
+    fn writes_conpty_double_ctrl_c_abort_metadata_without_log_file() {
         let dir = temp_dir("conpty-abort-metadata");
         let files = allocate_session_files(&dir).unwrap();
         let target = sample_target();
@@ -2397,7 +2429,7 @@ mod tests {
             SessionLogFailureMetadata {
                 status: SESSION_LOG_STATUS_ABORTED,
                 failure_phase: SESSION_LOG_FAILURE_PHASE_USER_ABORT,
-                failure_reason: SESSION_LOG_FAILURE_REASON_CTRL_C,
+                failure_reason: SESSION_LOG_FAILURE_REASON_CTRL_C_DOUBLE_PRESS,
                 exit_code: None,
             },
         )
@@ -2411,7 +2443,7 @@ mod tests {
         );
         assert_eq!(
             metadata.failure_reason.as_deref(),
-            Some(SESSION_LOG_FAILURE_REASON_CTRL_C)
+            Some(SESSION_LOG_FAILURE_REASON_CTRL_C_DOUBLE_PRESS)
         );
         assert_eq!(metadata.log_path, None);
         assert!(!raw.contains("auth_args"));

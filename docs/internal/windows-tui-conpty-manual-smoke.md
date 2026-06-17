@@ -35,6 +35,11 @@ GO: explicit conpty backend works for TUI normal SSH session
 
 `auto` remains deferred until the edge cases below have recorded evidence.
 
+The 2026-06-17 Ctrl-C smoke before the forwarding fix found that pressing
+`Ctrl-C` during remote `sleep 30` returned to the TUI instead of interrupting
+the remote process and keeping SSH alive. The current expected behavior below
+is the post-fix contract and still needs controlled Windows operator evidence.
+
 ## Normal Exit Code and Cleanup
 
 Use this case when validating exit-code propagation and child cleanup for a
@@ -102,7 +107,7 @@ Expected:
 - Metadata excludes auth args, full command strings, private key paths,
   passwords, secrets, and tokens.
 
-## Ctrl-C
+## Ctrl-C Remote Interrupt
 
 Run:
 
@@ -119,11 +124,59 @@ exit
 
 Expected:
 
-- The remote process stops, or TeraDock safely aborts the ConPTY child.
-- The local terminal and TUI are not left in a broken state.
-- TUI returns or the terminal can be recovered without closing the whole app.
-- `ssh.exe` from the test does not remain after abort/exit.
-- Saved metadata is inspectable when the metadata sidecar can be written.
+- The first `Ctrl-C` is forwarded to the ConPTY child as `0x03`.
+- The remote `sleep 30` stops and the remote shell returns.
+- `echo after-ctrl-c` can be executed in the same SSH session.
+- The saved log contains `sleep 30` and `after-ctrl-c`.
+- After `exit`, metadata has `backend=conpty`, `status=completed`, and
+  `exit_code=0`.
+- The TUI returns after remote `exit`.
+- No extra `ssh.exe` child from the test remains.
+- Metadata excludes auth args, full command strings, private key paths,
+  passwords, secrets, and tokens.
+
+Classify the result:
+
+- Ideal: one `Ctrl-C` interrupts only the remote process, the SSH session stays
+  usable, metadata is `status=completed` with `exit_code=0`, the log contains
+  `after-ctrl-c`, and child cleanup is clean.
+- Acceptable: the first `Ctrl-C` is forwarded but the remote program or host
+  does not recover; a second `Ctrl-C` within 2 seconds safely aborts TeraDock,
+  metadata is inspectable, the TUI returns, and no child remains.
+- Failure: one `Ctrl-C` immediately aborts TeraDock, the terminal mode is left
+  broken, metadata is missing or unsafe, or a test `ssh.exe` child remains.
+
+## Ctrl-C Emergency Abort
+
+Run:
+
+```sh
+sleep 30
+```
+
+Press `Ctrl-C` twice within 2 seconds.
+
+Expected:
+
+- The first `Ctrl-C` is forwarded to the ConPTY child.
+- The second quick `Ctrl-C` takes the TeraDock emergency abort path.
+- The TUI returns.
+- Metadata has `backend=conpty`, `status=aborted`,
+  `failure_phase=user_abort`, and `failure_reason=ctrl_c_double_press`.
+- No extra `ssh.exe` child from the test remains.
+- Metadata excludes auth args, full command strings, private key paths,
+  passwords, secrets, and tokens.
+
+With `TERADOCK_DEBUG=1`, generic debug lines may include:
+
+```text
+debug: ctrl-c received
+debug: ctrl-c forwarded to conpty child
+debug: session continues after ctrl-c
+```
+
+Debug output must not include the full SSH command, auth args, private key
+paths, passwords, tokens, secrets, or the full environment.
 
 ## Bad Host
 
@@ -203,7 +256,7 @@ reports.
 Auto selection remains blocked until the normal path and all failure cases have
 recorded evidence from controlled Windows runs:
 
-- Ctrl-C.
+- Ctrl-C remote interrupt and emergency abort.
 - Startup timeout.
 - Bad host.
 - Auth failure.

@@ -54,7 +54,8 @@ Verified from that session:
 
 Still required before explicit stable backend promotion:
 
-- Ctrl-C abort evidence from a clean process snapshot.
+- Ctrl-C remote interrupt evidence from a clean process snapshot.
+- Ctrl-C emergency abort evidence from a clean process snapshot.
 - Startup timeout failed metadata.
 - Bad host failed metadata.
 - Auth failure behavior.
@@ -279,21 +280,42 @@ TUI, and `session list/show/path` can inspect the saved ConPTY session. Follow
 the focused TUI checklist in `docs/internal/windows-tui-conpty-manual-smoke.md`
 for Ctrl-C, bad host, auth failure, resize, and large output.
 
-If the TUI screen or terminal mode is not restored, press `Ctrl-C`, reopen the
-terminal if necessary, and check for leftover `td` or `ssh` processes from the
-test before retrying. Record the recovery steps as part of the smoke evidence.
+If a ConPTY session does not respond after the first forwarded `Ctrl-C`, press
+`Ctrl-C` again within 2 seconds to use the emergency abort path. If the TUI
+screen or terminal mode is still not restored, reopen the terminal if necessary,
+and check for leftover `td` or `ssh` processes from the test before retrying.
+Record the recovery steps as part of the smoke evidence.
 
 ## Ctrl-C Check
 
-For this PoC, Ctrl-C is TeraDock emergency abort, not a key to forward to the
-SSH child. Run a command that can safely be killed or use a test profile that
-stalls before first output:
+For the shared ConPTY runner, the first Ctrl-C is forwarded to the SSH child as
+`0x03`. A second Ctrl-C within 2 seconds is the TeraDock emergency abort. Run a
+command that can safely be interrupted:
 
 ```sh
 sleep 30
 ```
 
-Press `Ctrl-C`.
+Press `Ctrl-C` once, then if the remote shell returns:
+
+```sh
+echo after-ctrl-c
+exit
+```
+
+Confirm:
+
+- The remote process stops and the SSH session remains usable.
+- The saved log contains `sleep 30` and `after-ctrl-c`.
+- Metadata has `status=completed` and `exit_code=0`.
+- PowerShell returns after remote `exit`.
+- The local terminal accepts input after the test.
+- The local terminal is not left in raw mode.
+- `Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue` does not
+  show a leftover `td.exe` or `ssh.exe` from the completed ConPTY run.
+
+For emergency abort, run `sleep 30` again and press `Ctrl-C` twice within 2
+seconds.
 
 Confirm:
 
@@ -312,7 +334,7 @@ Metadata should include:
 
 - `status=aborted`
 - `failure_phase=user_abort`
-- `failure_reason=ctrl_c`
+- `failure_reason=ctrl_c_double_press`
 - `content_capture=terminal_io`
 - `content_capture_reliable=true`
 - `backend_status=explicit_ready`

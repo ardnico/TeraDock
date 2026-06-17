@@ -30,9 +30,46 @@ Current PoC implementation pieces:
 - Pump pseudo console output back to the user's terminal and tee the same bytes to the session log file.
 - Preserve exit code propagation from `ssh.exe`.
 - Handle terminal resize events by calling the ConPTY resize API when crossterm reports a resize.
-- Treat Ctrl-C as a parent-side emergency abort for the PoC and rely on a raw-mode guard to restore the local terminal.
+- Treat the first Ctrl-C as a remote interrupt by writing `0x03` to the ConPTY child and flushing the writer. Treat a second Ctrl-C within 2 seconds as the parent-side emergency abort, and rely on the raw-mode guard to restore the local terminal.
 - Write initial logs as UTF-8 best-effort text after stripping or normalizing common terminal control sequences.
 - Share the ConPTY runner between `td session conpty-test`, explicit `td connect`, and the TUI `s` path while keeping `auto` disabled.
+
+## Ctrl-C Policy
+
+The ConPTY input bridge owns Ctrl-C while the TUI is suspended. The TUI itself
+has already left raw mode and the alternate screen before the shared runner
+starts. The runner then enters raw mode, reads crossterm key events, and writes
+translated bytes to the pseudo terminal.
+
+The current policy is:
+
+- First Ctrl-C: write `0x03` to the ConPTY writer, flush, do not set the runner
+  abort flag, and keep the output reader and child wait path running.
+- Second Ctrl-C within 2 seconds: send `ConptyEvent::UserAbort`, kill the child,
+  join the bridge/wait/output threads best-effort, restore terminal mode, and
+  write aborted metadata.
+- Ctrl-C after the 2-second window: treat it as another first Ctrl-C and forward
+  `0x03` again.
+
+Expected metadata after a successful remote interrupt and later remote `exit`:
+
+```text
+status=completed
+exit_code=0
+```
+
+Expected metadata after emergency abort:
+
+```text
+status=aborted
+failure_phase=user_abort
+failure_reason=ctrl_c_double_press
+```
+
+Debug output for this path must stay generic. It may say that Ctrl-C was
+received, forwarded, and that the session continues. It must not print the full
+SSH command, auth args, private key path, passwords, tokens, secrets, or full
+environment.
 
 ## Stabilization Status
 
@@ -62,9 +99,11 @@ The 2026-06-17 operator smoke reported that the TUI `s` path also works when
 remote command history and command output were saved, Japanese output was
 preserved, the TUI returned, and `session list/show/path` could inspect the
 saved session. This is enough to call the explicit backend `explicit_ready`,
-but not enough to call it `ready`. Ctrl-C abort, startup timeout, bad host,
-auth failure, resize, large output, child cleanup in a clean process snapshot,
-and broader Windows terminal coverage still need recorded evidence.
+but not enough to call it `ready`. Source now implements first-Ctrl-C remote
+interrupt and second-Ctrl-C emergency abort, but controlled post-fix operator
+evidence is still needed. Startup timeout, bad host, auth failure, resize,
+large output, child cleanup in a clean process snapshot, and broader Windows
+terminal coverage also still need recorded evidence.
 
 ## Phase 1 Findings
 
@@ -88,15 +127,16 @@ td ui
 - Remote shell output is visible in the current terminal.
 - The same terminal output is written to a session log file.
 - SSH exit code is propagated.
-- Ctrl-C does not leave the terminal broken.
+- One Ctrl-C interrupts the remote process without ending TeraDock; a quick
+  second Ctrl-C safely aborts TeraDock and does not leave the terminal broken.
 - Resize handling is documented and the PoC forwards resize events when crossterm reports them.
 - UTF-8/Japanese output is not obviously corrupted.
 
 Source inspection alone is not evidence. As of 2026-06-17, normal TUI `s`
 logging and Japanese output are reported successful for explicit ConPTY. The
-remaining criteria require manual Windows run evidence that includes Ctrl-C,
-resize, bad host, auth failure, timeout, large output, and clean child process
-observations.
+remaining criteria require manual Windows run evidence that includes Ctrl-C
+remote interrupt, Ctrl-C emergency abort, resize, bad host, auth failure,
+timeout, large output, and clean child process observations.
 
 ## PoC No-Go Criteria
 
@@ -148,7 +188,9 @@ after all of the following are recorded:
 - User-entered commands are captured at an acceptable level.
 - `exit` returns to the local shell.
 - SSH exit code is recorded.
-- Ctrl-C abort returns to the local shell.
+- One Ctrl-C interrupts the remote process and keeps SSH usable.
+- A quick second Ctrl-C aborts TeraDock, returns to the local shell, and writes
+  aborted metadata.
 - Child `ssh.exe` does not remain after abort/exit.
 - Startup timeout produces failed metadata.
 - Bad host produces failed metadata.
@@ -186,9 +228,11 @@ Auto promotion requires more evidence than explicit backend stabilization:
 - The PoC log is a byte transcript, not a full terminal replay. ANSI escape
   sequences may remain in the file and resize does not rewrite earlier screen
   state.
-- If TUI terminal restoration fails in a manual run, recover the local terminal
-  with `Ctrl-C`, `reset` where available, or by reopening the terminal, then
-  check for leftover `td` or `ssh` child processes before retrying.
+- If a ConPTY session does not respond after the first forwarded Ctrl-C, press
+  Ctrl-C again within 2 seconds to use the emergency abort path. If TUI
+  terminal restoration still fails in a manual run, recover the local terminal
+  with `reset` where available or by reopening the terminal, then check for
+  leftover `td` or `ssh` child processes before retrying.
 
 ## Non-goals
 
@@ -203,5 +247,5 @@ Auto promotion requires more evidence than explicit backend stabilization:
 ## Suggested Roadmap
 
 - v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY as an explicit backend for `td connect` and TUI `s`, with `td session conpty-test <profile_id>` retained for focused smoke; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after Ctrl-C, timeout, bad host, auth failure, resize, large-output, cleanup, and broader Windows terminal evidence is recorded.
+- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after Ctrl-C remote interrupt, Ctrl-C emergency abort, timeout, bad host, auth failure, resize, large-output, cleanup, and broader Windows terminal evidence is recorded.
 - v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend and only then consider `auto` selection.

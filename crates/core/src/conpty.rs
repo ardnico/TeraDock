@@ -16,6 +16,9 @@ use portable_pty::{CommandBuilder, PtySize};
 
 use crate::session_log;
 
+const CONPTY_REMOTE_INTERRUPT: &[u8] = &[0x03];
+const CONPTY_CTRL_C_ABORT_WINDOW: Duration = Duration::from_secs(2);
+
 fn conpty_debug(enabled: bool, message: impl std::fmt::Display) {
     if enabled {
         eprintln!("debug: {message}");
@@ -98,6 +101,39 @@ impl ConptySyntheticResponse {
 
 enum ConptyInputCommand {
     WriteSynthetic { response: ConptySyntheticResponse },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConptyCtrlCAction {
+    ForwardInterrupt,
+    AbortSession,
+}
+
+struct ConptyCtrlCPolicy {
+    last_forwarded_at: Option<Instant>,
+    abort_window: Duration,
+}
+
+impl ConptyCtrlCPolicy {
+    fn new(abort_window: Duration) -> Self {
+        Self {
+            last_forwarded_at: None,
+            abort_window,
+        }
+    }
+
+    fn action_for_ctrl_c(&mut self, now: Instant) -> ConptyCtrlCAction {
+        let quick_repeat = self.last_forwarded_at.is_some_and(|last| {
+            now.checked_duration_since(last)
+                .is_some_and(|elapsed| elapsed <= self.abort_window)
+        });
+        if quick_repeat {
+            ConptyCtrlCAction::AbortSession
+        } else {
+            self.last_forwarded_at = Some(now);
+            ConptyCtrlCAction::ForwardInterrupt
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -334,8 +370,8 @@ pub fn run_conpty_ssh_child(
                 kill_conpty_child(&mut child_killer, options);
                 break Err(ConptyChildFailure::aborted(
                     session_log::SESSION_LOG_FAILURE_PHASE_USER_ABORT,
-                    session_log::SESSION_LOG_FAILURE_REASON_CTRL_C,
-                    anyhow!("aborted by Ctrl-C"),
+                    session_log::SESSION_LOG_FAILURE_REASON_CTRL_C_DOUBLE_PRESS,
+                    anyhow!("aborted by double Ctrl-C"),
                 ));
             }
             ConptyLoopMessage::Event(ConptyEvent::OutputError { message }) => {
@@ -579,6 +615,7 @@ fn run_conpty_input_bridge(
     event_tx: &mpsc::Sender<ConptyLoopMessage>,
     options: ConptyRunOptions,
 ) -> Result<()> {
+    let mut ctrl_c_policy = ConptyCtrlCPolicy::new(CONPTY_CTRL_C_ABORT_WINDOW);
     while !cancel.load(Ordering::SeqCst) {
         drain_conpty_input_commands(writer, input_command_rx, options)?;
         if !event::poll(Duration::from_millis(20))
@@ -588,11 +625,28 @@ fn run_conpty_input_bridge(
         }
         match event::read().context("failed to read terminal input for ConPTY")? {
             Event::Key(key) => {
-                if key_event_is_ctrl_c(key) {
-                    conpty_debug(options.debug, "ctrl-c input event received");
-                    cancel.store(true, Ordering::SeqCst);
-                    send_conpty_event(event_tx, ConptyEvent::UserAbort);
-                    return Ok(());
+                if key_event_is_ctrl_c(&key) {
+                    conpty_debug(options.debug, "ctrl-c received");
+                    match ctrl_c_policy.action_for_ctrl_c(Instant::now()) {
+                        ConptyCtrlCAction::ForwardInterrupt => {
+                            writer
+                                .write_all(CONPTY_REMOTE_INTERRUPT)
+                                .context("failed to write Ctrl-C to ConPTY")?;
+                            writer.flush().context("failed to flush Ctrl-C to ConPTY")?;
+                            conpty_debug(options.debug, "ctrl-c forwarded to conpty child");
+                            conpty_debug(options.debug, "session continues after ctrl-c");
+                            continue;
+                        }
+                        ConptyCtrlCAction::AbortSession => {
+                            conpty_debug(
+                                options.debug,
+                                "second ctrl-c received within abort window",
+                            );
+                            cancel.store(true, Ordering::SeqCst);
+                            send_conpty_event(event_tx, ConptyEvent::UserAbort);
+                            return Ok(());
+                        }
+                    }
                 }
                 if let Some(bytes) = key_event_to_pty_bytes(key) {
                     writer
@@ -1309,7 +1363,7 @@ pub fn key_event_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
-fn key_event_is_ctrl_c(key: KeyEvent) -> bool {
+fn key_event_is_ctrl_c(key: &KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         && key.code == KeyCode::Char('c')
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1323,5 +1377,67 @@ fn ctrl_char_to_byte(ch: char) -> Option<u8> {
         Some(0)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctrl_c_key() -> KeyEvent {
+        KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )
+    }
+
+    #[test]
+    fn ctrl_c_key_maps_to_remote_interrupt_byte() {
+        assert_eq!(
+            key_event_to_pty_bytes(ctrl_c_key()),
+            Some(CONPTY_REMOTE_INTERRUPT.to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_c_policy_forwards_first_interrupt() {
+        let mut policy = ConptyCtrlCPolicy::new(Duration::from_secs(2));
+        let now = Instant::now();
+
+        assert_eq!(
+            policy.action_for_ctrl_c(now),
+            ConptyCtrlCAction::ForwardInterrupt
+        );
+    }
+
+    #[test]
+    fn ctrl_c_policy_aborts_quick_second_interrupt() {
+        let mut policy = ConptyCtrlCPolicy::new(Duration::from_secs(2));
+        let now = Instant::now();
+
+        assert_eq!(
+            policy.action_for_ctrl_c(now),
+            ConptyCtrlCAction::ForwardInterrupt
+        );
+        assert_eq!(
+            policy.action_for_ctrl_c(now + Duration::from_millis(500)),
+            ConptyCtrlCAction::AbortSession
+        );
+    }
+
+    #[test]
+    fn ctrl_c_policy_forwards_after_abort_window() {
+        let mut policy = ConptyCtrlCPolicy::new(Duration::from_secs(2));
+        let now = Instant::now();
+
+        assert_eq!(
+            policy.action_for_ctrl_c(now),
+            ConptyCtrlCAction::ForwardInterrupt
+        );
+        assert_eq!(
+            policy.action_for_ctrl_c(now + Duration::from_secs(3)),
+            ConptyCtrlCAction::ForwardInterrupt
+        );
     }
 }

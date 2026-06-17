@@ -119,9 +119,9 @@ Windows ConPTY explicit backend smoke, only on a controlled Windows SSH profile:
 Follow [Windows ConPTY Manual Smoke](docs/internal/windows-conpty-manual-smoke.md)
 and [Windows TUI ConPTY Manual Smoke](docs/internal/windows-tui-conpty-manual-smoke.md).
 Confirm SSH login, terminal output display, output capture in the log,
-`exit_code` in metadata, Japanese output, Ctrl-C recovery, resize behavior,
-large output, and controlled failure behavior. This check does not promote
-ConPTY to `auto`.
+`exit_code` in metadata, Japanese output, first-Ctrl-C remote interrupt,
+second-Ctrl-C emergency abort, resize behavior, large output, and controlled
+failure behavior. This check does not promote ConPTY to `auto`.
 
 ## 5. TUI smoke tests
 
@@ -149,7 +149,10 @@ ConPTY to `auto`.
 - On Windows, ConPTY remains explicit and `explicit_ready`. With
   `session.log.enabled=true` and `session.log.backend=conpty`, TUI `s` uses
   ConPTY for SSH profiles, returns to the TUI after `exit`, and leaves
-  `session list/show/path` usable. It is not selected by `auto`.
+  `session list/show/path` usable. During ConPTY SSH, the first `Ctrl-C`
+  should interrupt the remote process and keep SSH alive; a second `Ctrl-C`
+  within 2 seconds should abort TeraDock, write aborted metadata, return to the
+  TUI, and leave no test `ssh.exe` child. It is not selected by `auto`.
 - `td session doctor` and the settings diagnostics panel show
   `ConPTY backend: explicit_ready`, `Auto selection: deferred`, and the
   failure-case evidence reason for explicit ConPTY. With Windows `auto`, they
@@ -157,9 +160,11 @@ ConPTY to `auto`.
 - `td session doctor` and the settings diagnostics panel show `TUI logging:
   enabled for s-key SSH sessions` only when the resolved backend can be used
   for TUI `s` sessions; unsupported explicit backends show a not-ready status.
-- If a TUI/ConPTY smoke breaks terminal mode, recover with `Ctrl-C`, `reset`
-  where available, or by reopening the terminal, then confirm no leftover
-  `td` or `ssh` child from that run remains.
+- If a TUI/ConPTY smoke does not respond after the first forwarded `Ctrl-C`,
+  press `Ctrl-C` again within 2 seconds to use the emergency abort path. If
+  terminal mode is still broken, recover with `reset` where available or by
+  reopening the terminal, then confirm no leftover `td` or `ssh` child from
+  that run remains.
 - Host-only or empty PowerShell transcripts add `content_capture_status` and
   `content_capture_warning`, and `td session show <session_id>` displays the
   warning.
