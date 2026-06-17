@@ -126,7 +126,7 @@ td session show <session_id>
 td session path <session_id>
 ```
 
-Use `td session doctor` to see whether logging is enabled, which backend will be used, backend status (`ready`, `degraded`, or `not_ready`), content-capture reliability, dependency availability, whether the log directory looks writable, and which saved session log is newest. On Windows it also prints the explicit ConPTY backend command, the PoC command, and the current ConPTY candidate label. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
+Use `td session doctor` to see whether logging is enabled, which backend will be used, backend status (`ready`, `degraded`, or `not_ready`), content-capture reliability, dependency availability, whether the log directory looks writable, and which saved session log is newest. On Windows it also prints the explicit ConPTY backend position (`explicit_ready`), the `auto` selection state (`deferred`), the PoC command, and why `auto` is still not promoted. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
 
 When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured.
 
@@ -138,7 +138,7 @@ td config set session.log.backend conpty
 td ui
 ```
 
-The TUI `s` path uses ConPTY only when those saved settings are explicit and the selected profile is SSH. `td connect <profile_id> --log-backend conpty` can request the same backend for one CLI SSH connect. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. `td session conpty-test <profile_id>` remains available as a focused Windows ConPTY smoke command. ConPTY uses `portable-pty`; basic manual smoke has shown SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility, so the explicit candidate label is `experimental_ready`. It is still degraded and is not selected by `auto`. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
+The TUI `s` path uses ConPTY only when those saved settings are explicit and the selected profile is SSH. `td connect <profile_id> --log-backend conpty` can request the same backend for one CLI SSH connect. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. `td session conpty-test <profile_id>` remains available as a focused Windows ConPTY smoke command. ConPTY uses `portable-pty`; manual smoke has shown SSH login, visible remote output, saved log output, metadata, `session list/show/path` compatibility, and TUI `s` logging with Japanese output, so the explicit backend position is `explicit_ready`. It is still degraded and is not selected by `auto` until failure-case evidence is complete. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
 
 ## Safety Model
 
@@ -166,7 +166,7 @@ The export format includes profiles, CommandSets, parser definitions, config set
 
 TeraDock is tested on Windows and Linux in CI. SSH actions require an external `ssh` client. File transfer features use `scp`, `sftp`, or explicitly allowed `ftp`. Serial support depends on local serial device names and permissions, which differ by OS.
 
-Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-content logging requires explicit ConPTY selection: set `session.log.enabled=true` and `session.log.backend=conpty`, or use `td connect <profile_id> --log-backend conpty`. `auto` still does not choose ConPTY. The optional PowerShell Transcript backend is experimental best-effort and may miss SSH-side commands and output.
+Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-content logging requires explicit ConPTY selection: set `session.log.enabled=true` and `session.log.backend=conpty`, or use `td connect <profile_id> --log-backend conpty`. `auto` still does not choose ConPTY. The optional PowerShell Transcript backend is explicit best-effort and may miss SSH-side commands and output.
 
 ## Project Operations
 
@@ -179,7 +179,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-c
 
 - TUI recent-profile browsing is not implemented; use `td recent` or `td recent --json`.
 - Terminal emulator launch and tmux integration are not implemented.
-- ConPTY-based logging is an explicit Windows experimental backend; basic logging smoke has succeeded, but production/default `auto` integration is not implemented in the v1.1 candidate path.
+- ConPTY-based logging is an explicit Windows backend at `explicit_ready`; normal TUI logging and Japanese output have succeeded, but production/default `auto` integration waits for failure-case evidence.
 - CommandSet execution still receives SSH path and auth args separately inside `tdcore::cmdset_runner`.
 - Transfer and tunnel command shapes are not fully represented by `SshInvocation` yet.
 - Automated tests do not include real SSH server integration tests.

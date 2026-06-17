@@ -85,9 +85,9 @@ td config set session.log.backend conpty
 td ui
 ```
 
-Explicit `conpty` uses the shared Windows ConPTY runner and remains degraded/experimental_ready until broader manual evidence exists. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
+Explicit `conpty` uses the shared Windows ConPTY runner and is `explicit_ready` for manually selected Windows TUI `s` SSH sessions. Normal TUI logging and Japanese output have succeeded, but the overall diagnostics remain degraded and Windows `auto` remains deferred until Ctrl-C, startup timeout, bad host, auth failure, resize, large-output, and cleanup evidence is recorded. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
 
-Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, TUI logging status, dependency availability, log directory existence and writability, platform support, fallback reason, content-capture reliability, warning, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
+Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, TUI logging status, dependency availability, log directory existence and writability, platform support, fallback reason, ConPTY backend position, auto-selection state, warning, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
 
 Saved sessions can be inspected from the CLI:
 
@@ -126,6 +126,6 @@ Single runs populate stdout, stderr, and parsed tabs. Bulk runs also populate th
 
 - Recent SSH sessions are available through `td recent`, not a TUI pane.
 - Interactive SSH opens in the current terminal only; terminal emulator launch is not implemented.
-- Windows full SSH terminal-content logging is implemented only as the explicit experimental ConPTY backend; `auto` still resolves to no-log.
+- Windows full SSH terminal-content logging is implemented only as the explicit ConPTY backend; `auto` still resolves to no-log.
 - tmux integration is not implemented.
 - The automated test suite does not connect to a real SSH server.

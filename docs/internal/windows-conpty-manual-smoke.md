@@ -28,12 +28,16 @@ timeout/abort checks:
 
 Do not use this checklist to promote ConPTY to `auto` or default session
 logging. The goal is to collect enough manual evidence to decide whether the
-explicit backend can move from `experimental_ready` to stable.
+explicit backend can move from `explicit_ready` to stable.
 
 ## Recorded Evidence
 
-2026-06-16 local review found one successful ConPTY session. The detailed
+2026-06-16 local review found one successful ConPTY CLI session. The detailed
 evidence is recorded in `RESULT_TeraDock_WINDOWS_CONPTY_LOGGING_SUCCESS.md`.
+2026-06-17 operator smoke reported successful TUI `s` ConPTY logging with
+Japanese output. The TUI-specific evidence is recorded in
+`RESULT_TeraDock_TUI_CONPTY_LOGGING_SUCCESS.md`, and the TUI edge-case
+checklist lives in `docs/internal/windows-tui-conpty-manual-smoke.md`.
 
 Verified from that session:
 
@@ -42,6 +46,9 @@ Verified from that session:
   and the connection-close line.
 - `td session list`, `td session show`, `td session show --tail`, and
   `td session path` can inspect the saved ConPTY session.
+- With `session.log.enabled=true` and `session.log.backend=conpty`, TUI `s`
+  can save SSH command history, command output, and Japanese output, then
+  return to the TUI.
 - Metadata contains safe fields only and does not store auth args, full SSH
   command strings, private key paths, passwords, tokens, or secrets.
 
@@ -51,8 +58,7 @@ Still required before explicit stable backend promotion:
 - Startup timeout failed metadata.
 - Bad host failed metadata.
 - Auth failure behavior.
-- Purpose-built UTF-8/Japanese command output evidence.
-- TUI `s` return-to-screen evidence after exit and Ctrl-C abort.
+- TUI `s` Ctrl-C return-to-screen evidence.
 - Broader Windows terminal coverage.
 
 ## Prerequisites
@@ -94,7 +100,8 @@ Start the PoC:
 Record:
 
 - Full command used.
-- Whether the warning about experimental ConPTY logging is shown.
+- Whether the warning about explicit ConPTY logging and captured terminal
+  secrets is shown.
 - The printed log path.
 - The startup phase lines through `Waiting for SSH output...`.
 - Whether login succeeds.
@@ -178,7 +185,7 @@ Metadata should include:
 - `failure_reason=initial_output_timeout`
 - `content_capture=terminal_io`
 - `content_capture_reliable=true`
-- `backend_status=experimental_ready`
+- `backend_status=explicit_ready`
 - `backend_warning=conpty_backend_is_explicit_and_not_selected_by_auto`
 
 ## Commands To Type On The SSH Host
@@ -227,7 +234,7 @@ Confirm:
 - Metadata has the expected `exit_code`.
 - Metadata has `content_capture=terminal_io`.
 - Metadata has `content_capture_reliable=true`.
-- Metadata has `backend_status=experimental_ready`.
+- Metadata has `backend_status=explicit_ready`.
 - Metadata has `backend_warning=conpty_backend_is_explicit_and_not_selected_by_auto`.
 - Metadata does not include auth args, full command strings, private key paths,
   passwords, secrets, or tokens.
@@ -248,8 +255,9 @@ Confirm:
 - `backend setting: conpty`
 - `resolved backend: conpty`
 - `TUI logging: enabled for s-key SSH sessions`
-- `content capture reliability: experimental_ready`
-- warning says ConPTY is experimental.
+- `ConPTY backend: explicit_ready`
+- `Auto selection: deferred`
+- warning says ConPTY is explicit and failure cases still require evidence.
 - `Status: degraded`
 - Diagnostics mention that ConPTY is explicit and not selected by `auto`.
 
@@ -266,9 +274,10 @@ Verify TUI:
 ```
 
 In the TUI, select an SSH profile and press `s`. Confirm remote output is
-visible, output is saved, `exit` returns to the TUI, and `session list/show/path`
-can inspect the saved ConPTY session. Repeat with Ctrl-C only on controlled
-test infrastructure and confirm the TUI returns.
+visible, output is saved, Japanese output is preserved, `exit` returns to the
+TUI, and `session list/show/path` can inspect the saved ConPTY session. Follow
+the focused TUI checklist in `docs/internal/windows-tui-conpty-manual-smoke.md`
+for Ctrl-C, bad host, auth failure, resize, and large output.
 
 If the TUI screen or terminal mode is not restored, press `Ctrl-C`, reopen the
 terminal if necessary, and check for leftover `td` or `ssh` processes from the
@@ -306,7 +315,7 @@ Metadata should include:
 - `failure_reason=ctrl_c`
 - `content_capture=terminal_io`
 - `content_capture_reliable=true`
-- `backend_status=experimental_ready`
+- `backend_status=explicit_ready`
 - `backend_warning=conpty_backend_is_explicit_and_not_selected_by_auto`
 
 If `exit_code` is unavailable after abort, `null` is acceptable.

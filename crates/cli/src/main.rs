@@ -2270,18 +2270,44 @@ fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
     if let Some(reason) = &diagnostics.fallback_reason {
         println!("fallback reason: {reason}");
     }
-    if let Some(reliability) = &diagnostics.content_capture_reliability {
-        println!("content capture reliability: {reliability}");
+    if diagnostics.resolved_backend != session_log::SESSION_LOG_BACKEND_CONPTY {
+        if let Some(reliability) = &diagnostics.content_capture_reliability {
+            println!("content capture reliability: {reliability}");
+        }
     }
     if let Some(warning) = &diagnostics.warning {
         println!("warning: {warning}");
     }
     if diagnostics.platform == "windows" {
         println!();
-        println!("ConPTY backend: experimental_ready");
+        if diagnostics.backend_setting == session_log::SESSION_LOG_BACKEND_AUTO
+            && diagnostics.resolved_backend == session_log::SESSION_LOG_BACKEND_NO_LOG
+        {
+            println!("Windows auto: {}", session_log::SESSION_LOG_BACKEND_NO_LOG);
+            println!(
+                "Auto selection: {}",
+                session_log::SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED
+            );
+            println!(
+                "Reason: {}",
+                session_log::SESSION_LOG_WINDOWS_AUTO_DEFERRED_REASON
+            );
+        } else {
+            println!(
+                "ConPTY backend: {}",
+                session_log::SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY
+            );
+            println!(
+                "Auto selection: {}",
+                session_log::SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED
+            );
+            println!(
+                "Reason: {}",
+                session_log::SESSION_LOG_CONPTY_TUI_SUCCESS_REASON
+            );
+        }
         println!("ConPTY explicit config: td config set session.log.backend conpty");
         println!("ConPTY PoC command: td session conpty-test <profile_id>");
-        println!("Reason: manual smoke succeeded, but auto selection is still deferred.");
     }
     if diagnostics.status == "ready" {
         println!();
@@ -4547,7 +4573,7 @@ mod tests {
             content_capture: Some(session_log::SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO.to_string()),
             content_capture_reliable: Some(true),
             backend_status: Some(
-                session_log::SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string(),
+                session_log::SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string(),
             ),
             backend_warning: Some(
                 session_log::SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO.to_string(),
@@ -4560,7 +4586,7 @@ mod tests {
 
         assert!(lines
             .iter()
-            .any(|line| line == "backend_status: experimental_ready"));
+            .any(|line| line == "backend_status: explicit_ready"));
         assert!(lines
             .iter()
             .any(|line| line == "content_capture: terminal_io"));

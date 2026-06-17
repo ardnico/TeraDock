@@ -62,7 +62,12 @@ pub const SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT: &str = "initial_out
 pub const SESSION_LOG_FAILURE_REASON_CTRL_C: &str = "ctrl_c";
 pub const SESSION_LOG_CONTENT_CAPTURE_BEST_EFFORT: &str = "best_effort";
 pub const SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO: &str = "terminal_io";
-pub const SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY: &str = "experimental_ready";
+pub const SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY: &str = "explicit_ready";
+pub const SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED: &str = "deferred";
+pub const SESSION_LOG_CONPTY_TUI_SUCCESS_REASON: &str =
+    "normal TUI logging and Japanese output succeeded; failure cases still require evidence.";
+pub const SESSION_LOG_WINDOWS_AUTO_DEFERRED_REASON: &str =
+    "explicit ConPTY is available, but auto selection is deferred until failure-case evidence is complete.";
 pub const SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "powershell_transcript_may_not_capture_interactive_ssh_io";
 pub const SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO: &str =
@@ -72,8 +77,8 @@ pub const SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT: &str =
     "No SSH terminal content appears to have been captured.";
 pub const SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "may not capture interactive SSH input/output";
-pub const SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL: &str =
-    "ConPTY logging is experimental but captures SSH terminal I/O in manual smoke.";
+pub const SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPLICIT_READY: &str =
+    "ConPTY logging is explicit; failure cases still require evidence before auto selection.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLogBackendSetting {
@@ -223,7 +228,7 @@ impl SessionLogPlan {
                 files.log_path.display()
             )),
             Self::Conpty { files, .. } => Some(format!(
-                "TeraDock ConPTY logging is experimental and explicit; terminal output may include secrets and will be saved to {}.",
+                "TeraDock ConPTY logging is explicit and auto selection is deferred; terminal output may include secrets and will be saved to {}.",
                 files.log_path.display()
             )),
         }
@@ -1320,8 +1325,8 @@ fn diagnostics_capture_fields(resolved_backend: &str) -> (Option<String>, Option
         )
     } else if resolved_backend == SESSION_LOG_BACKEND_CONPTY {
         (
-            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string()),
-            Some(SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL.to_string()),
+            Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string()),
+            Some(SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPLICIT_READY.to_string()),
         )
     } else {
         (None, None)
@@ -1373,12 +1378,10 @@ fn diagnostics_hints(
         }
         Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY) => {
             hints.push(
-                "Windows full SSH terminal logging is not available in the current stable backend."
-                    .to_string(),
+                "Windows auto remains no-log until failure-case evidence is complete.".to_string(),
             );
             hints.push(
-                "A ConPTY backend is required for full SSH terminal logging on Windows."
-                    .to_string(),
+                "Use explicit ConPTY with: td config set session.log.backend conpty.".to_string(),
             );
             hints.push(
                 "PowerShell Transcript is available only as an explicit best-effort backend."
@@ -1395,7 +1398,7 @@ fn diagnostics_hints(
         hints.push("ConPTY backend is explicit and remains unselected by auto.".to_string());
         hints.push("Set it with: td config set session.log.backend conpty".to_string());
         hints.push("Open settings UI with: td config ui".to_string());
-        hints.push("ConPTY remains explicit until broader Windows validation passes.".to_string());
+        hints.push("ConPTY remains explicit until failure-case evidence is complete.".to_string());
     }
     if platform == SessionLogPlatform::Windows
         && resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
@@ -1466,7 +1469,7 @@ fn annotate_powershell_transcript_metadata(metadata: &mut SessionLogMetadata, lo
 fn annotate_conpty_metadata(metadata: &mut SessionLogMetadata) {
     metadata.content_capture = Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO.to_string());
     metadata.content_capture_reliable = Some(true);
-    metadata.backend_status = Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string());
+    metadata.backend_status = Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string());
     metadata.backend_warning =
         Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO.to_string());
 }
@@ -1939,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_conpty_is_experimental_ready_and_plans_on_windows() {
+    fn explicit_conpty_is_explicit_ready_and_plans_on_windows() {
         let dir = temp_dir("explicit-conpty");
         let config = SessionLogConfig {
             enabled: true,
@@ -1967,11 +1970,11 @@ mod tests {
         assert_eq!(diagnostics.status, "degraded");
         assert_eq!(
             diagnostics.content_capture_reliability.as_deref(),
-            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+            Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY)
         );
         assert_eq!(
             diagnostics.warning.as_deref(),
-            Some(SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL)
+            Some(SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPLICIT_READY)
         );
         assert!(diagnostics
             .hints
@@ -2225,7 +2228,7 @@ mod tests {
         assert_eq!(metadata.content_capture_reliable, Some(true));
         assert_eq!(
             metadata.backend_status.as_deref(),
-            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+            Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY)
         );
         assert_eq!(
             metadata.backend_warning.as_deref(),
@@ -2283,7 +2286,7 @@ mod tests {
         assert_eq!(metadata.content_capture_reliable, Some(true));
         assert_eq!(
             metadata.backend_status.as_deref(),
-            Some(SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+            Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY)
         );
         assert!(!raw.contains("auth_args"));
         assert!(!raw.contains("command"));

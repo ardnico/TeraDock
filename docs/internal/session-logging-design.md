@@ -61,7 +61,7 @@ Pros:
 Cons:
 - Larger implementation and test surface.
 - Higher risk of breaking TUI terminal restore behavior.
-- Still degraded. Basic manual smoke now exists, so the explicit backend label is `experimental_ready`, but it remains unselected by `auto`.
+- Still degraded. Manual smoke now covers normal TUI `s` logging and Japanese output, so the explicit backend position is `explicit_ready`, but it remains unselected by `auto`.
 - The initial CLI input bridge is intentionally small and is not a full terminal emulator layer.
 
 ### PowerShell Transcript backend
@@ -108,11 +108,11 @@ Cons:
   explicit `powershell-transcript` reports `degraded`, uses
   `content_capture=best_effort`, and warns that SSH input/output may not be
   captured.
-- Explicit `conpty` is recognized as an `experimental_ready` backend setting.
+- Explicit `conpty` is recognized as an `explicit_ready` backend setting.
   On Windows, normal `td connect` and TUI `s` use it only when
   `session.log.enabled=true` and `session.log.backend=conpty`; `td connect
   <profile_id> --log-backend conpty` can also request it for one SSH connect.
-  Diagnostics remain degraded because broader Windows validation is pending.
+  Diagnostics remain degraded because failure-case Windows validation is pending.
   The PoC command `td session conpty-test <profile_id>` remains available for
   focused smoke checks.
 - Missing PowerShell or `ssh` for explicit `powershell-transcript` reports
@@ -124,8 +124,9 @@ Cons:
 ## Windows ConPTY status model
 
 - `td session conpty-test <profile_id>` is still an experimental command.
-- `session.log.backend=conpty` is labeled `experimental_ready` after basic
-  manual smoke, but diagnostics keep the overall status `degraded`.
+- `session.log.backend=conpty` is labeled `explicit_ready` after normal TUI
+  logging and Japanese output smoke, but diagnostics keep the overall status
+  `degraded`.
 - `session.log.backend=auto` still resolves to `no-log` on Windows.
 - TUI `s` and normal `td connect` use ConPTY only when explicitly configured;
   `auto` does not.
@@ -186,7 +187,7 @@ For the explicit ConPTY backend, metadata includes:
   "backend": "conpty",
   "content_capture": "terminal_io",
   "content_capture_reliable": true,
-  "backend_status": "experimental_ready",
+  "backend_status": "explicit_ready",
   "backend_warning": "conpty_backend_is_explicit_and_not_selected_by_auto"
 }
 ```
@@ -208,7 +209,7 @@ ConPTY metadata uses the same exclusion policy: no SSH auth args, full command s
 - CLI: `td connect <profile_id>` can use the same logging path for SSH profiles. `td connect <profile_id> --log-backend conpty` requests the explicit Windows ConPTY backend for that SSH connect.
 - CLI PoC: `td session conpty-test <profile_id>` runs a Windows-only ConPTY experiment and writes session metadata/log files readable through `td session list`, `td session show`, and `td session path`.
 - CLI settings: `td config ui` opens the same BIOS-style settings screen outside `td ui`.
-- Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, TUI `s` integration status, dependency availability, log directory state, newest saved session log, platform support, fallback reason, content-capture reliability, warning, status, and hints.
+- Diagnostics: `td session doctor` reports enablement, backend setting, resolved backend, TUI `s` integration status, dependency availability, log directory state, newest saved session log, platform support, fallback reason, ConPTY backend position, auto-selection state, warning, status, and hints.
 - Reference commands:
   - `td session doctor`
   - `td config ui`
@@ -219,7 +220,7 @@ ConPTY metadata uses the same exclusion policy: no SSH auth args, full command s
 
 `td session show` should default to metadata-oriented output and only show log excerpts when the caller explicitly asks for a tail length. It must show capture status/warnings such as `host_only_or_empty` when metadata contains them.
 
-The settings screen includes a diagnostics panel with the same core report. It shows enabled state, backend setting, resolved backend, TUI `s` logging status, platform, platform support, dependency readiness, log directory writability, fallback reason, content-capture reliability, warning, and status. It is intentionally focused on global Session Logging settings first; profile/env settings can still override the effective value and are shown as source warnings rather than being edited from this screen.
+The settings screen includes a diagnostics panel with the same core report. It shows enabled state, backend setting, resolved backend, TUI `s` logging status, platform, platform support, dependency readiness, log directory writability, fallback reason, ConPTY backend position, auto-selection state, warning, and status. It is intentionally focused on global Session Logging settings first; profile/env settings can still override the effective value and are shown as source warnings rather than being edited from this screen.
 
 ## op_logs integration
 

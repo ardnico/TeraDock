@@ -709,16 +709,56 @@ fn diagnostic_rows(
                 .clone()
                 .unwrap_or_else(|| "none".to_string()),
         ),
-        ("Status", diagnostics.status.clone()),
     ];
+    rows.extend(windows_conpty_diagnostic_rows(diagnostics));
+    rows.push(("Status", diagnostics.status.clone()));
     if let Some(reason) = &diagnostics.fallback_reason {
         rows.push(("Reason", display_fallback_reason(reason)));
     }
-    if let Some(reliability) = &diagnostics.content_capture_reliability {
-        rows.push(("Capture reliability", reliability.clone()));
+    if diagnostics.resolved_backend != session_log::SESSION_LOG_BACKEND_CONPTY {
+        if let Some(reliability) = &diagnostics.content_capture_reliability {
+            rows.push(("Capture reliability", reliability.clone()));
+        }
     }
     if let Some(warning) = &diagnostics.warning {
         rows.push(("Warning", warning.clone()));
+    }
+    rows
+}
+
+fn windows_conpty_diagnostic_rows(
+    diagnostics: &session_log::SessionLogDiagnostics,
+) -> Vec<(&'static str, String)> {
+    if diagnostics.platform != "windows" {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    if diagnostics.backend_setting == session_log::SESSION_LOG_BACKEND_AUTO
+        && diagnostics.resolved_backend == session_log::SESSION_LOG_BACKEND_NO_LOG
+    {
+        rows.push((
+            "Windows auto",
+            session_log::SESSION_LOG_BACKEND_NO_LOG.to_string(),
+        ));
+        rows.push((
+            "Auto selection",
+            session_log::SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED.to_string(),
+        ));
+    } else {
+        rows.push((
+            "ConPTY backend",
+            session_log::SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string(),
+        ));
+        rows.push((
+            "Auto selection",
+            session_log::SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED.to_string(),
+        ));
+        if diagnostics.resolved_backend == session_log::SESSION_LOG_BACKEND_CONPTY {
+            rows.push((
+                "Reason",
+                session_log::SESSION_LOG_CONPTY_TUI_SUCCESS_REASON.to_string(),
+            ));
+        }
     }
     rows
 }
@@ -733,7 +773,7 @@ fn command_found(path: Option<&PathBuf>, note: Option<&str>) -> String {
 
 fn display_fallback_reason(reason: &str) -> String {
     if reason == session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY {
-        "conpty backend required for full SSH logging".to_string()
+        session_log::SESSION_LOG_WINDOWS_AUTO_DEFERRED_REASON.to_string()
     } else {
         reason.to_string()
     }
@@ -920,7 +960,7 @@ mod tests {
     fn conpty_fallback_reason_is_human_readable() {
         assert_eq!(
             display_fallback_reason(session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY),
-            "conpty backend required for full SSH logging"
+            session_log::SESSION_LOG_WINDOWS_AUTO_DEFERRED_REASON
         );
     }
 
@@ -948,8 +988,16 @@ mod tests {
         );
         assert_eq!(row_value(&rows, "Status"), Some("not_ready"));
         assert_eq!(
+            row_value(&rows, "Windows auto"),
+            Some(session_log::SESSION_LOG_BACKEND_NO_LOG)
+        );
+        assert_eq!(
+            row_value(&rows, "Auto selection"),
+            Some(session_log::SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED)
+        );
+        assert_eq!(
             row_value(&rows, "Reason"),
-            Some("conpty backend required for full SSH logging")
+            Some(session_log::SESSION_LOG_WINDOWS_AUTO_DEFERRED_REASON)
         );
     }
 
@@ -990,16 +1038,16 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_rows_show_explicit_conpty_degraded() {
+    fn diagnostics_rows_show_explicit_conpty_ready_position() {
         let mut diagnostics = diagnostics_fixture();
         diagnostics.backend_setting = session_log::SESSION_LOG_BACKEND_CONPTY.to_string();
         diagnostics.resolved_backend = session_log::SESSION_LOG_BACKEND_CONPTY.to_string();
         diagnostics.platform = "windows".to_string();
         diagnostics.platform_supported = true;
         diagnostics.content_capture_reliability =
-            Some(session_log::SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY.to_string());
+            Some(session_log::SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string());
         diagnostics.warning =
-            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL.to_string());
+            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPLICIT_READY.to_string());
         diagnostics.status = "degraded".to_string();
 
         let rows = diagnostic_rows(&diagnostics);
@@ -1014,12 +1062,20 @@ mod tests {
         );
         assert_eq!(row_value(&rows, "Status"), Some("degraded"));
         assert_eq!(
-            row_value(&rows, "Capture reliability"),
-            Some(session_log::SESSION_LOG_BACKEND_STATUS_EXPERIMENTAL_READY)
+            row_value(&rows, "ConPTY backend"),
+            Some(session_log::SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY)
+        );
+        assert_eq!(
+            row_value(&rows, "Auto selection"),
+            Some(session_log::SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED)
+        );
+        assert_eq!(
+            row_value(&rows, "Reason"),
+            Some(session_log::SESSION_LOG_CONPTY_TUI_SUCCESS_REASON)
         );
         assert_eq!(
             row_value(&rows, "Warning"),
-            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPERIMENTAL)
+            Some(session_log::SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPLICIT_READY)
         );
     }
 

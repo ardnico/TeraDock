@@ -51,15 +51,19 @@ low-risk PoC improvements:
 - Windows ConPTY exit codes are converted into the current metadata `i32`
   range without wrapping large `u32` values negative.
 
-The 2026-06-16 evidence pass found one successful saved ConPTY session
+The 2026-06-16 evidence pass found one successful saved ConPTY CLI session
 (`sl_dczccyww`) from profile `p_ojql3dws`. That session proves the basic path:
 SSH login produced visible remote output, the output was saved to the session
 log, metadata was written with `backend=conpty`, `status=completed`, and
 `exit_code=0`, and `td session list/show/path` could inspect the session.
 
-This is enough to call the explicit candidate `experimental_ready`, but not
-enough to call it `ready`. Ctrl-C abort, startup timeout, bad host, auth
-failure, UTF-8/Japanese edge cases, child cleanup in a clean process snapshot,
+The 2026-06-17 operator smoke reported that the TUI `s` path also works when
+`session.log.enabled=true` and `session.log.backend=conpty`: SSH connected,
+remote command history and command output were saved, Japanese output was
+preserved, the TUI returned, and `session list/show/path` could inspect the
+saved session. This is enough to call the explicit backend `explicit_ready`,
+but not enough to call it `ready`. Ctrl-C abort, startup timeout, bad host,
+auth failure, resize, large output, child cleanup in a clean process snapshot,
 and broader Windows terminal coverage still need recorded evidence.
 
 ## Phase 1 Findings
@@ -88,11 +92,11 @@ td ui
 - Resize handling is documented and the PoC forwards resize events when crossterm reports them.
 - UTF-8/Japanese output is not obviously corrupted.
 
-Source inspection alone is not evidence. As of 2026-06-16, the successful
-`sl_dczccyww` smoke satisfies only the basic login/output/log/metadata/list
-items. The remaining criteria require manual Windows run evidence that includes
-Ctrl-C, resize, UTF-8/Japanese, bad host, auth failure, timeout, and clean child
-process observations.
+Source inspection alone is not evidence. As of 2026-06-17, normal TUI `s`
+logging and Japanese output are reported successful for explicit ConPTY. The
+remaining criteria require manual Windows run evidence that includes Ctrl-C,
+resize, bad host, auth failure, timeout, large output, and clean child process
+observations.
 
 ## PoC No-Go Criteria
 
@@ -108,19 +112,29 @@ process observations.
 - `disabled`: session logging is off.
 - `not_ready`: the selected backend cannot run on the current platform or is missing required dependencies.
 - `degraded`: the backend is available but best-effort, experimental, or not reliable enough to treat as the production terminal-content path.
-- `experimental_ready`: ConPTY-only candidate label for the explicit backend after basic manual smoke has succeeded, while the overall diagnostic status remains `degraded`.
+- `explicit_ready`: ConPTY-only position label for the explicit backend after normal TUI logging and Japanese output have succeeded, while the overall diagnostic status remains `degraded`.
 - `ready`: the backend is available and considered suitable for the supported platform.
 
-PowerShell Transcript remains `degraded`. The ConPTY PoC command remains experimental. The explicit `session.log.backend=conpty` backend is `experimental_ready`, but diagnostics still report `Status: degraded` until broader Windows evidence exists. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
+PowerShell Transcript remains `degraded`. The ConPTY PoC command remains a focused smoke/debug path. The explicit `session.log.backend=conpty` backend is `explicit_ready`, but diagnostics still report `Status: degraded` until broader Windows failure evidence exists. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
 
 Expected doctor shape:
 
 ```text
-ConPTY backend: experimental_ready
+ConPTY backend: explicit_ready
+TUI logging: enabled for s-key SSH sessions
+Auto selection: deferred
 ConPTY explicit config: td config set session.log.backend conpty
 ConPTY PoC command: td session conpty-test <profile_id>
-Reason: manual smoke succeeded, but auto selection is still deferred.
+Reason: normal TUI logging and Japanese output succeeded; failure cases still require evidence.
 Status: degraded
+```
+
+When Windows `auto` is selected, expected doctor/config diagnostics include:
+
+```text
+Windows auto: no-log
+Auto selection: deferred
+Reason: explicit ConPTY is available, but auto selection is deferred until failure-case evidence is complete.
 ```
 
 ## Promotion Criteria: PoC -> Explicit Stable Backend
@@ -188,6 +202,6 @@ Auto promotion requires more evidence than explicit backend stabilization:
 
 ## Suggested Roadmap
 
-- v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY as an explicit experimental backend for `td connect` and TUI `s`, with `td session conpty-test <profile_id>` retained for focused smoke; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Move the explicit ConPTY backend from `experimental_ready` to explicit stable only after Ctrl-C, timeout, bad host, auth failure, UTF-8/Japanese, cleanup, and broader Windows terminal evidence is recorded.
+- v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY as an explicit backend for `td connect` and TUI `s`, with `td session conpty-test <profile_id>` retained for focused smoke; surface metadata, doctor, show, and config UI warnings.
+- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after Ctrl-C, timeout, bad host, auth failure, resize, large-output, cleanup, and broader Windows terminal evidence is recorded.
 - v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend and only then consider `auto` selection.

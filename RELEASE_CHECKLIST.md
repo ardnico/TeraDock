@@ -116,10 +116,12 @@ Windows ConPTY explicit backend smoke, only on a controlled Windows SSH profile:
 .\target\release\td.exe session path <session_id>
 ```
 
-Follow [Windows ConPTY Manual Smoke](docs/internal/windows-conpty-manual-smoke.md).
+Follow [Windows ConPTY Manual Smoke](docs/internal/windows-conpty-manual-smoke.md)
+and [Windows TUI ConPTY Manual Smoke](docs/internal/windows-tui-conpty-manual-smoke.md).
 Confirm SSH login, terminal output display, output capture in the log,
-`exit_code` in metadata, Ctrl-C recovery, resize behavior, UTF-8 behavior, and
-controlled failure behavior. This check does not promote ConPTY to `auto`.
+`exit_code` in metadata, Japanese output, Ctrl-C recovery, resize behavior,
+large output, and controlled failure behavior. This check does not promote
+ConPTY to `auto`.
 
 ## 5. TUI smoke tests
 
@@ -144,10 +146,14 @@ controlled failure behavior. This check does not promote ConPTY to `auto`.
   `content_capture=best_effort`, and warns that interactive SSH input/output
   may not be captured. Missing PowerShell or `ssh` for that explicit backend
   reports `powershell_not_found` or `ssh_not_found`.
-- On Windows, ConPTY remains explicit and experimental. With
+- On Windows, ConPTY remains explicit and `explicit_ready`. With
   `session.log.enabled=true` and `session.log.backend=conpty`, TUI `s` uses
   ConPTY for SSH profiles, returns to the TUI after `exit`, and leaves
   `session list/show/path` usable. It is not selected by `auto`.
+- `td session doctor` and the settings diagnostics panel show
+  `ConPTY backend: explicit_ready`, `Auto selection: deferred`, and the
+  failure-case evidence reason for explicit ConPTY. With Windows `auto`, they
+  show `Windows auto: no-log`.
 - `td session doctor` and the settings diagnostics panel show `TUI logging:
   enabled for s-key SSH sessions` only when the resolved backend can be used
   for TUI `s` sessions; unsupported explicit backends show a not-ready status.
@@ -164,7 +170,9 @@ controlled failure behavior. This check does not promote ConPTY to `auto`.
 
 ## 6. Security checks
 
-- No password, token, or secret value appears in logs.
+- No password, token, or secret value is intentionally typed or displayed
+  during smoke runs. Treat terminal transcript logs as sensitive because any
+  displayed secret can be captured.
 - No SSH auth args, private key paths, or full SSH command string appears in
   `ssh_session` metadata.
 - Interactive session log metadata excludes SSH auth args, private key paths,
@@ -199,6 +207,8 @@ controlled failure behavior. This check does not promote ConPTY to `auto`.
   Windows full terminal-content backend.
 - `docs/internal/windows-conpty-manual-smoke.md` reflects current ConPTY PoC
   GO/NO-GO criteria and known constraints.
+- `docs/internal/windows-tui-conpty-manual-smoke.md` reflects current TUI
+  ConPTY normal and edge-case smoke criteria.
 - `docs/internal/ssh-invocation-boundary.md` reflects the current SSH boundary.
 - `docs/internal/commandset-execution-boundary.md` reflects the current
   CommandSet boundary.

@@ -55,7 +55,7 @@ td config set session.log.backend conpty
 td config get session.log.dir --resolved
 ```
 
-The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether TUI `s` logging is enabled or not ready, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort or experimental, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit ConPTY config command, the PoC command, and its candidate label.
+The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether TUI `s` logging is enabled or not ready, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort or explicit ConPTY terminal I/O, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit ConPTY backend position, the auto-selection state, the explicit config command, and the PoC command.
 
 The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
 
@@ -76,11 +76,11 @@ td config set session.log.backend conpty
 td ui
 ```
 
-`powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output.
+`powershell-transcript` is available only as an explicit best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output.
 
-`session.log.backend=conpty` is an explicit Windows-only experimental backend and is not selected by `auto`. When selected, normal `td connect` and the TUI `s` SSH path use the ConPTY runner for SSH profiles. `td session conpty-test <profile_id>` remains available as a focused smoke command. The ConPTY backend writes the terminal I/O stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and terminal control output after best-effort sanitization. Typed input appears in the log when the remote terminal or program echoes it.
+`session.log.backend=conpty` is an explicit Windows-only backend and is not selected by `auto`. When selected, normal `td connect` and the TUI `s` SSH path use the ConPTY runner for SSH profiles. `td session conpty-test <profile_id>` remains available as a focused smoke command. The ConPTY backend writes the terminal I/O stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and terminal control output after best-effort sanitization. Typed input appears in the log when the remote terminal or program echoes it.
 
-The ConPTY backend has basic manual smoke evidence for SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility. It remains degraded and only `experimental_ready` until Ctrl-C recovery, startup timeout, bad host, auth failure, UTF-8/Japanese behavior, child cleanup, and broader Windows terminal coverage are reviewed. It must not be promoted to `auto` before that evidence is complete.
+The ConPTY backend has manual smoke evidence for SSH login, visible remote output, saved log output, metadata, `session list/show/path` compatibility, and TUI `s` logging with Japanese output. It remains degraded and `explicit_ready` until Ctrl-C recovery, startup timeout, bad host, auth failure, resize, large output, child cleanup, and broader Windows terminal coverage are reviewed. It must not be promoted to `auto` before that evidence is complete.
 
 Use these commands to inspect saved sessions:
 
