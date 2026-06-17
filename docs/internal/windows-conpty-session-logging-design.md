@@ -99,11 +99,21 @@ The 2026-06-17 operator smoke reported that the TUI `s` path also works when
 remote command history and command output were saved, Japanese output was
 preserved, the TUI returned, and `session list/show/path` could inspect the
 saved session. This is enough to call the explicit backend `explicit_ready`,
-but not enough to call it `ready`. Source now implements first-Ctrl-C remote
-interrupt and second-Ctrl-C emergency abort, but controlled post-fix operator
-evidence is still needed. Startup timeout, bad host, auth failure, resize,
-large output, child cleanup in a clean process snapshot, and broader Windows
-terminal coverage also still need recorded evidence.
+but not enough to call it `ready`.
+
+The 2026-06-18 post-fix TUI live smoke recorded a `GO` for single Ctrl-C remote
+interrupt: one `Ctrl-C` during remote `sleep 30` kept SSH open, did not end the
+TUI terminal, and logging continued through later same-session output. Saved
+session `sl_4amkmprl` ended with `backend=conpty`, `status=completed`, and
+`exit_code=0`. The exact `after-ctrl-c` marker was not present because the
+operator used `df` as the post-Ctrl-C command, so a future release-candidate
+run can use the exact marker for stricter transcript matching.
+
+Source now implements second-Ctrl-C emergency abort, but controlled live
+operator evidence for the aborted metadata path is still needed. Startup
+timeout, bad host, auth failure, resize, large output, child cleanup in a clean
+process snapshot, and broader Windows terminal coverage also still need
+recorded evidence.
 
 ## Phase 1 Findings
 
@@ -132,11 +142,11 @@ td ui
 - Resize handling is documented and the PoC forwards resize events when crossterm reports them.
 - UTF-8/Japanese output is not obviously corrupted.
 
-Source inspection alone is not evidence. As of 2026-06-17, normal TUI `s`
-logging and Japanese output are reported successful for explicit ConPTY. The
-remaining criteria require manual Windows run evidence that includes Ctrl-C
-remote interrupt, Ctrl-C emergency abort, resize, bad host, auth failure,
-timeout, large output, and clean child process observations.
+Source inspection alone is not evidence. As of 2026-06-18, normal TUI `s`
+logging, Japanese output, and single Ctrl-C remote interrupt are reported
+successful for explicit ConPTY. The remaining criteria require manual Windows
+run evidence that includes Ctrl-C emergency abort, resize, bad host, auth
+failure, timeout, large output, and clean child process observations.
 
 ## PoC No-Go Criteria
 
@@ -247,5 +257,5 @@ Auto promotion requires more evidence than explicit backend stabilization:
 ## Suggested Roadmap
 
 - v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY as an explicit backend for `td connect` and TUI `s`, with `td session conpty-test <profile_id>` retained for focused smoke; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after Ctrl-C remote interrupt, Ctrl-C emergency abort, timeout, bad host, auth failure, resize, large-output, cleanup, and broader Windows terminal evidence is recorded.
+- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after the recorded single-Ctrl-C remote interrupt is joined by Ctrl-C emergency abort, timeout, bad host, auth failure, resize, large-output, cleanup, and broader Windows terminal evidence.
 - v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend and only then consider `auto` selection.

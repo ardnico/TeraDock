@@ -38,6 +38,8 @@ evidence is recorded in `RESULT_TeraDock_WINDOWS_CONPTY_LOGGING_SUCCESS.md`.
 Japanese output. The TUI-specific evidence is recorded in
 `RESULT_TeraDock_TUI_CONPTY_LOGGING_SUCCESS.md`, and the TUI edge-case
 checklist lives in `docs/internal/windows-tui-conpty-manual-smoke.md`.
+2026-06-18 post-fix TUI smoke recorded `GO` for single Ctrl-C remote interrupt
+in `RESULT_TeraDock_TUI_CONPTY_CTRL_C_LIVE_SMOKE.md`.
 
 Verified from that session:
 
@@ -54,7 +56,6 @@ Verified from that session:
 
 Still required before explicit stable backend promotion:
 
-- Ctrl-C remote interrupt evidence from a clean process snapshot.
 - Ctrl-C emergency abort evidence from a clean process snapshot.
 - Startup timeout failed metadata.
 - Bad host failed metadata.
@@ -313,6 +314,11 @@ Confirm:
 - The local terminal is not left in raw mode.
 - `Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue` does not
   show a leftover `td.exe` or `ssh.exe` from the completed ConPTY run.
+
+Recorded 2026-06-18 TUI result: single Ctrl-C is `GO` for the explicit backend.
+The saved log used `df` instead of the exact `after-ctrl-c` marker, so a later
+release-candidate smoke should still prefer `echo after-ctrl-c` when collecting
+a strict transcript marker.
 
 For emergency abort, run `sleep 30` again and press `Ctrl-C` twice within 2
 seconds.

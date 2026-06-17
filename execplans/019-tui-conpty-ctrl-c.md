@@ -20,6 +20,9 @@ This plan must not promote Windows `auto` to ConPTY. The backend remains explici
 - [x] (2026-06-17 JST) Updated TUI/ConPTY documentation and created `RESULT_TeraDock_TUI_CONPTY_CTRL_C_BEHAVIOR.md`.
 - [x] (2026-06-17 JST) Aligned emergency abort metadata with the terminal-exit fix request by using `failure_reason=ctrl_c_double_press` and creating `RESULT_TeraDock_TUI_CONPTY_CTRL_C_TERMINAL_EXIT_FIX.md`.
 - [x] (2026-06-17 JST) Ran `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo build -p td --release --locked`; all passed.
+- [x] (2026-06-18 JST) Recorded post-fix TUI live smoke in `RESULT_TeraDock_TUI_CONPTY_CTRL_C_LIVE_SMOKE.md`: saved session `sl_4amkmprl` proves single Ctrl-C remote interrupt keeps SSH and logging alive and ends with `status=completed` and `exit_code=0`.
+- [x] (2026-06-18 JST) Ran `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo build -p td --release --locked` after the live-smoke documentation update; all passed.
+- [ ] Double Ctrl-C emergency abort still needs a live saved-session result with `status=aborted`, `failure_phase=user_abort`, and `failure_reason=ctrl_c_double_press`.
 
 ## Surprises & Discoveries
 
@@ -31,6 +34,9 @@ This plan must not promote Windows `auto` to ConPTY. The backend remains explici
 
 - Observation: TUI suspension is not the direct cause of the abort.
   Evidence: `crates/tui/src/app.rs` disables raw mode and leaves the alternate screen before calling the ConPTY runner; the runner itself enters raw mode and reads the key event while the TUI is suspended.
+
+- Observation: The first post-fix live smoke used a different post-Ctrl-C command than the originally planned marker.
+  Evidence: Saved session `sl_4amkmprl` contains `sleep 30`, `^C`, later same-session command output from `df`, and logout, but the literal `after-ctrl-c` marker is not present.
 
 ## Decision Log
 
@@ -46,9 +52,15 @@ This plan must not promote Windows `auto` to ConPTY. The backend remains explici
   Rationale: The user explicitly prohibited `auto -> conpty` promotion and real SSH automated tests; this change can be covered with unit tests plus manual smoke instructions.
   Date/Author: 2026-06-17 / Codex
 
+- Decision: Classify single Ctrl-C remote interrupt as `GO` from the 2026-06-18 live smoke, while keeping double Ctrl-C emergency abort as `CONDITIONAL GO` until aborted metadata is recorded.
+  Rationale: The saved session proves that one Ctrl-C no longer exits SSH or the TUI terminal and that logging continues, but no live aborted ConPTY session exists for the quick second-Ctrl-C path.
+  Date/Author: 2026-06-18 / Codex
+
 ## Outcomes & Retrospective
 
 Completion update 2026-06-17: The source change is complete. The first Ctrl-C now writes and flushes `0x03` without setting the cancel flag; a second Ctrl-C within 2 seconds reuses the existing `UserAbort` path and records `failure_reason=ctrl_c_double_press`. Source-level tests prove the Ctrl-C policy and metadata expectations, docs describe Ideal/Acceptable/Failure smoke classifications, and the result reports separate implemented behavior from manual evidence still requiring a controlled Windows SSH run. Automated validation passed. The remaining work is manual operator smoke on a controlled Windows SSH profile to collect live terminal, metadata, log, and child-process evidence.
+
+Evidence update 2026-06-18: The controlled Windows TUI `s` live smoke now proves the single-Ctrl-C remote interrupt path for explicit ConPTY. Session `sl_4amkmprl` completed with `backend=conpty`, `status=completed`, and `exit_code=0`, and the log continued after `^C` into later same-session command output. The exact `after-ctrl-c` marker was not used, so release-candidate smoke should still prefer that marker for a strict transcript. Double Ctrl-C emergency abort remains to be proven with live `status=aborted` metadata before this plan can claim the entire Ctrl-C behavior matrix has live coverage.
 
 ## Context and Orientation
 
@@ -119,3 +131,5 @@ Revision note 2026-06-17: Created the plan after source investigation showed the
 Revision note 2026-06-17: Updated the plan after implementation and validation. The code, tests, docs, and result report are complete; live Windows SSH smoke remains an evidence-gathering task, not an automated test.
 
 Revision note 2026-06-17: Updated the plan for the terminal-exit fix request. Emergency abort metadata now uses `failure_reason=ctrl_c_double_press`, and the specifically requested result artifact is part of the deliverable.
+
+Revision note 2026-06-18: Updated the plan after live TUI evidence for single Ctrl-C remote interrupt. The single-Ctrl-C path is now `GO`; double Ctrl-C emergency abort remains conditional until live aborted metadata is recorded.

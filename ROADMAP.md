@@ -38,5 +38,5 @@
 ## Future session logging
 
 - 1.1.x: Keep Windows `auto` on `no-log`, keep `powershell-transcript` explicit best-effort, surface capture warnings in doctor/show/config UI, and keep ConPTY explicit for `td connect`, TUI `s`, and `td session conpty-test <profile_id>`.
-- 1.2: Treat the explicit ConPTY backend as `explicit_ready` after normal TUI/Japanese smoke, then collect post-fix Ctrl-C remote interrupt, Ctrl-C emergency abort, timeout, bad host, auth failure, resize, large output, child cleanup, and broader Windows terminal evidence before calling the explicit backend stable.
+- 1.2: Treat the explicit ConPTY backend as `explicit_ready` after normal TUI/Japanese smoke and single-Ctrl-C remote interrupt smoke, then collect double-Ctrl-C emergency abort, timeout, bad host, auth failure, resize, large output, child cleanup, and broader Windows terminal evidence before calling the explicit backend stable.
 - 1.3: Evaluate a production ConPTY backend for reliable Windows SSH terminal input/output capture and only then consider `auto` selection.

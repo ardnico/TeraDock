@@ -37,8 +37,21 @@ GO: explicit conpty backend works for TUI normal SSH session
 
 The 2026-06-17 Ctrl-C smoke before the forwarding fix found that pressing
 `Ctrl-C` during remote `sleep 30` returned to the TUI instead of interrupting
-the remote process and keeping SSH alive. The current expected behavior below
-is the post-fix contract and still needs controlled Windows operator evidence.
+the remote process and keeping SSH alive.
+
+The 2026-06-18 post-fix live smoke is recorded in
+`RESULT_TeraDock_TUI_CONPTY_CTRL_C_LIVE_SMOKE.md`. In saved session
+`sl_4amkmprl`, one `Ctrl-C` interrupted remote `sleep 30`, SSH stayed open, the
+TUI terminal did not exit, logging continued, later same-session output was
+captured, and metadata ended as `backend=conpty`, `status=completed`, and
+`exit_code=0`. This is a `GO` for the explicit single-Ctrl-C remote interrupt
+path. The exact `after-ctrl-c` marker was not present in that saved log because
+the operator used `df` as the post-Ctrl-C command; future release-candidate
+smoke should use the exact marker for stricter transcript matching.
+
+Double Ctrl-C emergency abort still needs a live saved-session result with
+`status=aborted`, `failure_phase=user_abort`, and
+`failure_reason=ctrl_c_double_press`.
 
 ## Normal Exit Code and Cleanup
 
@@ -137,6 +150,8 @@ Expected:
 
 Classify the result:
 
+- Recorded 2026-06-18 result:
+  `GO: single Ctrl-C forwards to remote PTY and session continues`.
 - Ideal: one `Ctrl-C` interrupts only the remote process, the SSH session stays
   usable, metadata is `status=completed` with `exit_code=0`, the log contains
   `after-ctrl-c`, and child cleanup is clean.
@@ -177,6 +192,20 @@ debug: session continues after ctrl-c
 
 Debug output must not include the full SSH command, auth args, private key
 paths, passwords, tokens, secrets, or the full environment.
+
+Classify the result after the smoke:
+
+- GO: the TUI returns, `td.exe` remains running, metadata is `status=aborted`
+  with `failure_phase=user_abort` and
+  `failure_reason=ctrl_c_double_press`, and no test `ssh.exe` child remains.
+- Conditional GO: the emergency abort works live but metadata or process
+  cleanup evidence is incomplete and the missing item is documented.
+- No-Go: double Ctrl-C exits `td.exe`, leaves the terminal unusable, loses
+  metadata, records unsafe metadata, or leaves a test `ssh.exe` child behind.
+
+Current recorded status: `CONDITIONAL GO` because the source-level path and
+checklist exist, but no live aborted-session metadata has been recorded in this
+repository pass.
 
 ## Bad Host
 
@@ -253,10 +282,10 @@ reports.
 
 ## Auto Gate
 
-Auto selection remains blocked until the normal path and all failure cases have
-recorded evidence from controlled Windows runs:
+Auto selection remains blocked until the normal path and all remaining failure
+cases have recorded evidence from controlled Windows runs:
 
-- Ctrl-C remote interrupt and emergency abort.
+- Ctrl-C emergency abort.
 - Startup timeout.
 - Bad host.
 - Auth failure.
