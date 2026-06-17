@@ -35,6 +35,45 @@ GO: explicit conpty backend works for TUI normal SSH session
 
 `auto` remains deferred until the edge cases below have recorded evidence.
 
+## Normal Exit Code and Cleanup
+
+Use this case when validating exit-code propagation and child cleanup for a
+controlled SSH profile:
+
+```powershell
+td config set session.log.enabled true
+td config set session.log.backend conpty
+td ui
+```
+
+In the TUI, select the SSH profile and press `s`. On the remote shell, run:
+
+```sh
+echo normal-exit-test
+exit
+```
+
+After the TUI returns, run:
+
+```powershell
+td session list
+td session show <session_id>
+td session path <session_id>
+Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
+```
+
+Expected:
+
+- Metadata has `backend=conpty`.
+- Metadata has `status=completed`.
+- Metadata has `exit_code=0`.
+- Metadata has `content_capture=terminal_io`.
+- Metadata has `content_capture_reliable=true`.
+- The saved log contains `normal-exit-test`.
+- No extra `ssh.exe` child from the test remains.
+- Metadata excludes auth args, full command strings, private key paths,
+  passwords, secrets, and tokens.
+
 ## Normal Path
 
 In the TUI, select a controlled SSH profile and press `s`. Run:

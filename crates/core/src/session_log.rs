@@ -2247,6 +2247,38 @@ mod tests {
     }
 
     #[test]
+    fn writes_conpty_nonzero_exit_metadata_as_completed_nonzero() {
+        let dir = temp_dir("conpty-nonzero-metadata");
+        let files = allocate_session_files(&dir).unwrap();
+        fs::write(&files.log_path, "remote output\n").unwrap();
+        let target = sample_target();
+
+        let metadata = complete_conpty_session(&files, &target, 1000, 42, Some(7)).unwrap();
+        let loaded = get_session_log_in_dir(&dir, &files.session_id).unwrap();
+        let raw = fs::read_to_string(&files.metadata_path).unwrap();
+
+        assert_eq!(metadata.exit_code, Some(7));
+        assert_eq!(metadata.status, "completed_nonzero");
+        assert_eq!(loaded.exit_code, Some(7));
+        assert_eq!(loaded.status, "completed_nonzero");
+        assert_eq!(metadata.failure_phase, None);
+        assert_eq!(metadata.failure_reason, None);
+        assert_eq!(
+            metadata.content_capture.as_deref(),
+            Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO)
+        );
+        assert_eq!(metadata.content_capture_reliable, Some(true));
+        assert!(!raw.contains("auth_args"));
+        assert!(!raw.contains("command"));
+        assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn writes_conpty_initial_timeout_metadata_without_secret_fields() {
         let dir = temp_dir("conpty-timeout-metadata");
         let files = allocate_session_files(&dir).unwrap();
@@ -2288,6 +2320,59 @@ mod tests {
             metadata.backend_status.as_deref(),
             Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY)
         );
+        assert!(!raw.contains("auth_args"));
+        assert!(!raw.contains("command"));
+        assert!(!raw.contains("private_key_path"));
+        assert!(!raw.contains("password"));
+        assert!(!raw.contains("secret"));
+        assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writes_conpty_failure_metadata_with_child_exit_code_when_available() {
+        let dir = temp_dir("conpty-failure-exit-code-metadata");
+        let files = allocate_session_files(&dir).unwrap();
+        fs::write(
+            &files.log_path,
+            "ssh: connect to host example.com port 22: timed out\n",
+        )
+        .unwrap();
+        let target = sample_target();
+
+        let metadata = complete_conpty_failure_session(
+            &files,
+            &target,
+            1000,
+            10_000,
+            SessionLogFailureMetadata {
+                status: SESSION_LOG_STATUS_FAILED,
+                failure_phase: SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT,
+                failure_reason: SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT,
+                exit_code: Some(255),
+            },
+        )
+        .unwrap();
+        let loaded = get_session_log_in_dir(&dir, &files.session_id).unwrap();
+        let raw = fs::read_to_string(&files.metadata_path).unwrap();
+
+        assert_eq!(metadata.status, SESSION_LOG_STATUS_FAILED);
+        assert_eq!(metadata.exit_code, Some(255));
+        assert_eq!(loaded.exit_code, Some(255));
+        assert_eq!(
+            metadata.failure_phase.as_deref(),
+            Some(SESSION_LOG_FAILURE_PHASE_WAITING_INITIAL_OUTPUT)
+        );
+        assert_eq!(
+            metadata.failure_reason.as_deref(),
+            Some(SESSION_LOG_FAILURE_REASON_INITIAL_OUTPUT_TIMEOUT)
+        );
+        assert_eq!(
+            metadata.content_capture.as_deref(),
+            Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO)
+        );
+        assert_eq!(metadata.content_capture_reliable, Some(true));
         assert!(!raw.contains("auth_args"));
         assert!(!raw.contains("command"));
         assert!(!raw.contains("private_key_path"));

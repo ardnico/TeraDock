@@ -557,7 +557,7 @@ fn run_conpty_logged_ssh_session(
                     status: failure.status,
                     failure_phase: failure.phase,
                     failure_reason: failure.reason,
-                    exit_code: None,
+                    exit_code: failure.exit_code,
                 },
             ) {
                 Ok(metadata) => SessionLogReference::saved(metadata.session_id),
