@@ -69,6 +69,14 @@ and broader Windows terminal coverage still need recorded evidence.
 - The ConPTY PoC implementation scope is a Windows-only explicit CLI, SSH invocation reuse from profile id, ConPTY child spawn, terminal input/output bridge, output tee to the session log file, metadata completion, exit-code propagation, and `td session list/show/path` compatibility.
 - TUI integration is intentionally minimal: the existing TUI still owns raw-mode, alternate-screen, mouse capture, and same-terminal suspend/restore behavior. After TUI suspension, the same shared ConPTY runner is called only for SSH profiles when `session.log.enabled=true` and `session.log.backend=conpty`.
 
+The operator setup for this path is explicit:
+
+```powershell
+td config set session.log.enabled true
+td config set session.log.backend conpty
+td ui
+```
+
 ## PoC Success Criteria
 
 - `ssh.exe` can be launched under ConPTY.
@@ -164,6 +172,9 @@ Auto promotion requires more evidence than explicit backend stabilization:
 - The PoC log is a byte transcript, not a full terminal replay. ANSI escape
   sequences may remain in the file and resize does not rewrite earlier screen
   state.
+- If TUI terminal restoration fails in a manual run, recover the local terminal
+  with `Ctrl-C`, `reset` where available, or by reopening the terminal, then
+  check for leftover `td` or `ssh` child processes before retrying.
 
 ## Non-goals
 

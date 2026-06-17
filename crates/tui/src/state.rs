@@ -740,7 +740,7 @@ impl AppState {
                 meta_json: Some(ssh_session_meta_json(session, None, session_log)),
             },
         )?;
-        self.status_message = Some(ssh_session_result_message(ok, exit_code));
+        self.status_message = Some(ssh_session_result_message(ok, exit_code, session_log));
         Ok(())
     }
 
@@ -1042,11 +1042,26 @@ fn display_opt(value: Option<&str>) -> &str {
     value.unwrap_or("(unset)")
 }
 
-fn ssh_session_result_message(ok: bool, exit_code: Option<i32>) -> String {
-    match exit_code {
-        Some(0) if ok => "SSH session ended.".to_string(),
-        Some(code) => format!("SSH session ended with exit code {code}."),
-        None => "SSH session ended without exit code.".to_string(),
+fn ssh_session_result_message(
+    _ok: bool,
+    exit_code: Option<i32>,
+    session_log: &SessionLogReference,
+) -> String {
+    let mut message = match exit_code {
+        Some(code) => format!("SSH session ended: exit {code}"),
+        None => "SSH session ended without exit code".to_string(),
+    };
+    append_session_log_status(&mut message, session_log);
+    message
+}
+
+fn append_session_log_status(message: &mut String, session_log: &SessionLogReference) {
+    if let Some(session_id) = &session_log.session_id {
+        message.push_str(&format!(", log saved: {session_id}"));
+    } else if let Some(reason) = &session_log.reason {
+        if reason != session_log::SESSION_LOG_REASON_DISABLED {
+            message.push_str(&format!(", log not saved: {reason}"));
+        }
     }
 }
 
@@ -1392,16 +1407,20 @@ mod tests {
     #[test]
     fn formats_ssh_session_result_status_messages() {
         assert_eq!(
-            ssh_session_result_message(true, Some(0)),
-            "SSH session ended."
+            ssh_session_result_message(true, Some(0), &SessionLogReference::not_saved("disabled")),
+            "SSH session ended: exit 0"
         );
         assert_eq!(
-            ssh_session_result_message(false, Some(255)),
-            "SSH session ended with exit code 255."
+            ssh_session_result_message(false, Some(255), &SessionLogReference::saved("sl_abc123")),
+            "SSH session ended: exit 255, log saved: sl_abc123"
         );
         assert_eq!(
-            ssh_session_result_message(false, None),
-            "SSH session ended without exit code."
+            ssh_session_result_message(
+                false,
+                None,
+                &SessionLogReference::not_saved("backend_no_log")
+            ),
+            "SSH session ended without exit code, log not saved: backend_no_log"
         );
     }
 

@@ -2224,6 +2224,7 @@ fn print_session_diagnostics(diagnostics: &session_log::SessionLogDiagnostics) {
     println!("enabled: {}", diagnostics.enabled);
     println!("backend setting: {}", diagnostics.backend_setting);
     println!("resolved backend: {}", diagnostics.resolved_backend);
+    println!("TUI logging: {}", diagnostics.tui_integration);
     println!(
         "script command: {}",
         diagnostics

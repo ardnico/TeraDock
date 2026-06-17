@@ -8,6 +8,7 @@ PoC command:
 .\target\release\td.exe config set session.log.enabled true
 .\target\release\td.exe config set session.log.backend conpty
 .\target\release\td.exe connect <profile_id> --log-backend conpty
+.\target\release\td.exe ui
 ```
 
 For sanitized startup diagnostics:
@@ -246,6 +247,7 @@ Confirm:
 
 - `backend setting: conpty`
 - `resolved backend: conpty`
+- `TUI logging: enabled for s-key SSH sessions`
 - `content capture reliability: experimental_ready`
 - warning says ConPTY is experimental.
 - `Status: degraded`
@@ -267,6 +269,10 @@ In the TUI, select an SSH profile and press `s`. Confirm remote output is
 visible, output is saved, `exit` returns to the TUI, and `session list/show/path`
 can inspect the saved ConPTY session. Repeat with Ctrl-C only on controlled
 test infrastructure and confirm the TUI returns.
+
+If the TUI screen or terminal mode is not restored, press `Ctrl-C`, reopen the
+terminal if necessary, and check for leftover `td` or `ssh` processes from the
+test before retrying. Record the recovery steps as part of the smoke evidence.
 
 ## Ctrl-C Check
 

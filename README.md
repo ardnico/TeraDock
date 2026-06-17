@@ -128,7 +128,17 @@ td session path <session_id>
 
 Use `td session doctor` to see whether logging is enabled, which backend will be used, backend status (`ready`, `degraded`, or `not_ready`), content-capture reliability, dependency availability, whether the log directory looks writable, and which saved session log is newest. On Windows it also prints the explicit ConPTY backend command, the PoC command, and the current ConPTY candidate label. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
 
-When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured. On Windows, `auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`. To capture SSH terminal I/O on Windows, explicitly set `session.log.backend=conpty` with `session.log.enabled=true`, or run `td connect <profile_id> --log-backend conpty` for that SSH connect. The TUI `s` path uses ConPTY only when those saved settings are explicit and the selected profile is SSH. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. `td session conpty-test <profile_id>` remains available as a focused Windows ConPTY smoke command. ConPTY uses `portable-pty`; basic manual smoke has shown SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility, so the explicit candidate label is `experimental_ready`. It is still degraded and is not selected by `auto`. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
+When enabled on Linux/macOS, TeraDock uses the `script` backend when available and saves terminal logs plus metadata under `<data_dir>/session-logs` unless `session.log.dir` is configured.
+
+On Windows, `auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`. To capture SSH terminal I/O from the TUI `s` path on Windows, explicitly enable ConPTY and then open `td ui`:
+
+```powershell
+td config set session.log.enabled true
+td config set session.log.backend conpty
+td ui
+```
+
+The TUI `s` path uses ConPTY only when those saved settings are explicit and the selected profile is SSH. `td connect <profile_id> --log-backend conpty` can request the same backend for one CLI SSH connect. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. `td session conpty-test <profile_id>` remains available as a focused Windows ConPTY smoke command. ConPTY uses `portable-pty`; basic manual smoke has shown SSH login, visible remote output, saved log output, metadata, and `session list/show/path` compatibility, so the explicit candidate label is `experimental_ready`. It is still degraded and is not selected by `auto`. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
 
 ## Safety Model
 

@@ -237,7 +237,8 @@ fn handle_ssh_session_request(
             session_log,
         } => {
             let error_message = error.to_string();
-            let mut status_message = format!("Failed to launch SSH session: {error_message}");
+            let mut status_message =
+                ssh_session_launch_failure_message(&error_message, &session_log);
             if let Err(err) = state.record_ssh_session_launch_failure(
                 &session,
                 &error_message,
@@ -273,6 +274,18 @@ fn run_interactive_ssh_session(
     session: &SshSessionCommand,
 ) -> Result<SshSessionRunResult> {
     suspend_tui_terminal(terminal)?;
+    let result = run_interactive_ssh_session_suspended(session);
+    let resume_result = resume_tui_terminal(terminal);
+
+    if let Err(err) = resume_result {
+        return Err(err).context("failed to restore TUI after SSH session");
+    }
+    result
+}
+
+fn run_interactive_ssh_session_suspended(
+    session: &SshSessionCommand,
+) -> Result<SshSessionRunResult> {
     if let Some(notice) = session.session_log_plan.notice() {
         println!("{notice}");
         if matches!(
@@ -287,7 +300,7 @@ fn run_interactive_ssh_session(
         }
         io::stdout().flush()?;
     }
-    let result = match &session.session_log_plan {
+    Ok(match &session.session_log_plan {
         SessionLogPlan::Script {
             script_path,
             files,
@@ -317,10 +330,7 @@ fn run_interactive_ssh_session(
         SessionLogPlan::Disabled | SessionLogPlan::NoLog { .. } => {
             run_plain_ssh_session(session, session.session_log_plan.not_saved_reference())
         }
-    };
-    resume_tui_terminal(terminal).context("failed to restore TUI after SSH session")?;
-
-    Ok(result)
+    })
 }
 
 fn run_plain_ssh_session(
@@ -625,6 +635,26 @@ fn resume_tui_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) ->
     )?;
     terminal.clear()?;
     Ok(())
+}
+
+fn ssh_session_launch_failure_message(error: &str, session_log: &SessionLogReference) -> String {
+    let mut message = format!("SSH session failed: {error}");
+    append_session_log_status(&mut message, session_log, "metadata saved");
+    message
+}
+
+fn append_session_log_status(
+    message: &mut String,
+    session_log: &SessionLogReference,
+    saved_label: &str,
+) {
+    if let Some(session_id) = &session_log.session_id {
+        message.push_str(&format!("; {saved_label}: {session_id}"));
+    } else if let Some(reason) = &session_log.reason {
+        if reason != session_log::SESSION_LOG_REASON_DISABLED {
+            message.push_str(&format!("; log not saved: {reason}"));
+        }
+    }
 }
 
 #[cfg(test)]

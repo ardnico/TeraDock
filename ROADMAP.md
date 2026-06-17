@@ -16,7 +16,7 @@
 
 1. Interactive SSH session log saving with default-disabled Linux/macOS `script` backend.
 2. Stability improvements after the session logging slice.
-3. Windows ConPTY session logging as an explicit experimental backend (`session.log.backend=conpty`, `td connect --log-backend conpty`, and `td session conpty-test <profile_id>`), with basic manual smoke success and remaining edge-case validation.
+3. Windows ConPTY session logging as an explicit experimental backend (`session.log.backend=conpty`, TUI `s`, `td connect --log-backend conpty`, and `td session conpty-test <profile_id>`), with basic manual smoke success and remaining edge-case validation.
 4. TUI recent pane.
 5. Terminal emulator launch configuration.
 6. tmux integration design.

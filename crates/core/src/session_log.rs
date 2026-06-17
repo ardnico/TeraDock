@@ -121,6 +121,7 @@ pub struct SessionLogDiagnostics {
     pub enabled: bool,
     pub backend_setting: String,
     pub resolved_backend: String,
+    pub tui_integration: String,
     pub script_command: Option<PathBuf>,
     pub script_command_note: Option<String>,
     pub powershell_command: Option<PathBuf>,
@@ -502,6 +503,12 @@ fn diagnose_config_with_environment(
         &resolution.resolved_backend,
         resolution.fallback_reason.as_deref(),
     );
+    let tui_integration = diagnostics_tui_integration(
+        config.enabled,
+        config.backend,
+        &resolution.resolved_backend,
+        resolution.fallback_reason.as_deref(),
+    );
     let (content_capture_reliability, warning) =
         diagnostics_capture_fields(&resolution.resolved_backend);
     let hints = diagnostics_hints(
@@ -518,6 +525,7 @@ fn diagnose_config_with_environment(
         enabled: config.enabled,
         backend_setting,
         resolved_backend: resolution.resolved_backend,
+        tui_integration,
         script_command,
         script_command_note,
         powershell_command,
@@ -1275,6 +1283,35 @@ fn diagnostics_status(
     }
 }
 
+fn diagnostics_tui_integration(
+    enabled: bool,
+    backend: SessionLogBackendSetting,
+    resolved_backend: &str,
+    fallback_reason: Option<&str>,
+) -> String {
+    if !enabled {
+        return "disabled".to_string();
+    }
+    if backend == SessionLogBackendSetting::NoLog
+        || (resolved_backend == SESSION_LOG_BACKEND_NO_LOG
+            && fallback_reason == Some(SESSION_LOG_REASON_BACKEND_NO_LOG))
+    {
+        return "not logging s-key SSH sessions".to_string();
+    }
+    if fallback_reason.is_some() {
+        return "not ready for s-key SSH sessions".to_string();
+    }
+    if matches!(
+        resolved_backend,
+        SESSION_LOG_BACKEND_SCRIPT
+            | SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+            | SESSION_LOG_BACKEND_CONPTY
+    ) {
+        return "enabled for s-key SSH sessions".to_string();
+    }
+    "not logging s-key SSH sessions".to_string()
+}
+
 fn diagnostics_capture_fields(resolved_backend: &str) -> (Option<String>, Option<String>) {
     if resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT {
         (
@@ -1627,6 +1664,7 @@ mod tests {
         assert!(!diagnostics.enabled);
         assert_eq!(diagnostics.backend_setting, SESSION_LOG_BACKEND_AUTO);
         assert_eq!(diagnostics.resolved_backend, "disabled");
+        assert_eq!(diagnostics.tui_integration, "disabled");
         assert_eq!(
             diagnostics.script_command_note.as_deref(),
             Some("not checked because logging is disabled")
@@ -1651,6 +1689,10 @@ mod tests {
 
         assert_eq!(diagnostics.backend_setting, SESSION_LOG_BACKEND_NO_LOG);
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
+        assert_eq!(
+            diagnostics.tui_integration,
+            "not logging s-key SSH sessions"
+        );
         assert_eq!(
             diagnostics.fallback_reason.as_deref(),
             Some(SESSION_LOG_REASON_BACKEND_NO_LOG)
@@ -1687,6 +1729,10 @@ mod tests {
 
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
         assert_eq!(diagnostics.status, "not_ready");
+        assert_eq!(
+            diagnostics.tui_integration,
+            "not ready for s-key SSH sessions"
+        );
         assert!(!diagnostics.platform_supported);
         assert_eq!(
             diagnostics.fallback_reason.as_deref(),
@@ -1736,6 +1782,10 @@ mod tests {
 
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
         assert_eq!(
+            diagnostics.tui_integration,
+            "not ready for s-key SSH sessions"
+        );
+        assert_eq!(
             diagnostics.fallback_reason.as_deref(),
             Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY)
         );
@@ -1765,6 +1815,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
+        assert_eq!(
+            diagnostics.tui_integration,
+            "not ready for s-key SSH sessions"
+        );
         assert_eq!(
             diagnostics.fallback_reason.as_deref(),
             Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY)
@@ -1797,6 +1851,10 @@ mod tests {
         assert_eq!(
             diagnostics.resolved_backend,
             SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT
+        );
+        assert_eq!(
+            diagnostics.tui_integration,
+            "enabled for s-key SSH sessions"
         );
         assert_eq!(diagnostics.status, "degraded");
         assert_eq!(diagnostics.fallback_reason, None);
@@ -1902,6 +1960,10 @@ mod tests {
 
         assert_eq!(diagnostics.backend_setting, SESSION_LOG_BACKEND_CONPTY);
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_CONPTY);
+        assert_eq!(
+            diagnostics.tui_integration,
+            "enabled for s-key SSH sessions"
+        );
         assert_eq!(diagnostics.status, "degraded");
         assert_eq!(
             diagnostics.content_capture_reliability.as_deref(),
@@ -1960,6 +2022,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(diagnostics.resolved_backend, SESSION_LOG_BACKEND_NO_LOG);
+        assert_eq!(
+            diagnostics.tui_integration,
+            "not ready for s-key SSH sessions"
+        );
         assert_eq!(diagnostics.status, "not_ready");
         assert_eq!(
             diagnostics.fallback_reason.as_deref(),

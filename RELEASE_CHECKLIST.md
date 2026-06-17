@@ -110,6 +110,7 @@ Windows ConPTY explicit backend smoke, only on a controlled Windows SSH profile:
 .\target\release\td.exe session doctor
 .\target\release\td.exe session conpty-test <profile_id>
 .\target\release\td.exe connect <profile_id> --log-backend conpty
+.\target\release\td.exe ui
 .\target\release\td.exe session list
 .\target\release\td.exe session show <session_id>
 .\target\release\td.exe session path <session_id>
@@ -147,6 +148,12 @@ controlled failure behavior. This check does not promote ConPTY to `auto`.
   `session.log.enabled=true` and `session.log.backend=conpty`, TUI `s` uses
   ConPTY for SSH profiles, returns to the TUI after `exit`, and leaves
   `session list/show/path` usable. It is not selected by `auto`.
+- `td session doctor` and the settings diagnostics panel show `TUI logging:
+  enabled for s-key SSH sessions` only when the resolved backend can be used
+  for TUI `s` sessions; unsupported explicit backends show a not-ready status.
+- If a TUI/ConPTY smoke breaks terminal mode, recover with `Ctrl-C`, `reset`
+  where available, or by reopening the terminal, then confirm no leftover
+  `td` or `ssh` child from that run remains.
 - Host-only or empty PowerShell transcripts add `content_capture_status` and
   `content_capture_warning`, and `td session show <session_id>` displays the
   warning.

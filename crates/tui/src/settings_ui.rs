@@ -662,6 +662,7 @@ fn diagnostic_rows(
         ("Enabled", diagnostics.enabled.to_string()),
         ("Backend setting", diagnostics.backend_setting.clone()),
         ("Resolved backend", diagnostics.resolved_backend.clone()),
+        ("TUI logging", diagnostics.tui_integration.clone()),
         ("Platform", diagnostics.platform.clone()),
         (
             "Platform support",
@@ -932,6 +933,7 @@ mod tests {
         diagnostics.platform_supported = false;
         diagnostics.fallback_reason =
             Some(session_log::SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY.to_string());
+        diagnostics.tui_integration = "not ready for s-key SSH sessions".to_string();
         diagnostics.status = "not_ready".to_string();
 
         let rows = diagnostic_rows(&diagnostics);
@@ -939,6 +941,10 @@ mod tests {
         assert_eq!(
             row_value(&rows, "Resolved backend"),
             Some(session_log::SESSION_LOG_BACKEND_NO_LOG)
+        );
+        assert_eq!(
+            row_value(&rows, "TUI logging"),
+            Some("not ready for s-key SSH sessions")
         );
         assert_eq!(row_value(&rows, "Status"), Some("not_ready"));
         assert_eq!(
@@ -967,6 +973,10 @@ mod tests {
         assert_eq!(
             row_value(&rows, "Resolved backend"),
             Some(session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT)
+        );
+        assert_eq!(
+            row_value(&rows, "TUI logging"),
+            Some("enabled for s-key SSH sessions")
         );
         assert_eq!(row_value(&rows, "Status"), Some("degraded"));
         assert_eq!(
@@ -998,6 +1008,10 @@ mod tests {
             row_value(&rows, "Resolved backend"),
             Some(session_log::SESSION_LOG_BACKEND_CONPTY)
         );
+        assert_eq!(
+            row_value(&rows, "TUI logging"),
+            Some("enabled for s-key SSH sessions")
+        );
         assert_eq!(row_value(&rows, "Status"), Some("degraded"));
         assert_eq!(
             row_value(&rows, "Capture reliability"),
@@ -1014,6 +1028,7 @@ mod tests {
             enabled: true,
             backend_setting: session_log::SESSION_LOG_BACKEND_AUTO.to_string(),
             resolved_backend: session_log::SESSION_LOG_BACKEND_SCRIPT.to_string(),
+            tui_integration: "enabled for s-key SSH sessions".to_string(),
             script_command: Some(PathBuf::from("script")),
             script_command_note: None,
             powershell_command: None,

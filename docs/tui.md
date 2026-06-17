@@ -77,9 +77,17 @@ Defaults:
 
 When logging is enabled, pressing `s` still uses the same TUI suspend/resume lifecycle. TeraDock leaves raw mode and the alternate screen before starting the logged SSH session, then returns to the TUI after the session exits.
 
-Linux/macOS use the `script` backend when available. Windows `auto` resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; ConPTY is not selected by `auto`. To capture SSH terminal I/O from the TUI `s` path on Windows, save `session.log.enabled=true` and `session.log.backend=conpty`, then open an SSH profile with `s`. Explicit `conpty` uses the shared Windows ConPTY runner and remains degraded/experimental_ready until broader manual evidence exists. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
+Linux/macOS use the `script` backend when available. Windows `auto` resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; ConPTY is not selected by `auto`. To capture SSH terminal I/O from the TUI `s` path on Windows, save the explicit ConPTY settings and then open an SSH profile with `s`:
 
-Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, dependency availability, log directory existence and writability, platform support, fallback reason, content-capture reliability, warning, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
+```powershell
+td config set session.log.enabled true
+td config set session.log.backend conpty
+td ui
+```
+
+Explicit `conpty` uses the shared Windows ConPTY runner and remains degraded/experimental_ready until broader manual evidence exists. Explicit `powershell-transcript` remains available on Windows as a best-effort/degraded backend and may miss SSH-side input/output. If an explicit backend is selected and is not ready, TeraDock reports the backend error instead of silently opening an unlogged SSH session.
+
+Use `td session doctor` or the settings diagnostics panel to check whether logging is enabled, the backend setting, resolved backend, TUI logging status, dependency availability, log directory existence and writability, platform support, fallback reason, content-capture reliability, warning, status, and the newest saved session log. The BIOS-style settings screen can toggle `session.log.enabled`, cycle `session.log.backend`, edit `session.log.dir`, and refreshes diagnostics after save.
 
 Saved sessions can be inspected from the CLI:
 
@@ -97,6 +105,8 @@ td session path <session_id>
 Session metadata includes the session id, profile id, user, host, port, start/end times, duration, exit code, backend, status, log path, metadata path, and capture reliability/status warnings. It does not include SSH auth arguments, full command strings, private key paths, passwords, secrets, or tokens.
 
 The terminal log itself can still contain any sensitive information displayed during the SSH session. If a password, token, secret, private value, or command output appears on screen, it may be captured in the transcript. On Windows, ConPTY logs SSH terminal I/O when explicitly selected, and PowerShell Transcript is explicit best-effort only; it may capture only host transcript metadata and omit remote commands/output.
+
+If the terminal looks broken after returning from SSH, press `Ctrl-C` once, run `reset` on Unix-like shells when available, or close and reopen the terminal on Windows. If a child process appears to remain after a failed ConPTY run, inspect and stop only the specific leftover `td` or `ssh` process from that test before starting another TUI session.
 
 When a TUI SSH session writes to `op_logs`, the row includes only `session_log_saved`, `session_log_id` when a log was saved, or `session_log_reason` when no log was saved. The log path is kept in the session metadata rather than copied into `op_logs`.
 

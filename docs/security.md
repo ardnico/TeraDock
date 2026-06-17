@@ -55,7 +55,7 @@ td config set session.log.backend conpty
 td config get session.log.dir --resolved
 ```
 
-The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort or experimental, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit ConPTY config command, the PoC command, and its candidate label.
+The same settings screen is available from `td ui` with `c`; saved changes apply to SSH sessions started after the save. Use `td session doctor` to verify whether logging is enabled, whether the backend resolves to `script`, `powershell-transcript`, `conpty`, or a no-log fallback, whether TUI `s` logging is enabled or not ready, whether the backend is `ready`, `degraded`, or `not_ready`, whether content capture is best-effort or experimental, whether dependencies are available, and whether the log directory looks writable. On Windows, `td session doctor` also prints the explicit ConPTY config command, the PoC command, and its candidate label.
 
 The default save location is `<data_dir>/session-logs`. Set `session.log.dir` to use a different local directory. TeraDock attempts to create the session log directory with user-only permissions and to write log/metadata files with user-only permissions on platforms that support Unix-style modes.
 
@@ -68,7 +68,15 @@ Session log metadata is intentionally small. It may include the session id, prof
 
 The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
 
-Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; ConPTY is used only when the operator explicitly selects `session.log.backend=conpty` with `session.log.enabled=true`, or for a single CLI connect with `td connect <profile_id> --log-backend conpty`. `powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output.
+Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; ConPTY is used only when the operator explicitly selects `session.log.backend=conpty` with `session.log.enabled=true`, or for a single CLI connect with `td connect <profile_id> --log-backend conpty`. To use ConPTY from `td ui`, run:
+
+```powershell
+td config set session.log.enabled true
+td config set session.log.backend conpty
+td ui
+```
+
+`powershell-transcript` is available only as an explicit, experimental best-effort backend and may record only the PowerShell host transcript without SSH-side commands or output.
 
 `session.log.backend=conpty` is an explicit Windows-only experimental backend and is not selected by `auto`. When selected, normal `td connect` and the TUI `s` SSH path use the ConPTY runner for SSH profiles. `td session conpty-test <profile_id>` remains available as a focused smoke command. The ConPTY backend writes the terminal I/O stream to a log file and uses the same safe metadata model. It does not record SSH auth args, private key paths, or full SSH command strings in metadata. The log file is different: it can contain anything the terminal displays, including echoed commands, prompts, pasted text, remote output, secrets printed by commands, and terminal control output after best-effort sanitization. Typed input appears in the log when the remote terminal or program echoes it.
 
@@ -88,6 +96,8 @@ td session path <session_id>
 ```
 
 Do not attach raw session logs to issues, pull requests, support requests, release evidence, or screenshots unless hosts, users, prompts, command output, and sensitive values have been reviewed and redacted.
+
+If an interactive logging run leaves the terminal in an unusable state, press `Ctrl-C`, use `reset` where available, or close and reopen the terminal. Before retrying ConPTY smoke, verify that no leftover `td` or `ssh` process from the failed run remains.
 
 ## Release Safety Scope
 
