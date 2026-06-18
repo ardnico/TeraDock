@@ -242,6 +242,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-c
 - [Post-Release Audit 1.0.3](docs/post-release-audit-1.0.3.md)
 - [Release Artifact Validation](docs/release-artifact-validation.md)
 - [Release Checklist](RELEASE_CHECKLIST.md)
+- [Release Notes 1.1.0](RELEASE_NOTES_1.1.0.md)
 - [Historical Release Notes 0.1.0](RELEASE_NOTES_0.1.0.md)
 - [Changelog](CHANGELOG.md)
 - [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)

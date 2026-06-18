@@ -73,6 +73,8 @@ Get-Content <log_path> -Tail 60
 Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
 ```
 
+## Legacy v0.1 release checklist
+
 Use this checklist before tagging `v0.1.0`. Do not push the production tag or
 publish the production GitHub Release until artifact validation is complete.
 
@@ -301,6 +303,8 @@ promote ConPTY to `auto`.
 - `docs/internal/commandset-execution-boundary.md` reflects the current
   CommandSet boundary.
 - `CHANGELOG.md` is updated.
+- `RELEASE_NOTES_1.1.0.md` is reviewed and ready for the v1.1 GitHub Release
+  body.
 - `RELEASE_NOTES_0.1.0.md` is reviewed and ready for the GitHub Release body.
 - Known limitations are current and do not overstate production readiness.
 
