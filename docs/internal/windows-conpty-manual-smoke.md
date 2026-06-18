@@ -259,7 +259,8 @@ Confirm:
 - `TUI logging: enabled for s-key SSH sessions`
 - `ConPTY backend: explicit_ready`
 - `Auto selection: deferred`
-- warning says ConPTY is explicit and failure cases still require evidence.
+- warning says ConPTY is explicit and broader stability evidence is still
+  required before auto selection.
 - `Status: degraded`
 - Diagnostics mention that ConPTY is explicit and not selected by `auto`.
 

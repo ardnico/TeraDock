@@ -121,10 +121,12 @@ and [Windows TUI ConPTY Manual Smoke](docs/internal/windows-tui-conpty-manual-sm
 Confirm SSH login, terminal output display, output capture in the log,
 `exit_code` in metadata, Japanese output, first-Ctrl-C remote interrupt,
 second-Ctrl-C emergency abort, resize behavior, large output, and controlled
-failure behavior. The 2026-06-18 live smoke recorded `GO` for single Ctrl-C
-remote interrupt, but release-candidate artifact checks should still capture a
-fresh transcript marker when possible. This check does not promote ConPTY to
-`auto`.
+failure behavior. The 2026-06-18 live smokes recorded `GO` for single Ctrl-C
+remote interrupt, double Ctrl-C emergency abort, bad host, and auth failure,
+but release-candidate artifact checks should still capture fresh transcript
+markers when possible. Resize, large-output, long-running, and broader cleanup
+snapshots still require fresh release-candidate evidence. This check does not
+promote ConPTY to `auto`.
 
 ## 5. TUI smoke tests
 
@@ -156,8 +158,11 @@ fresh transcript marker when possible. This check does not promote ConPTY to
   should interrupt the remote process, keep SSH alive, and keep log capture
   running; this has live `GO` evidence for the explicit backend. A second
   `Ctrl-C` within 2 seconds should abort TeraDock, write aborted metadata,
-  return to the TUI, and leave no test `ssh.exe` child; this emergency abort
-  path still needs live saved-session evidence. It is not selected by `auto`.
+  return to the TUI, and leave no test `ssh.exe` child; this also has live
+  `GO` evidence for the explicit backend. Controlled bad-host and auth-failure
+  TUI smokes also have live `GO` evidence for metadata, safe fields, TUI
+  return, and child cleanup. Resize, large-output, long-running, and broader
+  cleanup snapshots remain manual evidence items. It is not selected by `auto`.
 - `td session doctor` and the settings diagnostics panel show
   `ConPTY backend: explicit_ready`, `Auto selection: deferred`, and the
   failure-case evidence reason for explicit ConPTY. With Windows `auto`, they

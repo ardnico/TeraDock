@@ -49,9 +49,34 @@ path. The exact `after-ctrl-c` marker was not present in that saved log because
 the operator used `df` as the post-Ctrl-C command; future release-candidate
 smoke should use the exact marker for stricter transcript matching.
 
-Double Ctrl-C emergency abort still needs a live saved-session result with
+The 2026-06-18 double-Ctrl-C emergency abort smoke is recorded in
+`RESULT_TeraDock_TUI_CONPTY_DOUBLE_CTRL_C_SMOKE.md`. In saved session
+`sl_d5i5bch7`, double Ctrl-C during remote `sleep 30` returned control to the
+TUI, left the TUI process alive before the smoke automation quit it, wrote
 `status=aborted`, `failure_phase=user_abort`, and
-`failure_reason=ctrl_c_double_press`.
+`failure_reason=ctrl_c_double_press`, and left no test-derived `ssh.exe` child.
+This is a `GO` for the explicit double-Ctrl-C emergency abort path.
+
+The 2026-06-18 bad-host and auth-failure smoke is recorded in
+`RESULT_TeraDock_TUI_CONPTY_BAD_HOST_AUTH_FAILURE_SMOKE.md`. In saved session
+`sl_mcx5u7jc`, the bad-host profile returned to the TUI and wrote
+`status=failed`, `reason=initial_output_timeout`,
+`failure_phase=waiting_initial_output`, and
+`failure_reason=initial_output_timeout`. In saved session `sl_x7qxorxv`, the
+auth-failure profile returned to the TUI and wrote `status=completed_nonzero`
+with `exit_code=255`; the log contained the failed-login terminal text. Both
+sessions kept metadata free of forbidden auth/secret fields and left no
+test-derived `ssh.exe` child. This is a `GO` for these explicit controlled
+failure paths.
+
+The 2026-06-18 stability review is recorded in
+`RESULT_TeraDock_TUI_CONPTY_STABILITY_SMOKE.md` and
+`RESULT_TeraDock_TUI_CONPTY_STABILITY_DECISION.md`. That pass confirmed the
+explicit ConPTY doctor state and rechecked `session list/show/path` plus
+metadata safety for the local bad-host and auth-failure sessions. The same
+automation shell was not an interactive TTY, so it could not run a new TUI
+resize, large-output, long-running, or exact `after_ctrl_c` smoke. Those remain
+release-candidate manual smoke items.
 
 ## Normal Exit Code and Cleanup
 
@@ -203,9 +228,10 @@ Classify the result after the smoke:
 - No-Go: double Ctrl-C exits `td.exe`, leaves the terminal unusable, loses
   metadata, records unsafe metadata, or leaves a test `ssh.exe` child behind.
 
-Current recorded status: `CONDITIONAL GO` because the source-level path and
-checklist exist, but no live aborted-session metadata has been recorded in this
-repository pass.
+Current recorded status: `GO` based on saved session `sl_d5i5bch7`: the TUI
+process was still alive before quitting, metadata recorded `status=aborted`,
+`failure_phase=user_abort`, and `failure_reason=ctrl_c_double_press`, and no
+test-derived `ssh.exe` child remained.
 
 ## Bad Host
 
@@ -217,6 +243,12 @@ Expected:
 - Metadata has `status=failed` when the failure is caught by the ConPTY runner.
 - TUI returns.
 - No child `ssh.exe` from the test remains.
+
+Current recorded status: `GO` based on saved session `sl_mcx5u7jc`. The TUI
+returned, metadata recorded `status=failed`,
+`failure_phase=waiting_initial_output`, and
+`failure_reason=initial_output_timeout`, and no test-derived `ssh.exe` child
+remained.
 
 ## Auth Failure
 
@@ -232,13 +264,19 @@ Expected:
 - Metadata still excludes auth args, full commands, private key paths,
   passwords, secrets, and tokens.
 
+Current recorded status: `GO` based on saved session `sl_x7qxorxv`. The TUI
+returned, metadata recorded `status=completed_nonzero` and `exit_code=255`, the
+log contained the failed-login terminal text, and no test-derived `ssh.exe`
+child remained.
+
 ## Resize
 
 While SSH is connected, resize the terminal narrower and wider, then run:
 
 ```sh
 stty size || true
-echo resize-check
+ls
+echo resize_after
 exit
 ```
 
@@ -246,14 +284,22 @@ Expected:
 
 - Display does not become unusable.
 - Logging continues after resize.
+- The saved log contains `resize_after`.
 - TUI returns after `exit`.
+- No extra `ssh.exe` child from the test remains.
+
+Current recorded status: `CONDITIONAL GO`. The source forwards crossterm resize
+events to ConPTY with dimensions clamped to at least `1x1`, but no live
+resize-run session from this stability pass exists. If the display is imperfect
+but the SSH session remains usable and the log continues, record the limitation
+instead of expanding this PoC into a full terminal emulator.
 
 ## Large Output
 
 Run:
 
 ```sh
-seq 1 1000
+seq 1 5000
 exit
 ```
 
@@ -263,6 +309,40 @@ Expected:
 - Output is saved to the log.
 - TeraDock does not freeze.
 - TUI returns after `exit`.
+- No extra `ssh.exe` child from the test remains.
+
+Current recorded status: `CONDITIONAL GO`. The output tee reads chunks from
+ConPTY, writes sanitized bytes to the log, flushes, and then writes the same raw
+bytes to stdout. A fresh live large-output session with a saved log marker is
+still needed.
+
+## Long-running Session
+
+Run:
+
+```sh
+for i in $(seq 1 60); do date; sleep 1; done
+```
+
+During the command, press `Ctrl-C` once, then run:
+
+```sh
+echo after_ctrl_c
+exit
+```
+
+Expected:
+
+- The remote command stops.
+- The SSH session remains usable.
+- The saved log contains `after_ctrl_c`.
+- Metadata has `backend=conpty`, `status=completed`, and `exit_code=0`.
+- TUI returns after `exit`.
+- No extra `ssh.exe` child from the test remains.
+
+Current recorded status: `CONDITIONAL GO`. A prior single-Ctrl-C live smoke
+proved remote interrupt and continued logging, but this exact long-running
+command and `after_ctrl_c` marker were not rerun in the non-TTY stability pass.
 
 ## Inspection Commands
 
@@ -271,7 +351,7 @@ After every case:
 ```powershell
 td session list
 td session show <session_id>
-td session show <session_id> --tail 50
+td session show <session_id> --tail 80
 td session path <session_id>
 Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
 ```
@@ -282,14 +362,11 @@ reports.
 
 ## Auto Gate
 
-Auto selection remains blocked until the normal path and all remaining failure
-cases have recorded evidence from controlled Windows runs:
+Auto selection remains blocked until the remaining failure cases have recorded
+evidence from controlled Windows runs:
 
-- Ctrl-C emergency abort.
-- Startup timeout.
-- Bad host.
-- Auth failure.
+- Startup-timeout variants separate from the bad-host blackhole case.
 - Resize.
 - Large output.
 - Long-running session.
-- Clean child-process snapshot after normal exit and failure.
+- Broader clean child-process snapshots after normal exit, abort, and failure.

@@ -66,9 +66,9 @@ pub const SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO: &str = "terminal_io";
 pub const SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY: &str = "explicit_ready";
 pub const SESSION_LOG_CONPTY_AUTO_SELECTION_DEFERRED: &str = "deferred";
 pub const SESSION_LOG_CONPTY_TUI_SUCCESS_REASON: &str =
-    "normal TUI logging and Japanese output succeeded; failure cases still require evidence.";
+    "explicit TUI logging, Japanese output, Ctrl-C, bad-host, and auth-failure smokes succeeded; resize, large-output, long-running, cleanup, and broader terminal coverage still require evidence.";
 pub const SESSION_LOG_WINDOWS_AUTO_DEFERRED_REASON: &str =
-    "explicit ConPTY is available, but auto selection is deferred until failure-case evidence is complete.";
+    "explicit ConPTY is available, but auto selection is deferred until broader stability and terminal coverage evidence is complete.";
 pub const SESSION_LOG_BACKEND_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "powershell_transcript_may_not_capture_interactive_ssh_io";
 pub const SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO: &str =
@@ -79,7 +79,7 @@ pub const SESSION_LOG_CAPTURE_WARNING_NO_SSH_CONTENT: &str =
 pub const SESSION_LOG_DIAGNOSTIC_WARNING_POWERSHELL_TRANSCRIPT: &str =
     "may not capture interactive SSH input/output";
 pub const SESSION_LOG_DIAGNOSTIC_WARNING_CONPTY_EXPLICIT_READY: &str =
-    "ConPTY logging is explicit; failure cases still require evidence before auto selection.";
+    "ConPTY logging is explicit; broader stability evidence is still required before auto selection.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLogBackendSetting {
@@ -1379,7 +1379,8 @@ fn diagnostics_hints(
         }
         Some(SESSION_LOG_REASON_WINDOWS_REQUIRES_CONPTY) => {
             hints.push(
-                "Windows auto remains no-log until failure-case evidence is complete.".to_string(),
+                "Windows auto remains no-log until broader stability evidence is complete."
+                    .to_string(),
             );
             hints.push(
                 "Use explicit ConPTY with: td config set session.log.backend conpty.".to_string(),
@@ -1399,7 +1400,9 @@ fn diagnostics_hints(
         hints.push("ConPTY backend is explicit and remains unselected by auto.".to_string());
         hints.push("Set it with: td config set session.log.backend conpty".to_string());
         hints.push("Open settings UI with: td config ui".to_string());
-        hints.push("ConPTY remains explicit until failure-case evidence is complete.".to_string());
+        hints.push(
+            "ConPTY remains explicit until broader stability evidence is complete.".to_string(),
+        );
     }
     if platform == SessionLogPlatform::Windows
         && resolved_backend == SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT

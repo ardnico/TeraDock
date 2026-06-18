@@ -109,11 +109,32 @@ session `sl_4amkmprl` ended with `backend=conpty`, `status=completed`, and
 operator used `df` as the post-Ctrl-C command, so a future release-candidate
 run can use the exact marker for stricter transcript matching.
 
-Source now implements second-Ctrl-C emergency abort, but controlled live
-operator evidence for the aborted metadata path is still needed. Startup
-timeout, bad host, auth failure, resize, large output, child cleanup in a clean
-process snapshot, and broader Windows terminal coverage also still need
-recorded evidence.
+The 2026-06-18 double-Ctrl-C TUI live smoke recorded a `GO` for the emergency
+abort path. Saved session `sl_d5i5bch7` was created from the TUI `s` path during
+remote `sleep 30`, double Ctrl-C returned control to the TUI, the TUI process
+was still alive before the smoke automation quit it, metadata recorded
+`status=aborted`, `failure_phase=user_abort`, and
+`failure_reason=ctrl_c_double_press`, and no test-derived `ssh.exe` child
+remained. Bad host, auth failure, resize, large output, broader child cleanup
+snapshots, and broader Windows terminal coverage still needed recorded evidence
+after that pass.
+
+The 2026-06-18 bad-host and auth-failure TUI live smoke recorded a `GO` for two
+controlled failure paths. Saved session `sl_mcx5u7jc` used a TEST-NET-1
+bad-host profile and returned to the TUI with `status=failed`,
+`failure_phase=waiting_initial_output`, and
+`failure_reason=initial_output_timeout`. Saved session `sl_x7qxorxv` used a
+controlled failed-login profile and returned to the TUI with
+`status=completed_nonzero` and `exit_code=255`; the log contained the
+failed-login terminal text. Both sessions kept metadata free of forbidden
+auth/secret fields and left no test-derived `ssh.exe` child.
+
+The 2026-06-18 stability review did not create new interactive TUI evidence
+because this automation shell was not an interactive TTY and `td ui` exited
+with `td ui requires an interactive TTY`. It rechecked the explicit doctor
+state, local bad-host/auth-failure `session list/show/path` output, log tails,
+metadata safety, and process attribution. Resize, large-output, long-running,
+and exact `after_ctrl_c` marker evidence remain manual Windows TTY items.
 
 ## Phase 1 Findings
 
@@ -143,10 +164,12 @@ td ui
 - UTF-8/Japanese output is not obviously corrupted.
 
 Source inspection alone is not evidence. As of 2026-06-18, normal TUI `s`
-logging, Japanese output, and single Ctrl-C remote interrupt are reported
-successful for explicit ConPTY. The remaining criteria require manual Windows
-run evidence that includes Ctrl-C emergency abort, resize, bad host, auth
-failure, timeout, large output, and clean child process observations.
+logging, Japanese output, single Ctrl-C remote interrupt, double Ctrl-C
+emergency abort, bad host, and auth failure are reported successful for
+explicit ConPTY. The remaining criteria require manual Windows run evidence
+that includes resize, remaining startup-timeout variants, large output,
+long-running sessions, broader cleanup observations, and broader terminal
+coverage.
 
 ## PoC No-Go Criteria
 
@@ -162,7 +185,7 @@ failure, timeout, large output, and clean child process observations.
 - `disabled`: session logging is off.
 - `not_ready`: the selected backend cannot run on the current platform or is missing required dependencies.
 - `degraded`: the backend is available but best-effort, experimental, or not reliable enough to treat as the production terminal-content path.
-- `explicit_ready`: ConPTY-only position label for the explicit backend after normal TUI logging and Japanese output have succeeded, while the overall diagnostic status remains `degraded`.
+- `explicit_ready`: ConPTY-only position label for the explicit backend after normal TUI logging, Japanese output, Ctrl-C, and controlled failure smokes have succeeded, while the overall diagnostic status remains `degraded`.
 - `ready`: the backend is available and considered suitable for the supported platform.
 
 PowerShell Transcript remains `degraded`. The ConPTY PoC command remains a focused smoke/debug path. The explicit `session.log.backend=conpty` backend is `explicit_ready`, but diagnostics still report `Status: degraded` until broader Windows failure evidence exists. Windows `auto` still resolves to `no-log`; it does not choose ConPTY.
@@ -175,7 +198,7 @@ TUI logging: enabled for s-key SSH sessions
 Auto selection: deferred
 ConPTY explicit config: td config set session.log.backend conpty
 ConPTY PoC command: td session conpty-test <profile_id>
-Reason: normal TUI logging and Japanese output succeeded; failure cases still require evidence.
+Reason: explicit TUI logging, Japanese output, Ctrl-C, bad-host, and auth-failure smokes succeeded; resize, large-output, long-running, cleanup, and broader terminal coverage still require evidence.
 Status: degraded
 ```
 
@@ -184,7 +207,7 @@ When Windows `auto` is selected, expected doctor/config diagnostics include:
 ```text
 Windows auto: no-log
 Auto selection: deferred
-Reason: explicit ConPTY is available, but auto selection is deferred until failure-case evidence is complete.
+Reason: explicit ConPTY is available, but auto selection is deferred until broader stability and terminal coverage evidence is complete.
 ```
 
 ## Promotion Criteria: PoC -> Explicit Stable Backend
@@ -257,5 +280,5 @@ Auto promotion requires more evidence than explicit backend stabilization:
 ## Suggested Roadmap
 
 - v1.1.x: Keep Windows `auto` on `no-log`; keep `powershell-transcript` explicit best-effort/degraded; expose ConPTY as an explicit backend for `td connect` and TUI `s`, with `td session conpty-test <profile_id>` retained for focused smoke; surface metadata, doctor, show, and config UI warnings.
-- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after the recorded single-Ctrl-C remote interrupt is joined by Ctrl-C emergency abort, timeout, bad host, auth failure, resize, large-output, cleanup, and broader Windows terminal evidence.
+- v1.2: Move the explicit ConPTY backend from `explicit_ready` to explicit stable only after the recorded Ctrl-C, bad-host, and auth-failure evidence is joined by remaining timeout variants, resize, large-output, long-running, cleanup, and broader Windows terminal evidence.
 - v1.3: Evaluate productionizing ConPTY as the reliable Windows SSH terminal-content backend and only then consider `auto` selection.
