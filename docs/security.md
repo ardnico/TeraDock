@@ -42,7 +42,7 @@ Operation logs must stay free of secrets. Passwords, secret values, tokens, SSH 
 
 ## Interactive Session Logs
 
-Interactive session logs are terminal transcripts for interactive SSH sessions. They are not `op_logs` and are not enabled by default.
+Interactive session logs are terminal transcripts for interactive SSH sessions. ConPTY logs are terminal transcripts, not full terminal replay files. They are not `op_logs` and are not enabled by default.
 
 Enable only when the operator accepts the risk:
 
@@ -66,9 +66,9 @@ Session log metadata is intentionally small. It may include the session id, prof
 - Full SSH command strings.
 - Private key paths.
 
-The terminal transcript is different. TeraDock does not perform complete secret masking. Any password, token, secret, private value, prompt response, command output, or pasted text displayed in the terminal can be captured in the log file.
+The terminal transcript is different. TeraDock does not perform complete secret masking. Anything displayed in the terminal can be captured. Passwords, tokens, prompt responses, pasted text, command output, secrets, or other private values may appear in log bodies. Treat session logs as sensitive local files.
 
-Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; ConPTY is used only when the operator explicitly selects `session.log.backend=conpty` with `session.log.enabled=true`, or for a single CLI connect with `td connect <profile_id> --log-backend conpty`. To use ConPTY from `td ui`, run:
+Linux/macOS use the `script` backend when available. Windows full SSH terminal-content logging requires ConPTY. On Windows, `session.log.backend=auto` still resolves to `no-log` with `windows_terminal_content_logging_requires_explicit_conpty`; default/auto logging on Windows is not enabled as ConPTY. ConPTY is used only when the operator explicitly selects `session.log.backend=conpty` with `session.log.enabled=true`, or for a single CLI connect with `td connect <profile_id> --log-backend conpty`. To use ConPTY from `td ui`, run:
 
 ```powershell
 td config set session.log.enabled true

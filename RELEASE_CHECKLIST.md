@@ -1,4 +1,77 @@
-# TeraDock 0.1 Release Checklist
+# TeraDock Release Checklist
+
+## v1.1 Explicit ConPTY release hardening
+
+Use these checks before releasing v1.1 with explicit Windows ConPTY session
+logging. This scope does not promote Windows `auto -> conpty`.
+
+Release scope:
+
+- Windows explicit ConPTY session logging is supported.
+- TUI `s` SSH session logging is supported when
+  `session.log.enabled=true` and `session.log.backend=conpty`.
+- CLI session logging through explicit ConPTY selection is supported,
+  including `td connect <profile_id> --log-backend conpty`.
+- `td session conpty-test <profile_id>` is supported for focused smoke.
+- `td session list`, `td session show`, `td session path`, and
+  `td session doctor` are supported.
+- Safe session metadata is required.
+- PowerShell Transcript remains degraded and best-effort.
+
+Not supported or not default:
+
+- Windows `auto -> conpty`.
+- Full terminal replay.
+- Secret masking of terminal transcript bodies.
+- Broad terminal-host guarantees.
+- Automated real SSH integration tests.
+
+Required validation:
+
+- `td session doctor` confirms `ConPTY backend: explicit_ready`,
+  `Auto selection: deferred`, `TUI logging: enabled for s-key SSH sessions`,
+  and a degraded status while explicit ConPTY remains outside `auto`.
+- Windows explicit ConPTY normal SSH smoke passes from a controlled profile.
+- TUI `s` explicit ConPTY smoke passes from a controlled SSH profile.
+- `td session list`, `td session show <session_id>`, and
+  `td session path <session_id>` work for the saved ConPTY session.
+- Metadata safety spot check confirms no auth args, full command strings,
+  private key paths, passwords, tokens, or secrets are stored.
+- Child process cleanup check confirms no test-owned leftover `td.exe` or
+  `ssh.exe` process after normal exit, abort, and controlled failure cases.
+- PowerShell Transcript degraded warning check confirms it is not described as
+  reliable SSH terminal-content logging.
+- Windows auto remains no-log check confirms
+  `session.log.backend=auto` does not select ConPTY.
+
+Final manual smoke, run in an interactive PowerShell rather than a non-TTY
+automation shell:
+
+```powershell
+.\target\release\td.exe config set session.log.enabled true
+.\target\release\td.exe config set session.log.backend conpty
+.\target\release\td.exe session doctor
+.\target\release\td.exe ui
+```
+
+Inside the SSH session:
+
+```bash
+pwd
+ls
+echo "日本語テスト"
+exit
+```
+
+After returning:
+
+```powershell
+.\target\release\td.exe session list
+.\target\release\td.exe session show <session_id>
+.\target\release\td.exe session path <session_id>
+Get-Content <log_path> -Tail 60
+Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
+```
 
 Use this checklist before tagging `v0.1.0`. Do not push the production tag or
 publish the production GitHub Release until artifact validation is complete.

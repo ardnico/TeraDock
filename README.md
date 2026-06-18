@@ -110,7 +110,28 @@ Interactive SSH sessions require a TTY. If `td ui` is started with redirected st
 
 SSH sessions opened from the TUI are recorded in `op_logs` as `ssh_session` operations after the session exits or when process launch fails. Secrets, passwords, SSH auth arguments, and full command strings are not written to the session log metadata. Use `td recent` or `td recent --json` to review recently used interactive SSH profiles.
 
-Interactive SSH terminal transcript logging is available for v1.1 preparation and is disabled by default:
+Interactive SSH terminal transcript logging is available for v1.1 preparation and is disabled by default.
+
+For the v1.1 Windows explicit ConPTY release scope, enable the backend explicitly:
+
+```powershell
+td config set session.log.enabled true
+td config set session.log.backend conpty
+td session doctor
+td ui
+```
+
+In the TUI, select an SSH profile and press `s`. After the SSH session returns, confirm the saved session:
+
+```powershell
+td session list
+td session show <session_id>
+td session path <session_id>
+```
+
+On Windows, `auto` currently resolves to `no-log` for terminal-content logging. Use `session.log.backend=conpty` explicitly to enable ConPTY logging.
+
+Other useful inspection and setup commands:
 
 ```bash
 ./td session doctor
@@ -125,6 +146,24 @@ td connect <profile_id> --log-backend conpty
 td session show <session_id>
 td session path <session_id>
 ```
+
+Supported in the v1.1 explicit ConPTY scope:
+
+- Windows explicit ConPTY session logging.
+- TUI `s` SSH session logging when `session.log.enabled=true` and `session.log.backend=conpty`.
+- CLI session logging through explicit ConPTY selection, including `td connect <profile_id> --log-backend conpty`.
+- `td session conpty-test <profile_id>`.
+- `td session list`, `td session show`, `td session path`, and `td session doctor`.
+- Safe session metadata.
+- PowerShell Transcript remains degraded and best-effort.
+
+Not supported or not default in this release:
+
+- Windows `auto -> conpty`.
+- Full terminal replay.
+- Secret masking of terminal transcript bodies.
+- Broad terminal-host guarantees.
+- Automated real SSH integration tests.
 
 Use `td session doctor` to see whether logging is enabled, which backend will be used, backend status (`ready`, `degraded`, or `not_ready`), content-capture reliability, dependency availability, whether the log directory looks writable, and which saved session log is newest. On Windows it also prints the explicit ConPTY backend position (`explicit_ready`), the `auto` selection state (`deferred`), the PoC command, and why `auto` is still not promoted. Use `td config ui` for the BIOS-style settings screen outside the TUI, or press `c` inside `td ui`; the settings screen can change `session.log.enabled`, `session.log.backend`, and `session.log.dir` and shows the same readiness diagnostics.
 

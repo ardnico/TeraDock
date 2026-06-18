@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic versioning.
 
+## [1.1.0] - Unreleased
+
+### Added
+
+- Explicit Windows ConPTY session logging for controlled terminal transcript capture.
+- TUI `s` integration for SSH profiles when `session.log.enabled=true` and `session.log.backend=conpty`.
+- CLI session logging path through explicit ConPTY selection, including `td connect <profile_id> --log-backend conpty`.
+- `td session conpty-test <profile_id>` for focused Windows ConPTY smoke checks.
+- Session metadata plus `td session list`, `td session show`, and `td session path` support for saved session logs.
+- `td session doctor` diagnostics for ConPTY explicit readiness, TUI logging readiness, and Windows auto-selection deferral.
+
+### Changed
+
+- Windows `auto` remains `no-log` for terminal-content logging; use `session.log.backend=conpty` explicitly to enable ConPTY.
+- PowerShell Transcript remains an explicit degraded/best-effort backend, not reliable SSH terminal-content logging.
+
+### Security
+
+- Terminal transcripts may contain displayed secrets, including passwords, tokens, prompt responses, pasted text, command output, and other sensitive values.
+- Session metadata excludes auth args, full command strings, private key paths, passwords, tokens, and secrets.
+
+### Known Limitations
+
+- Resize evidence is incomplete.
+- Large output evidence is incomplete.
+- Long-running session evidence is incomplete.
+- Broader Windows terminal-host coverage is incomplete.
+- Full terminal replay is not supported.
+- Secret masking of terminal transcript bodies is not implemented.
+- Automated real SSH integration tests are not included.
+
 ## [0.1.0] - 2026-06-10
 
 ### Added
