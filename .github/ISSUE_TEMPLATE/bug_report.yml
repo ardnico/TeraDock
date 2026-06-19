@@ -20,8 +20,16 @@ body:
     id: os
     attributes:
       label: OS
-      description: Include OS name, version, architecture, and terminal when relevant.
-      placeholder: "Windows 11 x86_64, PowerShell 7"
+      description: Include OS name, version, and architecture.
+      placeholder: "Windows 11 x86_64"
+    validations:
+      required: true
+  - type: input
+    id: terminal_shell
+    attributes:
+      label: Terminal and shell
+      description: Include terminal host and shell when relevant.
+      placeholder: "Windows Terminal, PowerShell 7"
     validations:
       required: true
   - type: dropdown
@@ -64,6 +72,22 @@ body:
     attributes:
       label: Logs/output
       description: Paste only redacted output. Remove passwords, tokens, private keys, full SSH auth args, and unmasked host/user values.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: session_id
+    attributes:
+      label: Session id if safe
+      description: Include a saved session id such as `sl_...` only when it is safe to share. Do not attach raw session logs.
+      placeholder: "sl_..."
+    validations:
+      required: false
+  - type: textarea
+    id: session_doctor
+    attributes:
+      label: td session doctor output if relevant
+      description: For session logging, ConPTY, prune, or saved-session issues, paste redacted `td session doctor` output.
       render: text
     validations:
       required: false

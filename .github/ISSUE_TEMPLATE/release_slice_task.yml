@@ -1,0 +1,107 @@
+name: Release slice task
+description: Define a scoped release-slice task for TeraDock maintainers or AI agents.
+title: "[Release slice]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for small, scoped TeraDock work. AI-assisted tasks must follow `AGENTS.md` and `docs/internal/codex-workflow.md`.
+        Do not include secrets, passwords, tokens, private keys, raw session logs, or unmasked SSH host/user values.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What exact behavior, document, evidence, or decision should this slice produce?
+      placeholder: "Produce a focused docs update for ..."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the files, commands, tests, docs, and behavior areas that are in scope.
+      placeholder: |
+        In scope:
+        - ...
+
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: forbidden_changes
+    attributes:
+      label: Forbidden changes
+      description: List boundaries that must not be crossed without explicit maintainer approval.
+      value: |
+        - Do not promote Windows `auto -> conpty`.
+        - Do not change default session logging behavior.
+        - Do not change secret masking policy.
+        - Do not add scheduled pruning.
+        - Do not delete or migrate user data beyond explicitly requested prune behavior.
+        - Do not introduce breaking config or CLI changes.
+        - Do not add real SSH server automated tests.
+        - Do not create release tags, publish GitHub Releases, or merge PRs.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Required validation commands or accepted narrower validation for this slice.
+      value: |
+        cargo fmt --check
+        cargo test
+        cargo clippy --all-targets --all-features -- -D warnings
+        cargo build -p td --release --locked
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: manual_smoke
+    attributes:
+      label: Manual smoke
+      description: Describe manual smoke needed for interactive TUI, ConPTY, real SSH, terminal-host, packaging, or release-artifact behavior. Say "not applicable" if none.
+      placeholder: "Not applicable for docs-only changes."
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Docs
+      description: List docs, security notes, changelog, release notes, or internal docs that should be updated or checked.
+      placeholder: |
+        - README.md
+        - docs/security.md
+        - RELEASE_CHECKLIST.md
+    validations:
+      required: false
+  - type: textarea
+    id: result_report
+    attributes:
+      label: Result report
+      description: Name the expected `RESULT_TeraDock_<TASK>.md` file and the evidence it should separate.
+      placeholder: "RESULT_TeraDock_<TASK>.md with proven evidence, skipped checks, risks, and follow-up work."
+    validations:
+      required: true
+  - type: dropdown
+    id: commit_pr
+    attributes:
+      label: Commit/PR expectation
+      options:
+        - Commit expected
+        - Draft PR expected after commit
+        - No commit expected
+        - Maintainer will decide
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: This task is scoped and does not require a forbidden change unless explicitly stated above.
+          required: true
+        - label: Reports, screenshots, logs, and examples will be redacted before sharing.
+          required: true
