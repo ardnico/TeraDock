@@ -314,6 +314,8 @@ enum SessionCommands {
     Show(SessionShowArgs),
     /// Print the terminal log path for a saved session
     Path { session_id: String },
+    /// Prune saved interactive SSH session logs
+    Prune(SessionPruneArgs),
 }
 
 #[derive(Debug, Args)]
@@ -354,6 +356,22 @@ struct SessionShowArgs {
     /// Print the last N log lines after metadata
     #[arg(long)]
     tail: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+struct SessionPruneArgs {
+    /// Delete sessions older than an age such as 30d, 12h, 60m, or 3600s
+    #[arg(long)]
+    older_than: Option<String>,
+    /// Keep the newest N sessions and select older entries for pruning
+    #[arg(long)]
+    keep_last: Option<usize>,
+    /// Show matching sessions without deleting files
+    #[arg(long)]
+    dry_run: bool,
+    /// Confirm deletion without an interactive prompt
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2051,6 +2069,10 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
             println!("{}", log_path.display());
             Ok(())
         }
+        SessionCommands::Prune(args) => {
+            let conn = db::init_connection()?;
+            handle_session_prune(&conn, args)
+        }
     }
 }
 
@@ -2413,6 +2435,138 @@ fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
         print_log_tail(log_path, tail)?;
     }
     Ok(())
+}
+
+fn handle_session_prune(conn: &Connection, args: SessionPruneArgs) -> Result<()> {
+    if args.keep_last == Some(0) {
+        return Err(anyhow!("--keep-last must be greater than 0"));
+    }
+    let older_than_ms = args
+        .older_than
+        .as_deref()
+        .map(parse_prune_age_ms)
+        .transpose()?;
+    let criteria = session_log::SessionPruneCriteria {
+        older_than_ms,
+        keep_last: args.keep_last,
+        now_ms: now_ms(),
+    };
+    let plan = session_log::plan_session_prune(conn, criteria)?;
+    if args.dry_run {
+        print_session_prune_plan(&plan, true);
+        return Ok(());
+    }
+    if plan.candidates.is_empty() {
+        print_session_prune_plan(&plan, false);
+        return Ok(());
+    }
+    if !args.yes {
+        print_session_prune_plan(&plan, false);
+        return Err(anyhow!(
+            "refusing to delete session logs without --yes; rerun with --dry-run to preview or --yes to delete"
+        ));
+    }
+
+    println!("Session prune");
+    println!("log directory: {}", plan.log_dir.display());
+    println!("sessions to delete: {}", plan.candidates.len());
+    println!("planned size: {} bytes", plan.planned_size_bytes);
+    let report = session_log::apply_session_prune_plan(&plan);
+    println!("sessions deleted: {}", report.sessions_deleted);
+    println!("failed deletions: {}", report.failed_deletions);
+    println!("skipped metadata: {}", plan.skipped.len());
+    if !plan.skipped.is_empty() {
+        for skipped in &plan.skipped {
+            println!("- {} ({})", skipped.metadata_path.display(), skipped.reason);
+        }
+    }
+    if !report.failures.is_empty() {
+        println!("failures:");
+        for failure in &report.failures {
+            println!(
+                "- {} {} {}: {}",
+                failure.session_id,
+                failure.operation,
+                failure.path.display(),
+                failure.error
+            );
+        }
+        return Err(anyhow!(
+            "session prune completed with {} deletion failures",
+            report.failed_deletions
+        ));
+    }
+    Ok(())
+}
+
+fn print_session_prune_plan(plan: &session_log::SessionPrunePlan, dry_run: bool) {
+    if dry_run {
+        println!("Session prune dry-run");
+    } else {
+        println!("Session prune");
+    }
+    println!("log directory: {}", plan.log_dir.display());
+    println!("sessions to delete: {}", plan.candidates.len());
+    println!("planned size: {} bytes", plan.planned_size_bytes);
+    println!("failed deletions: 0");
+    println!("skipped metadata: {}", plan.skipped.len());
+    if !plan.skipped.is_empty() {
+        for skipped in &plan.skipped {
+            println!("- {} ({})", skipped.metadata_path.display(), skipped.reason);
+        }
+    }
+    if plan.candidates.is_empty() {
+        if !dry_run {
+            println!("No session logs matched the prune criteria.");
+        }
+        return;
+    }
+    println!("candidates:");
+    for candidate in &plan.candidates {
+        println!(
+            "- {} started={} status={} size={} bytes",
+            candidate.metadata.session_id,
+            format_unix_ms_utc(candidate.metadata.started_at),
+            format_session_status(&candidate.metadata),
+            candidate.planned_size_bytes
+        );
+        println!("  metadata: {}", candidate.metadata_path.display());
+        match &candidate.log_path {
+            Some(path) if candidate.log_exists => println!("  log: {}", path.display()),
+            Some(path) => println!("  log: {} (missing)", path.display()),
+            None => println!("  log: <none>"),
+        }
+    }
+}
+
+fn parse_prune_age_ms(raw: &str) -> Result<i64> {
+    let value = raw.trim();
+    if value.len() < 2 {
+        return Err(anyhow!(
+            "--older-than must use a positive number with suffix d, h, m, or s"
+        ));
+    }
+    let (digits, suffix) = value.split_at(value.len() - 1);
+    let amount = digits
+        .parse::<i64>()
+        .map_err(|_| anyhow!("invalid --older-than value: {raw}"))?;
+    if amount <= 0 {
+        return Err(anyhow!("--older-than must be greater than 0"));
+    }
+    let multiplier = match suffix {
+        "d" | "D" => 24_i64 * 60 * 60 * 1000,
+        "h" | "H" => 60_i64 * 60 * 1000,
+        "m" | "M" => 60_i64 * 1000,
+        "s" | "S" => 1000,
+        _ => {
+            return Err(anyhow!(
+                "--older-than must use suffix d, h, m, or s, for example 30d"
+            ))
+        }
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow!("--older-than value is too large"))
 }
 
 fn session_capture_lines(metadata: &session_log::SessionLogMetadata) -> Vec<String> {
@@ -4201,6 +4355,47 @@ mod tests {
                 assert_eq!(session_id, "sl_abc123");
             }
             _ => panic!("expected session path command"),
+        }
+    }
+
+    #[test]
+    fn parses_session_prune_command() {
+        let cli = Cli::try_parse_from([
+            "td",
+            "session",
+            "prune",
+            "--older-than",
+            "30d",
+            "--keep-last",
+            "100",
+            "--dry-run",
+        ])
+        .expect("parses session prune");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::Prune(args),
+            }) => {
+                assert_eq!(args.older_than.as_deref(), Some("30d"));
+                assert_eq!(args.keep_last, Some(100));
+                assert!(args.dry_run);
+                assert!(!args.yes);
+            }
+            _ => panic!("expected session prune command"),
+        }
+
+        let cli = Cli::try_parse_from(["td", "session", "prune", "--keep-last", "100", "--yes"])
+            .expect("parses session prune --yes");
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::Prune(args),
+            }) => {
+                assert_eq!(args.older_than, None);
+                assert_eq!(args.keep_last, Some(100));
+                assert!(!args.dry_run);
+                assert!(args.yes);
+            }
+            _ => panic!("expected session prune command"),
         }
     }
 

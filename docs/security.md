@@ -93,7 +93,15 @@ td session list --json
 td session show <session_id>
 td session show <session_id> --tail 50
 td session path <session_id>
+td session prune --older-than 30d --dry-run
+td session prune --older-than 30d --yes
+td session prune --keep-last 100 --dry-run
+td session prune --keep-last 100 --yes
 ```
+
+Session logs grow until the operator prunes them. `td session prune` is metadata-driven: it selects saved session metadata and the corresponding log path recorded by that metadata. It does not remove orphan log-only files in the initial implementation. Use `--dry-run` first to print the candidate metadata and log paths plus the planned byte count. Actual deletion requires `--yes`; without it, prune refuses to delete. When `--older-than` and `--keep-last` are combined, TeraDock uses the more conservative intersection, so a session must be both old enough and outside the newest retained set before deletion.
+
+Prune validates paths before deleting. It skips unreadable or malformed metadata, metadata whose recorded paths contain traversal, metadata whose recorded path leaves the session log directory, log paths outside the session log directory, and files whose names do not match the session id. Missing log files do not crash cleanup; the metadata can still be removed when the recorded path is otherwise safe. On Windows, path checks use canonicalized paths so a metadata file cannot cause deletion outside the configured session log directory.
 
 Do not attach raw session logs to issues, pull requests, support requests, release evidence, or screenshots unless hosts, users, prompts, command output, and sensitive values have been reviewed and redacted.
 

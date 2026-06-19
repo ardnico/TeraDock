@@ -271,6 +271,54 @@ pub struct SessionLogMetadata {
     pub content_capture_warning: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionPruneCriteria {
+    pub older_than_ms: Option<i64>,
+    pub keep_last: Option<usize>,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPrunePlan {
+    pub log_dir: PathBuf,
+    pub candidates: Vec<SessionPruneCandidate>,
+    pub skipped: Vec<SessionPruneSkipped>,
+    pub planned_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPruneCandidate {
+    pub metadata: SessionLogMetadata,
+    pub metadata_path: PathBuf,
+    pub log_path: Option<PathBuf>,
+    pub log_exists: bool,
+    pub metadata_size_bytes: u64,
+    pub log_size_bytes: u64,
+    pub planned_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPruneSkipped {
+    pub metadata_path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPruneApplyReport {
+    pub sessions_deleted: usize,
+    pub planned_size_bytes: u64,
+    pub failed_deletions: usize,
+    pub failures: Vec<SessionPruneFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPruneFailure {
+    pub session_id: String,
+    pub path: PathBuf,
+    pub operation: String,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SessionLogReference {
     pub saved: bool,
@@ -990,6 +1038,306 @@ pub fn get_session_log(conn: &Connection, session_id: &str) -> Result<SessionLog
     get_session_log_in_dir(&dir, session_id)
 }
 
+pub fn plan_session_prune(
+    conn: &Connection,
+    criteria: SessionPruneCriteria,
+) -> Result<SessionPrunePlan> {
+    let dir = configured_session_log_dir(conn)?;
+    plan_session_prune_in_dir(&dir, criteria)
+}
+
+pub fn plan_session_prune_in_dir(
+    dir: &Path,
+    criteria: SessionPruneCriteria,
+) -> Result<SessionPrunePlan> {
+    if !dir.is_dir() {
+        return Ok(SessionPrunePlan {
+            log_dir: dir.to_path_buf(),
+            candidates: Vec::new(),
+            skipped: Vec::new(),
+            planned_size_bytes: 0,
+        });
+    }
+
+    let canonical_dir = fs::canonicalize(dir)?;
+    let mut records = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new("json")) {
+            continue;
+        }
+        match scan_prunable_session_metadata(&canonical_dir, path.clone()) {
+            Ok(record) => records.push(record),
+            Err(reason) => skipped.push(SessionPruneSkipped {
+                metadata_path: path,
+                reason,
+            }),
+        }
+    }
+    records.sort_by(|left, right| {
+        right
+            .metadata
+            .started_at
+            .cmp(&left.metadata.started_at)
+            .then_with(|| right.metadata.session_id.cmp(&left.metadata.session_id))
+    });
+
+    let candidates = select_prune_candidates(records, criteria);
+    let planned_size_bytes = candidates
+        .iter()
+        .map(|candidate| candidate.planned_size_bytes)
+        .sum();
+    Ok(SessionPrunePlan {
+        log_dir: dir.to_path_buf(),
+        candidates,
+        skipped,
+        planned_size_bytes,
+    })
+}
+
+pub fn apply_session_prune_plan(plan: &SessionPrunePlan) -> SessionPruneApplyReport {
+    let mut sessions_deleted = 0;
+    let mut failures = Vec::new();
+
+    for candidate in &plan.candidates {
+        let session_id = candidate.metadata.session_id.clone();
+        if let Some(log_path) = &candidate.log_path {
+            if candidate.log_exists {
+                match fs::remove_file(log_path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) => {
+                        failures.push(SessionPruneFailure {
+                            session_id,
+                            path: log_path.clone(),
+                            operation: "remove_log".to_string(),
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+
+        match fs::remove_file(&candidate.metadata_path) {
+            Ok(()) => sessions_deleted += 1,
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => failures.push(SessionPruneFailure {
+                session_id,
+                path: candidate.metadata_path.clone(),
+                operation: "remove_metadata".to_string(),
+                error: err.to_string(),
+            }),
+        }
+    }
+
+    SessionPruneApplyReport {
+        sessions_deleted,
+        planned_size_bytes: plan.planned_size_bytes,
+        failed_deletions: failures.len(),
+        failures,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrunableSessionRecord {
+    metadata: SessionLogMetadata,
+    metadata_path: PathBuf,
+    log_path: Option<PathBuf>,
+    log_exists: bool,
+    metadata_size_bytes: u64,
+    log_size_bytes: u64,
+}
+
+fn scan_prunable_session_metadata(
+    canonical_dir: &Path,
+    actual_metadata_path: PathBuf,
+) -> std::result::Result<PrunableSessionRecord, String> {
+    let metadata_size_bytes = fs::metadata(&actual_metadata_path)
+        .map_err(|err| format!("unreadable metadata: {err}"))?
+        .len();
+    let raw = fs::read_to_string(&actual_metadata_path)
+        .map_err(|err| format!("unreadable metadata: {err}"))?;
+    let metadata = serde_json::from_str::<SessionLogMetadata>(&raw)
+        .map_err(|err| format!("malformed metadata: {err}"))?;
+    validate_id(&metadata.session_id)
+        .map_err(|err| format!("invalid session id '{}': {err:?}", metadata.session_id))?;
+    validate_metadata_path(canonical_dir, &actual_metadata_path, &metadata)?;
+    let (log_path, log_exists, log_size_bytes) = validate_log_path(
+        canonical_dir,
+        &metadata.session_id,
+        metadata.log_path.as_ref(),
+    )?;
+
+    Ok(PrunableSessionRecord {
+        metadata,
+        metadata_path: actual_metadata_path,
+        log_path,
+        log_exists,
+        metadata_size_bytes,
+        log_size_bytes,
+    })
+}
+
+fn validate_metadata_path(
+    canonical_dir: &Path,
+    actual_metadata_path: &Path,
+    metadata: &SessionLogMetadata,
+) -> std::result::Result<(), String> {
+    let expected_file_name = format!("{}.json", metadata.session_id);
+    require_expected_file_name(actual_metadata_path, &expected_file_name, "metadata")?;
+    require_no_path_traversal(actual_metadata_path, "metadata")?;
+    require_no_path_traversal(&metadata.metadata_path, "metadata")?;
+
+    let actual_canonical =
+        canonical_existing_child(canonical_dir, actual_metadata_path, "metadata")?;
+    let recorded_canonical =
+        canonical_existing_child(canonical_dir, &metadata.metadata_path, "metadata")?;
+    require_expected_file_name(&metadata.metadata_path, &expected_file_name, "metadata")?;
+    if recorded_canonical != actual_canonical {
+        return Err(format!(
+            "metadata_path does not match scanned metadata file: {}",
+            metadata.metadata_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_log_path(
+    canonical_dir: &Path,
+    session_id: &str,
+    log_path: Option<&PathBuf>,
+) -> std::result::Result<(Option<PathBuf>, bool, u64), String> {
+    let Some(log_path) = log_path else {
+        return Ok((None, false, 0));
+    };
+    let expected_file_name = format!("{session_id}.log");
+    require_expected_file_name(log_path, &expected_file_name, "log")?;
+    require_no_path_traversal(log_path, "log")?;
+
+    if log_path.exists() {
+        if !log_path.is_file() {
+            return Err(format!("log path is not a file: {}", log_path.display()));
+        }
+        let canonical = canonical_existing_child(canonical_dir, log_path, "log")?;
+        let size = fs::metadata(&canonical)
+            .map_err(|err| format!("unreadable log file metadata: {err}"))?
+            .len();
+        return Ok((Some(log_path.clone()), true, size));
+    }
+
+    let Some(parent) = log_path.parent() else {
+        return Err(format!("log path has no parent: {}", log_path.display()));
+    };
+    let canonical_parent =
+        fs::canonicalize(parent).map_err(|err| format!("log parent is not accessible: {err}"))?;
+    if !canonical_parent.starts_with(canonical_dir) {
+        return Err(format!(
+            "log path is outside session log dir: {}",
+            log_path.display()
+        ));
+    }
+    Ok((Some(log_path.clone()), false, 0))
+}
+
+fn select_prune_candidates(
+    records: Vec<PrunableSessionRecord>,
+    criteria: SessionPruneCriteria,
+) -> Vec<SessionPruneCandidate> {
+    let has_age = criteria.older_than_ms.is_some();
+    let has_keep_last = criteria.keep_last.is_some();
+    if !has_age && !has_keep_last {
+        return Vec::new();
+    }
+
+    records
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            let selected_by_age = criteria.older_than_ms.map(|older_than_ms| {
+                let age_anchor = session_prune_age_anchor(&record.metadata);
+                criteria.now_ms.saturating_sub(age_anchor) >= older_than_ms
+            });
+            let selected_by_keep_last = criteria.keep_last.map(|keep_last| index >= keep_last);
+            let selected = match (selected_by_age, selected_by_keep_last) {
+                (Some(by_age), Some(by_keep_last)) => by_age && by_keep_last,
+                (Some(by_age), None) => by_age,
+                (None, Some(by_keep_last)) => by_keep_last,
+                (None, None) => false,
+            };
+            selected.then(|| {
+                let planned_size_bytes = record.metadata_size_bytes + record.log_size_bytes;
+                SessionPruneCandidate {
+                    metadata: record.metadata,
+                    metadata_path: record.metadata_path,
+                    log_path: record.log_path,
+                    log_exists: record.log_exists,
+                    metadata_size_bytes: record.metadata_size_bytes,
+                    log_size_bytes: record.log_size_bytes,
+                    planned_size_bytes,
+                }
+            })
+        })
+        .collect()
+}
+
+fn session_prune_age_anchor(metadata: &SessionLogMetadata) -> i64 {
+    if metadata.ended_at > 0 {
+        metadata.ended_at
+    } else {
+        metadata.started_at
+    }
+}
+
+fn canonical_existing_child(
+    canonical_dir: &Path,
+    path: &Path,
+    kind: &str,
+) -> std::result::Result<PathBuf, String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|err| format!("{kind} path is not accessible: {err}"))?;
+    if !canonical.starts_with(canonical_dir) {
+        return Err(format!(
+            "{kind} path is outside session log dir: {}",
+            path.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn require_no_path_traversal(path: &Path, kind: &str) -> std::result::Result<(), String> {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "{kind} path contains traversal: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn require_expected_file_name(
+    path: &Path,
+    expected: &str,
+    kind: &str,
+) -> std::result::Result<(), String> {
+    let actual = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{kind} path has no file name: {}", path.display()))?;
+    if actual != expected {
+        return Err(format!(
+            "{kind} path file name does not match session id: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 pub fn list_session_logs_in_dir(dir: &Path) -> Result<Vec<SessionLogMetadata>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
@@ -1652,6 +2000,81 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum TestLogState {
+        Present(&'static str),
+        Missing,
+        None,
+    }
+
+    fn test_metadata(
+        dir: &Path,
+        session_id: &str,
+        started_at: i64,
+        status: &str,
+        log_path: Option<PathBuf>,
+    ) -> SessionLogMetadata {
+        SessionLogMetadata {
+            session_id: session_id.to_string(),
+            profile_id: "p_test".to_string(),
+            user: "alice".to_string(),
+            host: "example.com".to_string(),
+            port: 2222,
+            started_at,
+            ended_at: started_at + 10,
+            duration_ms: 10,
+            exit_code: if status == "completed" {
+                Some(0)
+            } else if status == "completed_nonzero" {
+                Some(7)
+            } else {
+                None
+            },
+            backend: SESSION_LOG_BACKEND_CONPTY.to_string(),
+            log_path,
+            metadata_path: dir.join(format!("{session_id}.json")),
+            status: status.to_string(),
+            reason: None,
+            failure_phase: if status == "failed" || status == "aborted" {
+                Some(SESSION_LOG_FAILURE_PHASE_USER_ABORT.to_string())
+            } else {
+                None
+            },
+            failure_reason: if status == "failed" || status == "aborted" {
+                Some(SESSION_LOG_FAILURE_REASON_CTRL_C.to_string())
+            } else {
+                None
+            },
+            content_capture: Some(SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO.to_string()),
+            content_capture_reliable: Some(true),
+            backend_status: Some(SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string()),
+            backend_warning: Some(SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO.to_string()),
+            content_capture_status: None,
+            content_capture_warning: None,
+        }
+    }
+
+    fn write_test_session(
+        dir: &Path,
+        session_id: &str,
+        started_at: i64,
+        status: &str,
+        log_state: TestLogState,
+    ) -> SessionLogMetadata {
+        let log_path = dir.join(format!("{session_id}.log"));
+        let metadata_log_path = match log_state {
+            TestLogState::Present(body) => {
+                fs::write(&log_path, body).unwrap();
+                Some(log_path)
+            }
+            TestLogState::Missing => Some(log_path),
+            TestLogState::None => None,
+        };
+        let metadata = test_metadata(dir, session_id, started_at, status, metadata_log_path);
+        write_metadata(&metadata).unwrap();
+        metadata
     }
 
     #[test]
@@ -2496,6 +2919,345 @@ mod tests {
         assert!(!raw.contains("password"));
         assert!(!raw.contains("secret"));
         assert!(!raw.contains("token"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_dry_run_plan_does_not_delete_files() {
+        let dir = temp_dir("prune-dry-run");
+        let metadata = write_test_session(
+            &dir,
+            "sl_old",
+            1_000,
+            "completed",
+            TestLogState::Present("abc"),
+        );
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(100),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(metadata.metadata_path.is_file());
+        assert!(metadata.log_path.as_ref().unwrap().is_file());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_older_than_selects_only_old_sessions() {
+        let dir = temp_dir("prune-older-than");
+        write_test_session(
+            &dir,
+            "sl_old",
+            10_000,
+            "completed",
+            TestLogState::Present("old"),
+        );
+        write_test_session(
+            &dir,
+            "sl_new",
+            90_000,
+            "completed",
+            TestLogState::Present("new"),
+        );
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(30_000),
+                keep_last: None,
+                now_ms: 100_000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].metadata.session_id, "sl_old");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_keep_last_keeps_newest_sessions() {
+        let dir = temp_dir("prune-keep-last");
+        write_test_session(
+            &dir,
+            "sl_oldest",
+            1_000,
+            "completed",
+            TestLogState::Present("oldest"),
+        );
+        write_test_session(
+            &dir,
+            "sl_middle",
+            2_000,
+            "completed",
+            TestLogState::Present("middle"),
+        );
+        write_test_session(
+            &dir,
+            "sl_newest",
+            3_000,
+            "completed",
+            TestLogState::Present("newest"),
+        );
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: None,
+                keep_last: Some(2),
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].metadata.session_id, "sl_oldest");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_combined_age_and_keep_last_is_conservative() {
+        let dir = temp_dir("prune-combined");
+        write_test_session(
+            &dir,
+            "sl_old",
+            1_000,
+            "completed",
+            TestLogState::Present("old"),
+        );
+        write_test_session(
+            &dir,
+            "sl_new",
+            99_000,
+            "completed",
+            TestLogState::Present("new"),
+        );
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(30_000),
+                keep_last: Some(2),
+                now_ms: 100_000,
+            },
+        )
+        .unwrap();
+
+        assert!(plan.candidates.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_malformed_metadata_is_skipped() {
+        let dir = temp_dir("prune-malformed");
+        fs::write(dir.join("sl_bad.json"), "{not-json").unwrap();
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        assert!(plan.candidates.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(dir.join("sl_bad.json").is_file());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_path_outside_log_dir_is_skipped() {
+        let dir = temp_dir("prune-outside");
+        let outside = temp_dir("prune-outside-target");
+        let outside_log = outside.join("sl_out.log");
+        fs::write(&outside_log, "outside").unwrap();
+        let metadata = test_metadata(&dir, "sl_out", 1_000, "completed", Some(outside_log));
+        write_metadata(&metadata).unwrap();
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        assert!(plan.candidates.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(metadata.metadata_path.is_file());
+
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn prune_path_traversal_log_path_is_skipped() {
+        let dir = temp_dir("prune-traversal");
+        let log_path = dir.join("nested").join("..").join("sl_walk.log");
+        let metadata = test_metadata(&dir, "sl_walk", 1_000, "completed", Some(log_path));
+        write_metadata(&metadata).unwrap();
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        assert!(plan.candidates.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(metadata.metadata_path.is_file());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_orphan_log_only_files_are_not_removed() {
+        let dir = temp_dir("prune-orphan-log");
+        let orphan_log = dir.join("sl_orphan.log");
+        fs::write(&orphan_log, "orphan").unwrap();
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+        assert!(plan.candidates.is_empty());
+
+        let report = apply_session_prune_plan(&plan);
+
+        assert_eq!(report.sessions_deleted, 0);
+        assert!(orphan_log.is_file());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_missing_log_file_does_not_crash() {
+        let dir = temp_dir("prune-missing-log");
+        let metadata =
+            write_test_session(&dir, "sl_miss", 1_000, "completed", TestLogState::Missing);
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(!plan.candidates[0].log_exists);
+
+        let report = apply_session_prune_plan(&plan);
+
+        assert_eq!(report.sessions_deleted, 1);
+        assert_eq!(report.failed_deletions, 0);
+        assert!(!metadata.metadata_path.exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_handles_failed_aborted_and_completed_nonzero_sessions() {
+        let dir = temp_dir("prune-statuses");
+        write_test_session(
+            &dir,
+            "sl_fail",
+            1_000,
+            "failed",
+            TestLogState::Present("failed"),
+        );
+        write_test_session(&dir, "sl_abort", 2_000, "aborted", TestLogState::None);
+        write_test_session(
+            &dir,
+            "sl_nonzero",
+            3_000,
+            "completed_nonzero",
+            TestLogState::Present("nonzero"),
+        );
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+        let ids = plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.metadata.session_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["sl_nonzero", "sl_abort", "sl_fail"]);
+        let report = apply_session_prune_plan(&plan);
+        assert_eq!(report.sessions_deleted, 3);
+        assert_eq!(report.failed_deletions, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_summary_counts_are_correct() {
+        let dir = temp_dir("prune-summary");
+        let metadata = write_test_session(
+            &dir,
+            "sl_sum",
+            1_000,
+            "completed",
+            TestLogState::Present("abcd"),
+        );
+
+        let plan = plan_session_prune_in_dir(
+            &dir,
+            SessionPruneCriteria {
+                older_than_ms: Some(1),
+                keep_last: None,
+                now_ms: 10_000,
+            },
+        )
+        .unwrap();
+        let candidate = &plan.candidates[0];
+        let expected_metadata_size = fs::metadata(&metadata.metadata_path).unwrap().len();
+
+        assert_eq!(candidate.metadata_size_bytes, expected_metadata_size);
+        assert_eq!(candidate.log_size_bytes, 4);
+        assert_eq!(candidate.planned_size_bytes, expected_metadata_size + 4);
+        assert_eq!(plan.planned_size_bytes, candidate.planned_size_bytes);
+
+        let report = apply_session_prune_plan(&plan);
+        assert_eq!(report.planned_size_bytes, plan.planned_size_bytes);
+        assert_eq!(report.sessions_deleted, 1);
+        assert_eq!(report.failed_deletions, 0);
 
         let _ = fs::remove_dir_all(dir);
     }

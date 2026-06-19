@@ -73,6 +73,50 @@ Get-Content <log_path> -Tail 60
 Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
 ```
 
+## v1.1.1 Session log retention cleanup
+
+Use these checks before releasing a v1.1.1 stabilization build that adds
+session log retention cleanup. This scope does not add a new terminal backend,
+does not promote Windows `auto -> conpty`, does not add full terminal replay,
+and does not add secret masking for terminal transcript bodies.
+
+Release scope:
+
+- `td session prune --older-than 30d --dry-run` previews cleanup candidates.
+- `td session prune --older-than 30d --yes` deletes selected metadata and the
+  matching log file.
+- `td session prune --keep-last 100 --dry-run` previews retention by newest
+  saved sessions.
+- `td session prune --keep-last 100 --yes` deletes entries outside the newest
+  retained set.
+- Combining `--older-than` and `--keep-last` is conservative: a session must
+  match both criteria before deletion.
+- `td session prune` is metadata-driven and does not remove orphan log-only
+  files in this initial implementation.
+
+Required validation:
+
+- Dry-run prints metadata and log paths, planned byte count, selected session
+  count, skipped metadata count, and `failed deletions: 0`.
+- Dry-run does not delete metadata or log files.
+- Actual deletion requires `--yes`; without it, prune refuses to delete.
+- Malformed or unreadable metadata is skipped and left in place.
+- Metadata whose recorded `metadata_path` or `log_path` leaves the session log
+  directory is skipped.
+- Missing log files do not crash cleanup.
+- `failed`, `aborted`, and `completed_nonzero` metadata are eligible when they
+  match the retention criteria.
+- Windows auto remains no-log check confirms
+  `session.log.backend=auto` does not select ConPTY.
+
+Release commands:
+
+```powershell
+.\target\release\td.exe session prune --older-than 30d --dry-run
+.\target\release\td.exe session prune --keep-last 100 --dry-run
+.\target\release\td.exe session prune --older-than 30d --yes
+```
+
 ## Legacy v0.1 release checklist
 
 Use this checklist before tagging `v0.1.0`. Do not push the production tag or
@@ -278,6 +322,8 @@ promote ConPTY to `auto`.
 - `td recent --json` does not expose excessive credential or invocation data.
 - `td session show <session_id>` does not dump the full terminal log unless
   `--tail N` is explicitly provided.
+- `td session prune` dry-run is used before deleting sensitive transcript logs,
+  and actual prune requires `--yes`.
 - FTP requires `allow_insecure_transfers=true` and `--i-know-its-insecure`.
 - Critical confirmation works for connect, exec, run, transfer, config apply,
   and TUI SSH sessions.

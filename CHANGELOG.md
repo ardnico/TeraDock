@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic versioning.
 
+## [1.1.1] - Unreleased
+
+### Added
+
+- `td session prune` for metadata-driven session log retention cleanup.
+- `td session prune --older-than <age>` with age values such as `30d`.
+- `td session prune --keep-last <count>` to retain the newest saved sessions.
+- `td session prune --dry-run` to preview selected metadata/log paths and planned bytes without deleting files.
+- `td session prune --yes` as the explicit confirmation required for deletion.
+
+### Security
+
+- Session log cleanup validates metadata and log paths before deletion and skips unreadable, malformed, traversal, or out-of-directory metadata.
+- Session logs remain sensitive local transcript files; users should dry-run and prune old logs regularly.
+- Windows `auto` remains unchanged and does not select ConPTY by default.
+
 ## [1.1.0] - Unreleased
 
 ### Added
