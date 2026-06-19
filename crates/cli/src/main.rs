@@ -372,6 +372,9 @@ struct SessionPruneArgs {
     /// Confirm deletion without an interactive prompt
     #[arg(long)]
     yes: bool,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2453,25 +2456,60 @@ fn handle_session_prune(conn: &Connection, args: SessionPruneArgs) -> Result<()>
     };
     let plan = session_log::plan_session_prune(conn, criteria)?;
     if args.dry_run {
-        print_session_prune_plan(&plan, true);
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&session_prune_plan_json(&plan, &args, true, false))?
+            );
+        } else {
+            print_session_prune_plan(&plan, true);
+        }
         return Ok(());
     }
     if plan.candidates.is_empty() {
-        print_session_prune_plan(&plan, false);
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&session_prune_plan_json(&plan, &args, false, false))?
+            );
+        } else {
+            print_session_prune_plan(&plan, false);
+        }
         return Ok(());
     }
     if !args.yes {
-        print_session_prune_plan(&plan, false);
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&session_prune_plan_json(&plan, &args, false, true))?
+            );
+        } else {
+            print_session_prune_plan(&plan, false);
+        }
         return Err(anyhow!(
             "refusing to delete session logs without --yes; rerun with --dry-run to preview or --yes to delete"
         ));
+    }
+
+    let report = session_log::apply_session_prune_plan(&plan);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&session_prune_report_json(&plan, &args, &report))?
+        );
+        if !report.failures.is_empty() {
+            return Err(anyhow!(
+                "session prune completed with {} deletion failures",
+                report.failed_deletions
+            ));
+        }
+        return Ok(());
     }
 
     println!("Session prune");
     println!("log directory: {}", plan.log_dir.display());
     println!("sessions to delete: {}", plan.candidates.len());
     println!("planned size: {} bytes", plan.planned_size_bytes);
-    let report = session_log::apply_session_prune_plan(&plan);
     println!("sessions deleted: {}", report.sessions_deleted);
     println!("failed deletions: {}", report.failed_deletions);
     println!("skipped metadata: {}", plan.skipped.len());
@@ -2497,6 +2535,118 @@ fn handle_session_prune(conn: &Connection, args: SessionPruneArgs) -> Result<()>
         ));
     }
     Ok(())
+}
+
+fn session_prune_plan_json(
+    plan: &session_log::SessionPrunePlan,
+    args: &SessionPruneArgs,
+    dry_run: bool,
+    requires_confirmation: bool,
+) -> serde_json::Value {
+    let sessions = plan
+        .candidates
+        .iter()
+        .map(|candidate| session_prune_candidate_json(candidate, "would_delete"))
+        .collect::<Vec<_>>();
+    let mut payload = serde_json::json!({
+        "dry_run": dry_run,
+        "criteria": session_prune_criteria_json(args),
+        "selected_sessions": plan.candidates.len(),
+        "deleted_sessions": 0,
+        "planned_bytes": plan.planned_size_bytes,
+        "skipped_metadata": plan.skipped.len(),
+        "failed_deletions": 0,
+        "sessions": sessions,
+    });
+    if requires_confirmation {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "requires_confirmation".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+    payload
+}
+
+fn session_prune_report_json(
+    plan: &session_log::SessionPrunePlan,
+    args: &SessionPruneArgs,
+    report: &session_log::SessionPruneApplyReport,
+) -> serde_json::Value {
+    let sessions = plan
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let action = if report
+                .failures
+                .iter()
+                .any(|failure| failure.session_id == candidate.metadata.session_id)
+            {
+                "failed"
+            } else {
+                "deleted"
+            };
+            serde_json::json!({
+                "session_id": candidate.metadata.session_id,
+                "action": action,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut payload = serde_json::json!({
+        "dry_run": false,
+        "criteria": session_prune_criteria_json(args),
+        "selected_sessions": plan.candidates.len(),
+        "deleted_sessions": report.sessions_deleted,
+        "planned_bytes": report.planned_size_bytes,
+        "skipped_metadata": plan.skipped.len(),
+        "failed_deletions": report.failed_deletions,
+        "sessions": sessions,
+    });
+    if !report.failures.is_empty() {
+        let failures = report
+            .failures
+            .iter()
+            .map(|failure| {
+                serde_json::json!({
+                    "session_id": failure.session_id,
+                    "operation": failure.operation,
+                    "path": failure.path.display().to_string(),
+                    "error": failure.error,
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("failures".to_string(), serde_json::Value::Array(failures));
+        }
+    }
+    payload
+}
+
+fn session_prune_criteria_json(args: &SessionPruneArgs) -> serde_json::Value {
+    serde_json::json!({
+        "older_than": args.older_than.as_deref(),
+        "keep_last": args.keep_last,
+    })
+}
+
+fn session_prune_candidate_json(
+    candidate: &session_log::SessionPruneCandidate,
+    action: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": candidate.metadata.session_id,
+        "started_at": format_unix_ms_utc(candidate.metadata.started_at),
+        "status": candidate.metadata.status,
+        "backend": candidate.metadata.backend,
+        "metadata_path": candidate.metadata_path.display().to_string(),
+        "log_path": candidate
+            .log_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "planned_bytes": candidate.planned_size_bytes,
+        "action": action,
+    })
 }
 
 fn print_session_prune_plan(plan: &session_log::SessionPrunePlan, dry_run: bool) {
@@ -4380,12 +4530,21 @@ mod tests {
                 assert_eq!(args.keep_last, Some(100));
                 assert!(args.dry_run);
                 assert!(!args.yes);
+                assert!(!args.json);
             }
             _ => panic!("expected session prune command"),
         }
 
-        let cli = Cli::try_parse_from(["td", "session", "prune", "--keep-last", "100", "--yes"])
-            .expect("parses session prune --yes");
+        let cli = Cli::try_parse_from([
+            "td",
+            "session",
+            "prune",
+            "--keep-last",
+            "100",
+            "--yes",
+            "--json",
+        ])
+        .expect("parses session prune --yes --json");
         match cli.command {
             Some(Commands::Session {
                 command: SessionCommands::Prune(args),
@@ -4394,6 +4553,7 @@ mod tests {
                 assert_eq!(args.keep_last, Some(100));
                 assert!(!args.dry_run);
                 assert!(args.yes);
+                assert!(args.json);
             }
             _ => panic!("expected session prune command"),
         }
@@ -4827,6 +4987,154 @@ mod tests {
             default_resolved_config_value(&conn, session_log::SESSION_LOG_BACKEND_KEY).unwrap(),
             Some("auto".to_string())
         );
+    }
+
+    #[test]
+    fn session_prune_dry_run_json_summary_uses_safe_fields() {
+        let candidate = test_prune_candidate("sl_old", 1000, "completed", 4096);
+        let plan = session_log::SessionPrunePlan {
+            log_dir: PathBuf::from("session-logs"),
+            candidates: vec![candidate],
+            skipped: vec![session_log::SessionPruneSkipped {
+                metadata_path: PathBuf::from("session-logs").join("sl_bad.json"),
+                reason: "malformed metadata".to_string(),
+            }],
+            planned_size_bytes: 4096,
+        };
+        let args = SessionPruneArgs {
+            older_than: Some("30d".to_string()),
+            keep_last: None,
+            dry_run: true,
+            yes: false,
+            json: true,
+        };
+
+        let payload = session_prune_plan_json(&plan, &args, true, false);
+
+        assert_eq!(payload["dry_run"], true);
+        assert_eq!(payload["criteria"]["older_than"], "30d");
+        assert!(payload["criteria"]["keep_last"].is_null());
+        assert_eq!(payload["selected_sessions"], 1);
+        assert_eq!(payload["deleted_sessions"], 0);
+        assert_eq!(payload["planned_bytes"], 4096);
+        assert_eq!(payload["skipped_metadata"], 1);
+        assert_eq!(payload["failed_deletions"], 0);
+        assert_eq!(payload["sessions"][0]["session_id"], "sl_old");
+        assert_eq!(payload["sessions"][0]["started_at"], "1970-01-01T00:00:01Z");
+        assert_eq!(payload["sessions"][0]["status"], "completed");
+        assert_eq!(payload["sessions"][0]["backend"], "conpty");
+        assert_eq!(payload["sessions"][0]["planned_bytes"], 4096);
+        assert_eq!(payload["sessions"][0]["action"], "would_delete");
+
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains("terminal body with password"));
+        assert!(!serialized.contains("auth_args"));
+        assert!(!serialized.contains("command"));
+        assert!(!serialized.contains("private_key_path"));
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("token"));
+    }
+
+    #[test]
+    fn session_prune_actual_json_summary_includes_failure_details() {
+        let deleted = test_prune_candidate("sl_deleted", 1000, "completed", 100);
+        let failed = test_prune_candidate("sl_failed", 2000, "completed_nonzero", 200);
+        let failure_path = failed.log_path.clone().unwrap();
+        let plan = session_log::SessionPrunePlan {
+            log_dir: PathBuf::from("session-logs"),
+            candidates: vec![deleted, failed],
+            skipped: Vec::new(),
+            planned_size_bytes: 300,
+        };
+        let args = SessionPruneArgs {
+            older_than: None,
+            keep_last: Some(100),
+            dry_run: false,
+            yes: true,
+            json: true,
+        };
+        let report = session_log::SessionPruneApplyReport {
+            sessions_deleted: 1,
+            planned_size_bytes: 300,
+            failed_deletions: 1,
+            failures: vec![session_log::SessionPruneFailure {
+                session_id: "sl_failed".to_string(),
+                path: failure_path.clone(),
+                operation: "remove_log".to_string(),
+                error: "access denied".to_string(),
+            }],
+        };
+
+        let payload = session_prune_report_json(&plan, &args, &report);
+
+        assert_eq!(payload["dry_run"], false);
+        assert!(payload["criteria"]["older_than"].is_null());
+        assert_eq!(payload["criteria"]["keep_last"], 100);
+        assert_eq!(payload["selected_sessions"], 2);
+        assert_eq!(payload["deleted_sessions"], 1);
+        assert_eq!(payload["planned_bytes"], 300);
+        assert_eq!(payload["skipped_metadata"], 0);
+        assert_eq!(payload["failed_deletions"], 1);
+        assert_eq!(payload["sessions"][0]["session_id"], "sl_deleted");
+        assert_eq!(payload["sessions"][0]["action"], "deleted");
+        assert_eq!(payload["sessions"][1]["session_id"], "sl_failed");
+        assert_eq!(payload["sessions"][1]["action"], "failed");
+        assert_eq!(payload["failures"][0]["session_id"], "sl_failed");
+        assert_eq!(payload["failures"][0]["operation"], "remove_log");
+        assert_eq!(
+            payload["failures"][0]["path"],
+            failure_path.display().to_string()
+        );
+        assert_eq!(payload["failures"][0]["error"], "access denied");
+    }
+
+    fn test_prune_candidate(
+        session_id: &str,
+        started_at: i64,
+        status: &str,
+        planned_size_bytes: u64,
+    ) -> session_log::SessionPruneCandidate {
+        let metadata_path = PathBuf::from("session-logs").join(format!("{session_id}.json"));
+        let log_path = PathBuf::from("session-logs").join(format!("{session_id}.log"));
+        session_log::SessionPruneCandidate {
+            metadata: session_log::SessionLogMetadata {
+                session_id: session_id.to_string(),
+                profile_id: "p_test".to_string(),
+                user: "alice".to_string(),
+                host: "example.com".to_string(),
+                port: 22,
+                started_at,
+                ended_at: started_at + 1000,
+                duration_ms: 1000,
+                exit_code: Some(0),
+                backend: session_log::SESSION_LOG_BACKEND_CONPTY.to_string(),
+                log_path: Some(log_path.clone()),
+                metadata_path: metadata_path.clone(),
+                status: status.to_string(),
+                reason: None,
+                failure_phase: None,
+                failure_reason: None,
+                content_capture: Some(
+                    session_log::SESSION_LOG_CONTENT_CAPTURE_TERMINAL_IO.to_string(),
+                ),
+                content_capture_reliable: Some(true),
+                backend_status: Some(
+                    session_log::SESSION_LOG_BACKEND_STATUS_EXPLICIT_READY.to_string(),
+                ),
+                backend_warning: Some(
+                    session_log::SESSION_LOG_BACKEND_WARNING_CONPTY_EXPLICIT_NOT_AUTO.to_string(),
+                ),
+                content_capture_status: None,
+                content_capture_warning: None,
+            },
+            metadata_path,
+            log_path: Some(log_path),
+            log_exists: true,
+            metadata_size_bytes: planned_size_bytes,
+            log_size_bytes: 0,
+            planned_size_bytes,
+        }
     }
 
     #[test]

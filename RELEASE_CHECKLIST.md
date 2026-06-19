@@ -89,6 +89,12 @@ Release scope:
   saved sessions.
 - `td session prune --keep-last 100 --yes` deletes entries outside the newest
   retained set.
+- `td session prune --older-than 30d --dry-run --json` and
+  `td session prune --keep-last 100 --dry-run --json` emit machine-readable
+  cleanup summaries for automation.
+- `td session prune --older-than 30d --yes --json` and
+  `td session prune --keep-last 100 --yes --json` emit confirmed deletion
+  summaries with per-session actions.
 - Combining `--older-than` and `--keep-last` is conservative: a session must
   match both criteria before deletion.
 - `td session prune` is metadata-driven and does not remove orphan log-only
@@ -98,6 +104,15 @@ Required validation:
 
 - Dry-run prints metadata and log paths, planned byte count, selected session
   count, skipped metadata count, and `failed deletions: 0`.
+- Dry-run JSON includes criteria, selected session count, deleted session count
+  `0`, planned bytes, skipped metadata count, failed deletion count `0`, and
+  `would_delete` actions.
+- Confirmed deletion JSON includes criteria, selected/deleted counts, planned
+  bytes, skipped metadata count, failed deletion count, per-session `deleted`
+  or `failed` actions, and failure details when deletion fails.
+- JSON output does not include terminal transcript bodies, full session
+  metadata, SSH auth arguments, full SSH command strings, private key paths,
+  passwords, tokens, or secrets.
 - Dry-run does not delete metadata or log files.
 - Actual deletion requires `--yes`; without it, prune refuses to delete.
 - Malformed or unreadable metadata is skipped and left in place.
@@ -113,8 +128,11 @@ Release commands:
 
 ```powershell
 .\target\release\td.exe session prune --older-than 30d --dry-run
+.\target\release\td.exe session prune --older-than 30d --dry-run --json
 .\target\release\td.exe session prune --keep-last 100 --dry-run
+.\target\release\td.exe session prune --keep-last 100 --dry-run --json
 .\target\release\td.exe session prune --older-than 30d --yes
+.\target\release\td.exe session prune --older-than 30d --yes --json
 ```
 
 ## Legacy v0.1 release checklist

@@ -83,6 +83,7 @@ td config set session.log.enabled true
 td session list
 td session path <session_id>
 td session prune --older-than 30d --dry-run
+td session prune --older-than 30d --dry-run --json
 td export -o teradock-export.json
 td import --conflict rename teradock-export.json
 ```
@@ -129,6 +130,7 @@ td session list
 td session show <session_id>
 td session path <session_id>
 td session prune --older-than 30d --dry-run
+td session prune --older-than 30d --dry-run --json
 td session prune --older-than 30d --yes
 td session prune --keep-last 100 --dry-run
 td session prune --keep-last 100 --yes
@@ -184,7 +186,7 @@ td ui
 
 The TUI `s` path uses ConPTY only when those saved settings are explicit and the selected profile is SSH. `td connect <profile_id> --log-backend conpty` can request the same backend for one CLI SSH connect. `powershell-transcript` is available only when explicitly configured and is marked best-effort/degraded because it may capture only PowerShell host transcript metadata, not SSH-side input/output. `td session conpty-test <profile_id>` remains available as a focused Windows ConPTY smoke command. ConPTY uses `portable-pty`; manual smoke has shown SSH login, visible remote output, saved log output, metadata, `session list/show/path` compatibility, TUI `s` logging with Japanese output, single-Ctrl-C remote interrupt, double-Ctrl-C emergency abort, bad-host failure metadata, and auth-failure metadata, so the explicit backend position is `explicit_ready`. It is still degraded and is not selected by `auto` until resize, large-output, long-running, cleanup, and broader Windows terminal evidence is complete. Terminal output shown during a captured session may include passwords, tokens, or secrets and can be written to the log file. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens. Saved settings affect SSH sessions started after the save.
 
-Session logs are sensitive local files and can grow over time. Use `td session prune --older-than 30d --dry-run` or `td session prune --keep-last 100 --dry-run` to preview cleanup, then rerun with `--yes` to delete the selected metadata and matching log files. `td session prune` never deletes by default without an explicit pruning criterion and confirmation; orphan log-only files are not pruned by this initial cleanup command.
+Session logs are sensitive local files and can grow over time. Use `td session prune --older-than 30d --dry-run` or `td session prune --keep-last 100 --dry-run` to preview cleanup, then rerun with `--yes` to delete the selected metadata and matching log files. Add `--json` to dry-run or confirmed prune commands when automation needs a machine-readable summary with criteria, counts, planned bytes, per-session actions, and deletion failure details. The JSON summary does not include terminal transcript bodies or full session metadata. `td session prune` never deletes by default without an explicit pruning criterion and confirmation; orphan log-only files are not pruned by this initial cleanup command.
 
 ## Safety Model
 
@@ -196,7 +198,7 @@ FTP transfer is treated as insecure and requires explicit opt-in. Prefer SSH-bas
 
 Interactive session logging is a separate terminal transcript feature, not `op_logs`. It is disabled by default because the transcript can capture any sensitive text displayed in the terminal. Session log metadata excludes SSH auth args, full command strings, private key paths, passwords, secrets, and tokens, but displayed terminal output is not masked.
 
-Prune old transcript logs periodically with `td session prune --older-than 30d --dry-run` before deleting with `--yes`. The prune command is metadata-driven, validates paths before deleting, and leaves Windows `auto` selection unchanged.
+Prune old transcript logs periodically with `td session prune --older-than 30d --dry-run` before deleting with `--yes`. Use `--json` for automation summaries without terminal transcript bodies. The prune command is metadata-driven, validates paths before deleting, and leaves Windows `auto` selection unchanged.
 
 ## Import And Export
 

@@ -13,10 +13,12 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 - `td session prune --keep-last <count>` to retain the newest saved sessions.
 - `td session prune --dry-run` to preview selected metadata/log paths and planned bytes without deleting files.
 - `td session prune --yes` as the explicit confirmation required for deletion.
+- `td session prune --json` for machine-readable dry-run and confirmed deletion summaries.
 
 ### Security
 
 - Session log cleanup validates metadata and log paths before deletion and skips unreadable, malformed, traversal, or out-of-directory metadata.
+- `td session prune --json` reports summary counts and safe candidate/action fields without terminal transcript bodies or full session metadata.
 - Session logs remain sensitive local transcript files; users should dry-run and prune old logs regularly.
 - Windows `auto` remains unchanged and does not select ConPTY by default.
 
