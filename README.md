@@ -222,6 +222,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-c
 - Request features with the GitHub feature request template and check [Roadmap](ROADMAP.md) for the current 1.0.x and 1.1 scope.
 - Security-sensitive issues should not include public details. See [Security Policy](SECURITY.md).
 - Contributions should follow [Contributing](CONTRIBUTING.md).
+- AI-assisted development rules are documented in [AGENTS.md](AGENTS.md) and [Codex Workflow](docs/internal/codex-workflow.md).
 
 ## Known Limitations
 
@@ -247,6 +248,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-c
 - [Security](docs/security.md)
 - [Security Policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
+- [AI Agent Rules](AGENTS.md)
 - [Roadmap](ROADMAP.md)
 - [Post-Release Audit 1.0.3](docs/post-release-audit-1.0.3.md)
 - [Release Artifact Validation](docs/release-artifact-validation.md)
@@ -257,3 +259,4 @@ Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-c
 - [Internal CommandSet Execution Boundary](docs/internal/commandset-execution-boundary.md)
 - [Internal SSH Invocation Boundary](docs/internal/ssh-invocation-boundary.md)
 - [Internal Session Logging Design](docs/internal/session-logging-design.md)
+- [Internal Codex Workflow](docs/internal/codex-workflow.md)
