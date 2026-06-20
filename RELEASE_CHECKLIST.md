@@ -95,6 +95,8 @@ Release scope:
 - `td session prune --older-than 30d --yes --json` and
   `td session prune --keep-last 100 --yes --json` emit confirmed deletion
   summaries with per-session actions.
+- `td session stats` and `td session stats --json` report aggregate saved
+  session log usage without deleting files.
 - Combining `--older-than` and `--keep-last` is conservative: a session must
   match both criteria before deletion.
 - `td session prune` is metadata-driven and does not remove orphan log-only
@@ -113,6 +115,15 @@ Required validation:
 - JSON output does not include terminal transcript bodies, full session
   metadata, SSH auth arguments, full SSH command strings, private key paths,
   passwords, tokens, or secrets.
+- Stats human output includes log directory, total sessions, total log bytes,
+  skipped metadata count, backend/status counts, and oldest/newest session ids.
+- Stats JSON includes `log_directory`, `total_sessions`, `total_log_bytes`,
+  `skipped_metadata`, `by_backend`, `by_status`, `oldest_session`, and
+  `newest_session`.
+- Stats output does not include terminal transcript bodies, full session
+  metadata, malformed metadata contents, SSH auth arguments, full SSH command
+  strings, private key paths, passwords, tokens, or secrets.
+- Stats is read-only and does not delete or modify metadata/log files.
 - Dry-run does not delete metadata or log files.
 - Actual deletion requires `--yes`; without it, prune refuses to delete.
 - Malformed or unreadable metadata is skipped and left in place.
@@ -131,6 +142,8 @@ Release commands:
 .\target\release\td.exe session prune --older-than 30d --dry-run --json
 .\target\release\td.exe session prune --keep-last 100 --dry-run
 .\target\release\td.exe session prune --keep-last 100 --dry-run --json
+.\target\release\td.exe session stats
+.\target\release\td.exe session stats --json
 .\target\release\td.exe session prune --older-than 30d --yes
 .\target\release\td.exe session prune --older-than 30d --yes --json
 ```

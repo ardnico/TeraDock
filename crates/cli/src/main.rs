@@ -5,6 +5,7 @@ use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use rusqlite::Connection;
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -310,6 +311,8 @@ enum SessionCommands {
     ConptyTest(SessionConptyTestArgs),
     /// List saved interactive SSH session logs
     List(SessionListArgs),
+    /// Show aggregate saved session log statistics
+    Stats(SessionStatsArgs),
     /// Show metadata for a saved interactive SSH session log
     Show(SessionShowArgs),
     /// Print the terminal log path for a saved session
@@ -341,6 +344,13 @@ struct SessionListArgs {
     /// Maximum number of sessions to show
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionStatsArgs {
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -2059,6 +2069,10 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
             let conn = db::init_connection()?;
             handle_session_list(&conn, args)
         }
+        SessionCommands::Stats(args) => {
+            let conn = db::init_connection()?;
+            handle_session_stats(&conn, args)
+        }
         SessionCommands::Show(args) => {
             let conn = db::init_connection()?;
             handle_session_show(&conn, args)
@@ -2383,6 +2397,111 @@ fn handle_session_list(conn: &Connection, args: SessionListArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn handle_session_stats(conn: &Connection, args: SessionStatsArgs) -> Result<()> {
+    let stats = session_log::session_log_stats(conn)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&session_stats_json(&stats))?
+        );
+        return Ok(());
+    }
+    print_session_stats(&stats);
+    Ok(())
+}
+
+fn session_stats_json(stats: &session_log::SessionLogStats) -> serde_json::Value {
+    serde_json::json!({
+        "log_directory": stats.log_dir.display().to_string(),
+        "total_sessions": stats.total_sessions,
+        "total_log_bytes": stats.total_log_bytes,
+        "skipped_metadata": stats.skipped_metadata,
+        "by_backend": &stats.by_backend,
+        "by_status": &stats.by_status,
+        "oldest_session": session_stats_session_json(stats.oldest_session.as_ref()),
+        "newest_session": session_stats_session_json(stats.newest_session.as_ref()),
+    })
+}
+
+fn session_stats_session_json(
+    session: Option<&session_log::SessionLogStatsSession>,
+) -> serde_json::Value {
+    match session {
+        Some(session) => serde_json::json!({
+            "session_id": &session.session_id,
+            "started_at": format_unix_ms_utc(session.started_at),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn print_session_stats(stats: &session_log::SessionLogStats) {
+    println!("Session log stats");
+    println!();
+    println!("log directory: {}", stats.log_dir.display());
+    println!("total sessions: {}", stats.total_sessions);
+    println!("total log bytes: {}", stats.total_log_bytes);
+    println!("skipped metadata: {}", stats.skipped_metadata);
+    println!();
+    println!("by backend:");
+    print_ordered_stats_counts(
+        &stats.by_backend,
+        &[
+            session_log::SESSION_LOG_BACKEND_CONPTY,
+            session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT,
+            session_log::SESSION_LOG_BACKEND_SCRIPT,
+            session_log::SESSION_LOG_BACKEND_NO_LOG,
+        ],
+    );
+    println!();
+    println!("by status:");
+    print_ordered_stats_counts(
+        &stats.by_status,
+        &["completed", "completed_nonzero", "failed", "aborted"],
+    );
+    println!();
+    println!(
+        "oldest session: {}",
+        format_stats_session(stats.oldest_session.as_ref())
+    );
+    println!(
+        "newest session: {}",
+        format_stats_session(stats.newest_session.as_ref())
+    );
+}
+
+fn print_ordered_stats_counts(counts: &BTreeMap<String, usize>, preferred_order: &[&str]) {
+    if counts.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    let mut printed = Vec::new();
+    for key in preferred_order {
+        if let Some(count) = counts.get(*key) {
+            println!("  {key}: {count}");
+            printed.push(*key);
+        }
+    }
+    for (key, count) in counts {
+        if printed.contains(&key.as_str()) {
+            continue;
+        }
+        println!("  {key}: {count}");
+    }
+}
+
+fn format_stats_session(session: Option<&session_log::SessionLogStatsSession>) -> String {
+    session
+        .map(|session| {
+            format!(
+                "{} {}",
+                session.session_id,
+                format_unix_ms_utc(session.started_at)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn handle_session_show(conn: &Connection, args: SessionShowArgs) -> Result<()> {
@@ -4479,6 +4598,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_session_stats_command() {
+        let cli = Cli::try_parse_from(["td", "session", "stats", "--json"]).expect("parses stats");
+
+        match cli.command {
+            Some(Commands::Session {
+                command: SessionCommands::Stats(args),
+            }) => {
+                assert!(args.json);
+            }
+            _ => panic!("expected session stats command"),
+        }
+    }
+
+    #[test]
     fn parses_session_doctor_command() {
         let cli = Cli::try_parse_from(["td", "session", "doctor", "--json"])
             .expect("parses session doctor");
@@ -4987,6 +5120,65 @@ mod tests {
             default_resolved_config_value(&conn, session_log::SESSION_LOG_BACKEND_KEY).unwrap(),
             Some("auto".to_string())
         );
+    }
+
+    #[test]
+    fn session_stats_json_summary_uses_safe_fields() {
+        let stats = session_log::SessionLogStats {
+            log_dir: PathBuf::from("session-logs"),
+            total_sessions: 2,
+            total_log_bytes: 1234,
+            skipped_metadata: 1,
+            by_backend: BTreeMap::from([
+                (session_log::SESSION_LOG_BACKEND_CONPTY.to_string(), 1),
+                (
+                    session_log::SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT.to_string(),
+                    1,
+                ),
+            ]),
+            by_status: BTreeMap::from([
+                ("completed".to_string(), 1),
+                ("completed_nonzero".to_string(), 1),
+            ]),
+            oldest_session: Some(session_log::SessionLogStatsSession {
+                session_id: "sl_old".to_string(),
+                started_at: 1000,
+            }),
+            newest_session: Some(session_log::SessionLogStatsSession {
+                session_id: "sl_new".to_string(),
+                started_at: 2000,
+            }),
+        };
+
+        let payload = session_stats_json(&stats);
+
+        assert_eq!(payload["log_directory"], "session-logs");
+        assert_eq!(payload["total_sessions"], 2);
+        assert_eq!(payload["total_log_bytes"], 1234);
+        assert_eq!(payload["skipped_metadata"], 1);
+        assert_eq!(payload["by_backend"]["conpty"], 1);
+        assert_eq!(payload["by_backend"]["powershell-transcript"], 1);
+        assert_eq!(payload["by_status"]["completed"], 1);
+        assert_eq!(payload["by_status"]["completed_nonzero"], 1);
+        assert_eq!(payload["oldest_session"]["session_id"], "sl_old");
+        assert_eq!(
+            payload["oldest_session"]["started_at"],
+            "1970-01-01T00:00:01Z"
+        );
+        assert_eq!(payload["newest_session"]["session_id"], "sl_new");
+        assert_eq!(
+            payload["newest_session"]["started_at"],
+            "1970-01-01T00:00:02Z"
+        );
+
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains("terminal body with password"));
+        assert!(!serialized.contains("auth_args"));
+        assert!(!serialized.contains("command"));
+        assert!(!serialized.contains("private_key_path"));
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("token"));
     }
 
     #[test]

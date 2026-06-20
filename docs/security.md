@@ -90,6 +90,8 @@ td session conpty-test <profile_id>
 td connect <profile_id> --log-backend conpty
 td session list
 td session list --json
+td session stats
+td session stats --json
 td session show <session_id>
 td session show <session_id> --tail 50
 td session path <session_id>
@@ -103,9 +105,13 @@ td session prune --keep-last 100 --yes
 td session prune --keep-last 100 --yes --json
 ```
 
-Session logs grow until the operator prunes them. `td session prune` is metadata-driven: it selects saved session metadata and the corresponding log path recorded by that metadata. It does not remove orphan log-only files in the initial implementation. Use `--dry-run` first to print the candidate metadata and log paths plus the planned byte count. Actual deletion requires `--yes`; without it, prune refuses to delete. When `--older-than` and `--keep-last` are combined, TeraDock uses the more conservative intersection, so a session must be both old enough and outside the newest retained set before deletion.
+Session logs grow until the operator prunes them. `td session stats` is a read-only aggregate inspection command. It counts valid saved session metadata, backend/status distribution, terminal-log file sizes, skipped malformed or unsafe metadata, and oldest/newest session ids. Suspicious backend/status labels are grouped as `unknown` instead of being printed directly. It does not read or print terminal transcript bodies, dump full metadata, print malformed metadata contents, reveal SSH auth arguments, full command strings, private key paths, passwords, tokens, or secrets, modify files, or change Windows `auto`/ConPTY behavior.
+
+`td session prune` is metadata-driven: it selects saved session metadata and the corresponding log path recorded by that metadata. It does not remove orphan log-only files in the initial implementation. Use `--dry-run` first to print the candidate metadata and log paths plus the planned byte count. Actual deletion requires `--yes`; without it, prune refuses to delete. When `--older-than` and `--keep-last` are combined, TeraDock uses the more conservative intersection, so a session must be both old enough and outside the newest retained set before deletion.
 
 Use `td session prune --json` for machine-readable cleanup summaries. The JSON output includes prune criteria, selected/deleted counts, planned bytes, skipped metadata count, per-session action status, and deletion failure details when deletion fails. It does not dump terminal transcript bodies, full session metadata, SSH auth arguments, full SSH command strings, private key paths, passwords, tokens, or secrets. Paths in JSON are limited to the same validated metadata/log paths shown by prune dry-run output or validated failure paths from attempted deletion.
+
+Use `td session stats --json` for machine-readable aggregate summaries. The JSON output includes the log directory, total valid session count, total log bytes, skipped metadata count, backend/status counts, and oldest/newest session ids with start timestamps. It does not include terminal transcript bodies, full session metadata, malformed metadata contents, SSH auth arguments, full SSH command strings, private key paths, passwords, tokens, or secrets.
 
 Prune validates paths before deleting. It skips unreadable or malformed metadata, metadata whose recorded paths contain traversal, metadata whose recorded path leaves the session log directory, log paths outside the session log directory, and files whose names do not match the session id. Missing log files do not crash cleanup; the metadata can still be removed when the recorded path is otherwise safe. On Windows, path checks use canonicalized paths so a metadata file cannot cause deletion outside the configured session log directory.
 

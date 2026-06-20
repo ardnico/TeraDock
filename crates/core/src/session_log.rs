@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
@@ -317,6 +318,24 @@ pub struct SessionPruneFailure {
     pub path: PathBuf,
     pub operation: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLogStats {
+    pub log_dir: PathBuf,
+    pub total_sessions: usize,
+    pub total_log_bytes: u64,
+    pub skipped_metadata: usize,
+    pub by_backend: BTreeMap<String, usize>,
+    pub by_status: BTreeMap<String, usize>,
+    pub oldest_session: Option<SessionLogStatsSession>,
+    pub newest_session: Option<SessionLogStatsSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLogStatsSession {
+    pub session_id: String,
+    pub started_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1046,6 +1065,41 @@ pub fn plan_session_prune(
     plan_session_prune_in_dir(&dir, criteria)
 }
 
+pub fn session_log_stats(conn: &Connection) -> Result<SessionLogStats> {
+    let dir = configured_session_log_dir(conn)?;
+    session_log_stats_in_dir(&dir)
+}
+
+pub fn session_log_stats_in_dir(dir: &Path) -> Result<SessionLogStats> {
+    let mut stats = SessionLogStats {
+        log_dir: dir.to_path_buf(),
+        total_sessions: 0,
+        total_log_bytes: 0,
+        skipped_metadata: 0,
+        by_backend: BTreeMap::new(),
+        by_status: BTreeMap::new(),
+        oldest_session: None,
+        newest_session: None,
+    };
+    if !dir.is_dir() {
+        return Ok(stats);
+    }
+
+    let canonical_dir = fs::canonicalize(dir)?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new("json")) {
+            continue;
+        }
+        match scan_prunable_session_metadata(&canonical_dir, path) {
+            Ok(record) => add_session_stats_record(&mut stats, &record),
+            Err(_) => stats.skipped_metadata += 1,
+        }
+    }
+    Ok(stats)
+}
+
 pub fn plan_session_prune_in_dir(
     dir: &Path,
     criteria: SessionPruneCriteria,
@@ -1149,6 +1203,81 @@ struct PrunableSessionRecord {
     log_exists: bool,
     metadata_size_bytes: u64,
     log_size_bytes: u64,
+}
+
+fn add_session_stats_record(stats: &mut SessionLogStats, record: &PrunableSessionRecord) {
+    stats.total_sessions += 1;
+    stats.total_log_bytes += record.log_size_bytes;
+    *stats
+        .by_backend
+        .entry(safe_stats_count_label(&record.metadata.backend))
+        .or_insert(0) += 1;
+    *stats
+        .by_status
+        .entry(safe_stats_count_label(&record.metadata.status))
+        .or_insert(0) += 1;
+
+    let session = SessionLogStatsSession {
+        session_id: record.metadata.session_id.clone(),
+        started_at: record.metadata.started_at,
+    };
+    if stats
+        .oldest_session
+        .as_ref()
+        .is_none_or(|current| stats_session_is_older(&session, current))
+    {
+        stats.oldest_session = Some(session.clone());
+    }
+    if stats
+        .newest_session
+        .as_ref()
+        .is_none_or(|current| stats_session_is_newer(&session, current))
+    {
+        stats.newest_session = Some(session);
+    }
+}
+
+fn safe_stats_count_label(raw: &str) -> String {
+    const FORBIDDEN_LABEL_PARTS: [&str; 6] = [
+        "auth_args",
+        "command",
+        "private_key_path",
+        "password",
+        "secret",
+        "token",
+    ];
+
+    let value = raw.trim();
+    let lower = value.to_ascii_lowercase();
+    let is_safe_shape = !value.is_empty()
+        && value.len() <= 80
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if !is_safe_shape
+        || FORBIDDEN_LABEL_PARTS
+            .iter()
+            .any(|forbidden| lower.contains(forbidden))
+    {
+        return "unknown".to_string();
+    }
+    value.to_string()
+}
+
+fn stats_session_is_older(
+    candidate: &SessionLogStatsSession,
+    current: &SessionLogStatsSession,
+) -> bool {
+    candidate.started_at < current.started_at
+        || (candidate.started_at == current.started_at && candidate.session_id < current.session_id)
+}
+
+fn stats_session_is_newer(
+    candidate: &SessionLogStatsSession,
+    current: &SessionLogStatsSession,
+) -> bool {
+    candidate.started_at > current.started_at
+        || (candidate.started_at == current.started_at && candidate.session_id > current.session_id)
 }
 
 fn scan_prunable_session_metadata(
@@ -3258,6 +3387,153 @@ mod tests {
         assert_eq!(report.planned_size_bytes, plan.planned_size_bytes);
         assert_eq!(report.sessions_deleted, 1);
         assert_eq!(report.failed_deletions, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_empty_directory_reports_zeroes() {
+        let dir = temp_dir("stats-empty");
+
+        let stats = session_log_stats_in_dir(&dir).unwrap();
+
+        assert_eq!(stats.log_dir, dir);
+        assert_eq!(stats.total_sessions, 0);
+        assert_eq!(stats.total_log_bytes, 0);
+        assert_eq!(stats.skipped_metadata, 0);
+        assert!(stats.by_backend.is_empty());
+        assert!(stats.by_status.is_empty());
+        assert_eq!(stats.oldest_session, None);
+        assert_eq!(stats.newest_session, None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_counts_backends_statuses_and_log_bytes() {
+        let dir = temp_dir("stats-counts");
+        let conpty = write_test_session(
+            &dir,
+            "sl_conpty",
+            1_000,
+            "completed",
+            TestLogState::Present("abc"),
+        );
+        let mut script = write_test_session(
+            &dir,
+            "sl_script",
+            2_000,
+            "completed_nonzero",
+            TestLogState::Present("hello"),
+        );
+        script.backend = SESSION_LOG_BACKEND_SCRIPT.to_string();
+        write_metadata(&script).unwrap();
+        let mut transcript =
+            write_test_session(&dir, "sl_transcript", 3_000, "aborted", TestLogState::None);
+        transcript.backend = SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT.to_string();
+        write_metadata(&transcript).unwrap();
+
+        let stats = session_log_stats_in_dir(&dir).unwrap();
+
+        assert_eq!(stats.total_sessions, 3);
+        assert_eq!(stats.total_log_bytes, 8);
+        assert_eq!(
+            stats.by_backend.get(SESSION_LOG_BACKEND_CONPTY).copied(),
+            Some(1)
+        );
+        assert_eq!(
+            stats.by_backend.get(SESSION_LOG_BACKEND_SCRIPT).copied(),
+            Some(1)
+        );
+        assert_eq!(
+            stats
+                .by_backend
+                .get(SESSION_LOG_BACKEND_POWERSHELL_TRANSCRIPT)
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(stats.by_status.get("completed").copied(), Some(1));
+        assert_eq!(stats.by_status.get("completed_nonzero").copied(), Some(1));
+        assert_eq!(stats.by_status.get("aborted").copied(), Some(1));
+        assert_eq!(
+            stats.oldest_session,
+            Some(SessionLogStatsSession {
+                session_id: conpty.session_id,
+                started_at: 1_000,
+            })
+        );
+        assert_eq!(
+            stats.newest_session,
+            Some(SessionLogStatsSession {
+                session_id: transcript.session_id,
+                started_at: 3_000,
+            })
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_skips_malformed_metadata_without_outputting_it() {
+        let dir = temp_dir("stats-malformed");
+        write_test_session(
+            &dir,
+            "sl_good",
+            1_000,
+            "completed",
+            TestLogState::Present("good"),
+        );
+        fs::write(
+            dir.join("sl_bad.json"),
+            "{not-json with password token private_key_path}",
+        )
+        .unwrap();
+
+        let stats = session_log_stats_in_dir(&dir).unwrap();
+
+        assert_eq!(stats.total_sessions, 1);
+        assert_eq!(stats.total_log_bytes, 4);
+        assert_eq!(stats.skipped_metadata, 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_treats_missing_log_file_as_zero_bytes() {
+        let dir = temp_dir("stats-missing-log");
+        write_test_session(&dir, "sl_missing", 1_000, "failed", TestLogState::Missing);
+
+        let stats = session_log_stats_in_dir(&dir).unwrap();
+
+        assert_eq!(stats.total_sessions, 1);
+        assert_eq!(stats.total_log_bytes, 0);
+        assert_eq!(stats.skipped_metadata, 0);
+        assert_eq!(stats.by_status.get("failed").copied(), Some(1));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_groups_unsafe_backend_and_status_labels_as_unknown() {
+        let dir = temp_dir("stats-unsafe-labels");
+        let mut metadata = write_test_session(
+            &dir,
+            "sl_unsafe",
+            1_000,
+            "completed",
+            TestLogState::Present("body with password token"),
+        );
+        metadata.backend = "password backend".to_string();
+        metadata.status = "token_status".to_string();
+        write_metadata(&metadata).unwrap();
+
+        let stats = session_log_stats_in_dir(&dir).unwrap();
+
+        assert_eq!(stats.total_sessions, 1);
+        assert_eq!(stats.by_backend.get("unknown").copied(), Some(1));
+        assert_eq!(stats.by_status.get("unknown").copied(), Some(1));
+        assert!(!stats.by_backend.contains_key("password backend"));
+        assert!(!stats.by_status.contains_key("token_status"));
 
         let _ = fs::remove_dir_all(dir);
     }
