@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic versioning.
 
-## [1.1.2] - Unreleased
+## [1.1.2] - 2026-06-20
 
 ### Added
 
@@ -29,7 +29,7 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 - PowerShell Transcript remains degraded and best-effort.
 - Secret masking and terminal replay are not implemented.
 
-## [1.1.1] - Unreleased
+## [1.1.1] - 2026-06-18
 
 ### Added
 
@@ -45,7 +45,7 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 - Session logs remain sensitive local transcript files; users should dry-run and prune old logs regularly.
 - Windows `auto` remains unchanged and does not select ConPTY by default.
 
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-06-18
 
 ### Added
 
