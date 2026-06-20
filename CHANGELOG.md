@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic versioning.
 
+## [1.1.3] - 2026-06-20
+
+### Fixed
+
+- Aligned Cargo workspace/package versions, Cargo.lock workspace package entries, README artifact examples, and release notes to 1.1.3 after the v1.1.2 tag was published before the version metadata fix.
+
+### Release Consistency
+
+- v1.1.3 is a release consistency patch after v1.1.2 and preserves the v1.1.2 session-log operations scope.
+- Windows `auto` remains unchanged and does not select ConPTY by default.
+- TUI/ConPTY behavior, session logging backend selection, prune/stats behavior, and JSON schema are unchanged.
+- Secret masking, terminal replay, and real SSH automated tests are not added.
+
 ## [1.1.2] - 2026-06-20
 
 ### Added

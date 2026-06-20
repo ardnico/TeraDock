@@ -4,7 +4,7 @@ TeraDock is a CLI/TUI tool for managing connection profiles and safely running r
 
 The main workflow is simple: keep connection profiles in one local database, mark risky targets with a danger level, run a CommandSet against one or more SSH profiles, then inspect stdout, stderr, parsed output, and operation logs.
 
-Current stable version: **1.1.2**.
+Current stable version: **1.1.3**.
 
 ## Use Cases
 
@@ -18,12 +18,13 @@ Current stable version: **1.1.2**.
 
 Install from a GitHub Release artifact when available:
 
-- Windows: `td-1.1.2-windows-x86_64-setup.exe`
-- Linux portable archive: `td-1.1.2-linux-x86_64.tar.gz`
+- Windows: `td-1.1.3-windows-x86_64-setup.exe`
+- Linux portable archive: `td-1.1.3-linux-x86_64.tar.gz`
 - Linux packages: `.deb` and `.rpm` release assets
 - Checksums: `SHA256SUMS-linux-x86_64` and `SHA256SUMS-windows-x86_64`
 
-The v1.1.2 release is distributed through GitHub Releases. crates.io publication is not part of this release path.
+The v1.1.3 release is distributed through GitHub Releases. crates.io publication is not part of this release path.
+v1.1.3 is a release consistency patch after v1.1.2 and preserves the v1.1.2 session-log operations scope.
 Before broad use, validate downloaded artifacts with the [release artifact validation guide](docs/release-artifact-validation.md).
 
 To build from source:
@@ -261,6 +262,7 @@ Interactive session logging uses `script` on Linux/macOS. Windows SSH terminal-c
 - [Post-Release Audit 1.0.3](docs/post-release-audit-1.0.3.md)
 - [Release Artifact Validation](docs/release-artifact-validation.md)
 - [Release Checklist](RELEASE_CHECKLIST.md)
+- [Release Notes 1.1.3](RELEASE_NOTES_1.1.3.md)
 - [Release Notes 1.1.2](RELEASE_NOTES_1.1.2.md)
 - [Release Notes 1.1.1](RELEASE_NOTES_1.1.1.md)
 - [Release Notes 1.1.0](RELEASE_NOTES_1.1.0.md)
