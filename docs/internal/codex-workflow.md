@@ -65,7 +65,8 @@ within the requested scope.
    `CHANGELOG.md`, `docs/security.md`, and the relevant `docs/internal/*`
    design or smoke document.
 2. Confirm whether the task is for v1.1 explicit ConPTY, v1.1.1 session prune,
-   packaging, docs, or another clearly named slice.
+   v1.1.2 session-log operations, packaging, docs, or another clearly named
+   slice.
 3. Keep edits inside that slice. Do not move adjacent deferred work into scope.
 4. Add focused tests for code changes and update docs when behavior, commands,
    logging, configuration, or safety expectations change.

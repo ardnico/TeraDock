@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic versioning.
 
+## [1.1.2] - Unreleased
+
+### Added
+
+- `td session prune --json` for machine-readable prune dry-run and deletion summaries.
+- `td session stats` for read-only aggregate saved-session log counts, byte totals, backend/status distribution, skipped metadata count, and oldest/newest session ids.
+- `td session stats --json` for automation-friendly aggregate session-log statistics.
+
+### Security
+
+- JSON output does not include terminal transcript bodies or dump full session metadata.
+- `td session prune --json` reports summary counts and safe candidate/action fields without SSH auth arguments, full command strings, private key paths, passwords, tokens, or secrets.
+- `td session stats --json` reports aggregate counts only; it does not read or print terminal transcript bodies, dump full metadata, or reveal auth arguments, full command strings, private key paths, passwords, tokens, or secrets.
+- Malformed or unsafe metadata is skipped and counted.
+- Session logs remain sensitive local terminal transcripts.
+
+### Unchanged
+
+- Windows `auto` remains unchanged and does not select ConPTY by default.
+- Explicit Windows ConPTY logging remains opt-in.
+- TUI/ConPTY behavior is unchanged.
+- Prune deletion policy is unchanged.
+- PowerShell Transcript remains degraded and best-effort.
+- Secret masking and terminal replay are not implemented.
+
 ## [1.1.1] - Unreleased
 
 ### Added
@@ -13,14 +38,10 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 - `td session prune --keep-last <count>` to retain the newest saved sessions.
 - `td session prune --dry-run` to preview selected metadata/log paths and planned bytes without deleting files.
 - `td session prune --yes` as the explicit confirmation required for deletion.
-- `td session prune --json` for machine-readable dry-run and confirmed deletion summaries.
-- `td session stats` and `td session stats --json` for read-only aggregate saved-session log counts, byte totals, backend/status distribution, skipped metadata count, and oldest/newest session ids.
 
 ### Security
 
 - Session log cleanup validates metadata and log paths before deletion and skips unreadable, malformed, traversal, or out-of-directory metadata.
-- `td session prune --json` reports summary counts and safe candidate/action fields without terminal transcript bodies or full session metadata.
-- `td session stats --json` reports aggregate counts only; it does not read or print terminal transcript bodies, dump full metadata, or reveal auth arguments, full command strings, private key paths, passwords, tokens, or secrets.
 - Session logs remain sensitive local transcript files; users should dry-run and prune old logs regularly.
 - Windows `auto` remains unchanged and does not select ConPTY by default.
 

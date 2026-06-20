@@ -73,39 +73,33 @@ Get-Content <log_path> -Tail 60
 Get-Process td,ssh,pwsh,powershell -ErrorAction SilentlyContinue
 ```
 
-## v1.1.1 Session log retention cleanup
+## v1.1.2 Session-log operations
 
-Use these checks before releasing a v1.1.1 stabilization build that adds
-session log retention cleanup. This scope does not add a new terminal backend,
-does not promote Windows `auto -> conpty`, does not add full terminal replay,
-and does not add secret masking for terminal transcript bodies.
+Use these checks before releasing a v1.1.2 operations build that adds
+machine-readable prune summaries and read-only session-log aggregation. This
+scope does not add a terminal backend, does not promote Windows
+`auto -> conpty`, does not change prune deletion policy, and does not add
+secret masking for terminal transcript bodies.
 
 Release scope:
 
-- `td session prune --older-than 30d --dry-run` previews cleanup candidates.
-- `td session prune --older-than 30d --yes` deletes selected metadata and the
-  matching log file.
-- `td session prune --keep-last 100 --dry-run` previews retention by newest
-  saved sessions.
-- `td session prune --keep-last 100 --yes` deletes entries outside the newest
-  retained set.
 - `td session prune --older-than 30d --dry-run --json` and
   `td session prune --keep-last 100 --dry-run --json` emit machine-readable
   cleanup summaries for automation.
 - `td session prune --older-than 30d --yes --json` and
   `td session prune --keep-last 100 --yes --json` emit confirmed deletion
   summaries with per-session actions.
-- `td session stats` and `td session stats --json` report aggregate saved
-  session log usage without deleting files.
-- Combining `--older-than` and `--keep-last` is conservative: a session must
-  match both criteria before deletion.
-- `td session prune` is metadata-driven and does not remove orphan log-only
-  files in this initial implementation.
+- `td session stats` reports aggregate saved session log usage without deleting
+  files.
+- `td session stats --json` reports aggregate saved session log usage in a
+  machine-readable shape.
+- `td session stats` is read-only and does not delete, modify, or rewrite
+  metadata or log files.
+- `td session prune` remains metadata-driven and does not remove orphan
+  log-only files in this release.
 
 Required validation:
 
-- Dry-run prints metadata and log paths, planned byte count, selected session
-  count, skipped metadata count, and `failed deletions: 0`.
 - Dry-run JSON includes criteria, selected session count, deleted session count
   `0`, planned bytes, skipped metadata count, failed deletion count `0`, and
   `would_delete` actions.
@@ -124,6 +118,46 @@ Required validation:
   metadata, malformed metadata contents, SSH auth arguments, full SSH command
   strings, private key paths, passwords, tokens, or secrets.
 - Stats is read-only and does not delete or modify metadata/log files.
+- Malformed or unsafe metadata is skipped and counted.
+- Windows auto remains no-log check confirms
+  `session.log.backend=auto` does not select ConPTY.
+
+Release commands:
+
+```powershell
+.\target\release\td.exe session prune --older-than 30d --dry-run --json
+.\target\release\td.exe session prune --keep-last 100 --dry-run --json
+.\target\release\td.exe session stats
+.\target\release\td.exe session stats --json
+.\target\release\td.exe session prune --older-than 30d --yes --json
+.\target\release\td.exe session prune --keep-last 100 --yes --json
+```
+
+## v1.1.1 Session log retention cleanup
+
+Use these checks before releasing a v1.1.1 stabilization build that adds
+session log retention cleanup. This scope does not add a new terminal backend,
+does not promote Windows `auto -> conpty`, does not add full terminal replay,
+and does not add secret masking for terminal transcript bodies.
+
+Release scope:
+
+- `td session prune --older-than 30d --dry-run` previews cleanup candidates.
+- `td session prune --older-than 30d --yes` deletes selected metadata and the
+  matching log file.
+- `td session prune --keep-last 100 --dry-run` previews retention by newest
+  saved sessions.
+- `td session prune --keep-last 100 --yes` deletes entries outside the newest
+  retained set.
+- Combining `--older-than` and `--keep-last` is conservative: a session must
+  match both criteria before deletion.
+- `td session prune` is metadata-driven and does not remove orphan log-only
+  files in this initial implementation.
+
+Required validation:
+
+- Dry-run prints metadata and log paths, planned byte count, selected session
+  count, skipped metadata count, and `failed deletions: 0`.
 - Dry-run does not delete metadata or log files.
 - Actual deletion requires `--yes`; without it, prune refuses to delete.
 - Malformed or unreadable metadata is skipped and left in place.
@@ -139,13 +173,8 @@ Release commands:
 
 ```powershell
 .\target\release\td.exe session prune --older-than 30d --dry-run
-.\target\release\td.exe session prune --older-than 30d --dry-run --json
 .\target\release\td.exe session prune --keep-last 100 --dry-run
-.\target\release\td.exe session prune --keep-last 100 --dry-run --json
-.\target\release\td.exe session stats
-.\target\release\td.exe session stats --json
 .\target\release\td.exe session prune --older-than 30d --yes
-.\target\release\td.exe session prune --older-than 30d --yes --json
 ```
 
 ## Legacy v0.1 release checklist
